@@ -49,16 +49,16 @@ export default function UploadPage() {
   };
 
   return (
-    <div className="p-5 md:p-8 flex flex-col gap-6 max-w-2xl mx-auto">
+    <div className="p-5 md:p-8 flex flex-col gap-6 max-w-2xl mx-auto animate-fade-in">
       {/* Header */}
       <div>
-        <h1 className="text-[#FAFAF9] text-xl md:text-2xl font-semibold">上传财务报表</h1>
-        <p className="text-[#6B6B70] text-sm mt-1">支持PDF、Excel格式的财务报表文件</p>
+        <h1 className="text-[var(--text-primary)] text-xl md:text-2xl font-bold tracking-tight">上传财务报表</h1>
+        <p className="text-[var(--text-secondary)] text-sm mt-1">支持PDF、Excel格式的财务报表文件</p>
       </div>
 
       {/* Upload Area */}
       <div 
-        className="bg-[#16161A] rounded-2xl p-5 border border-[#2A2A2E] cursor-pointer"
+        className="card-surface p-5 cursor-pointer"
         onClick={() => fileInputRef.current?.click()}
       >
         <input
@@ -68,60 +68,60 @@ export default function UploadPage() {
           onChange={handleFileSelect}
           className="hidden"
         />
-        <div className="border-2 border-dashed border-[#2A2A2E] rounded-xl p-10 text-center">
-          <div className="w-20 h-20 mx-auto mb-5 bg-[#1A1A1E] rounded-2xl flex items-center justify-center">
-            <Upload size={40} className="text-[#6B6B70]" />
+        <div className="border-2 border-dashed border-[var(--border-subtle)] rounded-[var(--radius-lg)] p-10 text-center">
+          <div className="w-20 h-20 mx-auto mb-5 bg-[var(--bg-elevated)] rounded-[var(--radius-lg)] flex items-center justify-center">
+            <Upload size={40} className="text-[var(--text-muted)]" />
           </div>
-          <p className="text-[#FAFAF9] text-lg font-medium mb-2">点击或拖拽文件到此处</p>
-          <p className="text-[#6B6B70] text-sm">支持 PDF、XLS、XLSX 格式</p>
+          <p className="text-[var(--text-primary)] text-lg font-medium mb-2">点击或拖拽文件到此处</p>
+          <p className="text-[var(--text-secondary)] text-sm">支持 PDF、XLS、XLSX 格式</p>
         </div>
       </div>
 
       {/* Selected File */}
-      <div className="bg-[#16161A] rounded-2xl p-5 border border-[#2A2A2E]">
+      <div className="card-surface p-5">
         <div className="flex items-center gap-4">
-          <div className="w-14 h-14 bg-[#1A1A1E] rounded-xl flex items-center justify-center">
-            <FileText size={28} className={file ? 'text-[#32D583]' : 'text-[#6B6B70]'} />
+          <div className="w-14 h-14 bg-[var(--bg-elevated)] rounded-[var(--radius-md)] flex items-center justify-center">
+            <FileText size={28} className={file ? 'text-emerald-400' : 'text-[var(--text-muted)]'} />
           </div>
           <div className="flex-1">
             {file ? (
               <div>
-                <p className="text-[#FAFAF9] text-base font-medium">{file.name}</p>
-                <p className="text-[#6B6B70] text-sm">{(file.size / 1024 / 1024).toFixed(2)} MB</p>
+                <p className="text-[var(--text-primary)] text-base font-medium">{file.name}</p>
+                <p className="text-[var(--text-secondary)] text-sm">{(file.size / 1024 / 1024).toFixed(2)} MB</p>
               </div>
             ) : (
-              <p className="text-[#6B6B70] text-base">尚未选择文件</p>
+              <p className="text-[var(--text-secondary)] text-base">尚未选择文件</p>
             )}
           </div>
           {file && (
             <button onClick={() => setFile(null)} className="p-2">
-              <X size={20} className="text-[#6B6B70]" />
+              <X size={20} className="text-[var(--text-muted)]" />
             </button>
           )}
         </div>
       </div>
 
       {/* Company Info */}
-      <div className="bg-[#16161A] rounded-2xl p-5 border border-[#2A2A2E]">
-        <h3 className="text-[#FAFAF9] text-lg font-semibold mb-4">公司信息（可选）</h3>
+      <div className="card-surface p-5">
+        <h3 className="text-[var(--text-primary)] text-lg font-bold tracking-tight mb-4">公司信息（可选）</h3>
         <div>
-          <label className="text-[#6B6B70] text-sm mb-2 block">公司名称</label>
+          <label className="text-[var(--text-secondary)] text-sm font-medium mb-2 block">公司名称</label>
           <input
             type="text"
             placeholder="AI将自动从报表中识别..."
             value={companyName}
             onChange={(e) => setCompanyName(e.target.value)}
-            className="w-full bg-[#1A1A1E] text-[#FAFAF9] rounded-xl py-4 px-5 text-base border border-[#2A2A2E] focus:border-[#32D583] focus:outline-none placeholder:text-[#6B6B70]"
+            className="input-base"
           />
         </div>
 
         <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
           <div>
-            <label className="text-[#6B6B70] text-sm mb-2 block">市场（可选）</label>
+            <label className="text-[var(--text-secondary)] text-sm font-medium mb-2 block">市场（可选）</label>
             <select
               value={market}
               onChange={(e) => setMarket(e.target.value as any)}
-              className="w-full bg-[#1A1A1E] text-[#FAFAF9] rounded-xl py-4 px-5 text-base border border-[#2A2A2E] focus:border-[#32D583] focus:outline-none"
+              className="input-base"
             >
               <option value="CN">CN</option>
               <option value="HK">HK</option>
@@ -129,15 +129,15 @@ export default function UploadPage() {
             </select>
           </div>
           <div>
-            <label className="text-[#6B6B70] text-sm mb-2 block">股票代码（可选）</label>
+            <label className="text-[var(--text-secondary)] text-sm font-medium mb-2 block">股票代码（可选）</label>
             <input
               type="text"
               placeholder="例如 AAPL / 00700 / 600519"
               value={symbol}
               onChange={(e) => setSymbol(e.target.value)}
-              className="w-full bg-[#1A1A1E] text-[#FAFAF9] rounded-xl py-4 px-5 text-base border border-[#2A2A2E] focus:border-[#32D583] focus:outline-none placeholder:text-[#6B6B70]"
+              className="input-base"
             />
-            <div className="text-[#6B6B70] text-xs mt-2">
+            <div className="text-[var(--text-muted)] text-xs mt-2">
               填写后可绑定公司，报告详情可显示“所属行业”。
             </div>
           </div>
@@ -146,23 +146,23 @@ export default function UploadPage() {
 
       {/* Error Message */}
       {error && (
-        <div className="bg-[#E85A4F]/20 text-[#E85A4F] rounded-xl p-4 text-center">
+        <div className="bg-red-500/15 text-red-400 rounded-[var(--radius-md)] p-4 text-center text-sm font-medium">
           {error}
         </div>
       )}
 
       {/* Action Buttons */}
-      <div className="flex gap-4">
+      <div className="flex gap-3">
         <button 
           onClick={() => router.back()}
-          className="flex-1 bg-[#1A1A1E] text-[#FAFAF9] rounded-xl py-4 px-5 font-medium text-base border border-[#2A2A2E]"
+          className="flex-1 btn-secondary rounded-[var(--radius-md)] py-4 px-5 text-base"
         >
           取消
         </button>
         <button 
           onClick={handleUpload}
           disabled={uploading}
-          className="flex-1 bg-[#32D583] text-white rounded-xl py-4 px-5 font-semibold text-base flex items-center justify-center gap-2 disabled:opacity-50"
+          className="flex-1 btn-primary rounded-[var(--radius-md)] py-4 px-5 text-base flex items-center justify-center gap-2 disabled:opacity-50"
         >
           {uploading ? (
             '上传中...'

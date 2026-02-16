@@ -14,6 +14,8 @@ type CompareRow = {
 };
 
 const METRICS: Array<{ code: string; name: string; isPct?: boolean; higherIsBetter?: boolean }> = [
+  { code: 'TOTAL_REVENUE', name: '营业总收入', isPct: false, higherIsBetter: true },
+  { code: 'OPERATING_CASH_FLOW', name: '经营现金流量净额', isPct: false, higherIsBetter: true },
   { code: 'GROSS_MARGIN', name: '毛利率', isPct: true, higherIsBetter: true },
   { code: 'NET_MARGIN', name: '净利率', isPct: true, higherIsBetter: true },
   { code: 'ROE', name: 'ROE', isPct: true, higherIsBetter: true },
@@ -81,7 +83,18 @@ export default function ComparePage() {
     load();
   }, [reportId1, reportId2]);
 
-  const findMetric = (list: Metric[], code: string) => list.find((m) => m.metric_code === code)?.value ?? null;
+  const findMetric = (list: Metric[], code: string) => {
+    const aliases: Record<string, string[]> = {
+      TOTAL_REVENUE: ['TOTAL_REVENUE', 'IS.REVENUE'],
+      OPERATING_CASH_FLOW: ['OPERATING_CASH_FLOW', 'CF.CFO'],
+    };
+    const codes = aliases[code] || [code];
+    for (const c of codes) {
+      const hit = list.find((m) => m.metric_code === c)?.value;
+      if (hit != null) return hit;
+    }
+    return null;
+  };
   const fmt = (v: number | null, isPct?: boolean) => {
     if (v == null || Number.isNaN(v)) return '-';
     return isPct ? `${Number(v).toFixed(2)}%` : `${Number(v).toFixed(2)}`;
@@ -146,7 +159,7 @@ export default function ComparePage() {
   };
 
   return (
-    <div className="p-4 md:p-6 max-w-4xl">
+    <div className="p-4 md:p-6 max-w-4xl animate-fade-in">
       <PageHeader
         icon="📊"
         title="多公司财务对比"
@@ -154,15 +167,15 @@ export default function ComparePage() {
       />
 
       {/* Company Cards */}
-      <div className="mb-4">
-        <p className="text-[#6B6B70] text-xs mb-2">对比公司:</p>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-          <div className="bg-[#16161A] rounded-xl p-3 border border-[#6366F1]">
-            <div className="text-[#6B6B70] text-xs mb-2">公司 1</div>
+      <div className="mb-5">
+        <p className="text-[var(--text-secondary)] text-xs font-medium mb-2">对比公司:</p>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div className="card-surface p-4 !border-indigo-500/40">
+            <div className="text-[var(--text-secondary)] text-xs font-medium mb-2">公司 1</div>
             <select
               value={reportId1}
               onChange={(e) => setReportId1(e.target.value)}
-              className="w-full bg-[#0B0B0E] text-[#FAFAF9] rounded-xl px-3 py-3 text-sm border border-[#2A2A2E]"
+              className="input-base text-sm"
             >
               <option value="">请选择报告</option>
               {reports.map((r) => (
@@ -171,16 +184,16 @@ export default function ComparePage() {
                 </option>
               ))}
             </select>
-            <div className="text-[#FAFAF9] text-sm font-semibold mt-2 truncate">{r1?.report_name || '-'}</div>
-            <div className="text-[#6B6B70] text-xs truncate">{r1?.period_end || '-'}</div>
+            <div className="text-[var(--text-primary)] text-sm font-semibold mt-2 truncate">{r1?.report_name || '-'}</div>
+            <div className="text-[var(--text-muted)] text-xs truncate">{r1?.period_end || '-'}</div>
           </div>
 
-          <div className="bg-[#16161A] rounded-xl p-3 border border-[#E85A4F]">
-            <div className="text-[#6B6B70] text-xs mb-2">公司 2</div>
+          <div className="card-surface p-4 !border-red-500/40">
+            <div className="text-[var(--text-secondary)] text-xs font-medium mb-2">公司 2</div>
             <select
               value={reportId2}
               onChange={(e) => setReportId2(e.target.value)}
-              className="w-full bg-[#0B0B0E] text-[#FAFAF9] rounded-xl px-3 py-3 text-sm border border-[#2A2A2E]"
+              className="input-base text-sm"
             >
               <option value="">请选择报告</option>
               {reports.map((r) => (
@@ -189,57 +202,57 @@ export default function ComparePage() {
                 </option>
               ))}
             </select>
-            <div className="text-[#FAFAF9] text-sm font-semibold mt-2 truncate">{r2?.report_name || '-'}</div>
-            <div className="text-[#6B6B70] text-xs truncate">{r2?.period_end || '-'}</div>
+            <div className="text-[var(--text-primary)] text-sm font-semibold mt-2 truncate">{r2?.report_name || '-'}</div>
+            <div className="text-[var(--text-muted)] text-xs truncate">{r2?.period_end || '-'}</div>
           </div>
         </div>
 
         {message && (
-          <div className="mt-2 text-[#E85A4F] text-xs">{message}</div>
+          <div className="mt-2 text-red-400 text-xs">{message}</div>
         )}
       </div>
 
       {/* Comparison Table */}
-      <div className="mb-4">
-        <div className="flex items-center gap-2 mb-2">
+      <div className="mb-5">
+        <div className="flex items-center gap-2 mb-3">
           <span className="text-sm">📋</span>
-          <h2 className="text-[#FAFAF9] text-sm font-semibold">指标对比表</h2>
+          <h2 className="section-title text-sm">指标对比表</h2>
         </div>
 
-        <div className="flex gap-2 mb-2">
+        <div className="flex gap-2.5 mb-3">
           <button
             onClick={exportCsv}
             disabled={loading || rows.length === 0}
-            className="flex-1 bg-[#16161A] text-[#FAFAF9] rounded-xl py-3 px-4 font-medium text-sm border border-[#2A2A2E]"
+            className="flex-1 btn-secondary !py-2.5 !px-4 text-sm !min-h-0"
           >
             ⬇️ 导出 CSV
           </button>
           <button
             onClick={exportHtml}
             disabled={loading || rows.length === 0}
-            className="flex-1 bg-[#16161A] text-[#FAFAF9] rounded-xl py-3 px-4 font-medium text-sm border border-[#2A2A2E]"
+            className="flex-1 btn-secondary !py-2.5 !px-4 text-sm !min-h-0"
           >
             ⬇️ 导出 HTML
           </button>
         </div>
-        <div className="bg-[#16161A] rounded-xl overflow-hidden border border-[#2A2A2E]">
+        <div className="card-surface overflow-hidden !rounded-[var(--radius-md)]">
           {/* Header */}
-          <div className="flex border-b border-[#2A2A2E] px-3 py-2">
-            <div className="w-20 text-[#6B6B70] text-xs">指标</div>
-            <div className="flex-1 text-center text-[#6366F1] text-xs truncate">{r1?.report_name || '公司1'}</div>
-            <div className="flex-1 text-center text-[#E85A4F] text-xs truncate">{r2?.report_name || '公司2'}</div>
+          <div className="flex border-b border-[var(--border-color)] px-3 py-2.5 bg-[var(--bg-elevated)]">
+            <div className="w-20 text-[var(--text-secondary)] text-xs font-medium">指标</div>
+            <div className="flex-1 text-center text-indigo-400 text-xs font-medium truncate">{r1?.report_name || '公司1'}</div>
+            <div className="flex-1 text-center text-red-400 text-xs font-medium truncate">{r2?.report_name || '公司2'}</div>
           </div>
           {/* Rows */}
           {rows.map((row, i) => (
             <div
               key={row.metric}
-              className={`flex px-3 py-2 ${i < rows.length - 1 ? 'border-b border-[#2A2A2E]' : ''}`}
+              className={`flex px-3 py-2.5 ${i < rows.length - 1 ? 'border-b border-[var(--border-color)]' : ''}`}
             >
-              <div className="w-20 text-[#FAFAF9] text-xs">{row.metric}</div>
-              <div className={`flex-1 text-center text-xs ${row.highlight === 1 ? 'text-[#32D583]' : (row.company1 === 'N/A' || row.company1 === '-') ? 'text-[#6B6B70]' : 'text-[#FAFAF9]'}`}>
+              <div className="w-20 text-[var(--text-primary)] text-xs font-medium">{row.metric}</div>
+              <div className={`flex-1 text-center text-xs font-medium ${row.highlight === 1 ? 'text-emerald-400' : (row.company1 === 'N/A' || row.company1 === '-') ? 'text-[var(--text-muted)]' : 'text-[var(--text-primary)]'}`}>
                 {row.company1}
               </div>
-              <div className={`flex-1 text-center text-xs ${row.highlight === 2 ? 'text-[#32D583]' : 'text-[#FAFAF9]'}`}>
+              <div className={`flex-1 text-center text-xs font-medium ${row.highlight === 2 ? 'text-emerald-400' : 'text-[var(--text-primary)]'}`}>
                 {row.company2}
               </div>
             </div>
@@ -247,75 +260,163 @@ export default function ComparePage() {
         </div>
       </div>
 
-      {/* Radar Chart */}
-      <div className="mb-4">
-        <div className="flex items-center gap-2 mb-2">
+      {/* Radar Chart - SVG based */}
+      <div className="mb-5">
+        <div className="flex items-center gap-2 mb-3">
           <span className="text-sm">📈</span>
-          <h2 className="text-[#FAFAF9] text-sm font-semibold">综合能力雷达图</h2>
+          <h2 className="section-title text-sm">综合能力雷达图</h2>
         </div>
-        <div className="bg-[#16161A] rounded-xl p-4 border border-[#2A2A2E]">
+        <div className="card-surface p-4">
           <div className="flex items-center justify-center gap-4 mb-3">
-            <div className="flex items-center gap-1">
-              <div className="w-2 h-2 rounded-full bg-[#6366F1]" />
-              <span className="text-[#6B6B70] text-xs">平安银行</span>
+            <div className="flex items-center gap-1.5">
+              <div className="w-3 h-3 rounded-full bg-indigo-400" />
+              <span className="text-[var(--text-secondary)] text-xs truncate max-w-[100px]">{r1?.report_name || '公司1'}</span>
             </div>
-            <div className="flex items-center gap-1">
-              <div className="w-2 h-2 rounded-full bg-[#E85A4F]" />
-              <span className="text-[#6B6B70] text-xs">苹果</span>
+            <div className="flex items-center gap-1.5">
+              <div className="w-3 h-3 rounded-full bg-red-400" />
+              <span className="text-[var(--text-secondary)] text-xs truncate max-w-[100px]">{r2?.report_name || '公司2'}</span>
             </div>
           </div>
-          {/* Mock Radar */}
-          <div className="w-32 h-24 mx-auto bg-[#1A1A1E] rounded-full relative">
-            <div className="absolute inset-4 bg-[#6366F1]/30 rounded-full" />
-            <div className="absolute inset-8 bg-[#E85A4F]/30 rounded-full" />
-          </div>
+          {(() => {
+            const radarMetrics = [
+              { code: 'GROSS_MARGIN', label: '盈利能力', max: 80 },
+              { code: 'ROE', label: '资本效率', max: 40 },
+              { code: 'CURRENT_RATIO', label: '偿债能力', max: 5 },
+              { code: 'ASSET_TURNOVER', label: '运营效率', max: 3 },
+              { code: 'DEBT_ASSET', label: '财务稳健', max: 100, invert: true },
+            ];
+            const n = radarMetrics.length;
+            const cx = 150, cy = 140, R = 110;
+            const angleStep = (2 * Math.PI) / n;
+            const startAngle = -Math.PI / 2;
+
+            const getPoint = (i: number, ratio: number) => {
+              const angle = startAngle + i * angleStep;
+              return { x: cx + R * ratio * Math.cos(angle), y: cy + R * ratio * Math.sin(angle) };
+            };
+
+            const gridLevels = [0.25, 0.5, 0.75, 1.0];
+
+            const v1Ratios = radarMetrics.map(rm => {
+              const v = findMetric(m1, rm.code);
+              if (v == null) return 0;
+              const val = rm.invert ? (rm.max - Number(v)) : Number(v);
+              return Math.max(0, Math.min(1, val / rm.max));
+            });
+            const v2Ratios = radarMetrics.map(rm => {
+              const v = findMetric(m2, rm.code);
+              if (v == null) return 0;
+              const val = rm.invert ? (rm.max - Number(v)) : Number(v);
+              return Math.max(0, Math.min(1, val / rm.max));
+            });
+
+            const poly1 = v1Ratios.map((r, i) => getPoint(i, r));
+            const poly2 = v2Ratios.map((r, i) => getPoint(i, r));
+
+            return (
+              <svg viewBox="0 0 300 290" className="w-full max-w-[320px] mx-auto">
+                {/* Grid */}
+                {gridLevels.map((level) => (
+                  <polygon
+                    key={level}
+                    points={Array.from({ length: n }, (_, i) => getPoint(i, level)).map(p => `${p.x},${p.y}`).join(' ')}
+                    fill="none"
+                    stroke="var(--border-color)"
+                    strokeWidth="0.5"
+                    opacity={0.6}
+                  />
+                ))}
+                {/* Axis lines */}
+                {Array.from({ length: n }, (_, i) => {
+                  const p = getPoint(i, 1);
+                  return <line key={i} x1={cx} y1={cy} x2={p.x} y2={p.y} stroke="var(--border-color)" strokeWidth="0.5" opacity={0.4} />;
+                })}
+                {/* Company 1 polygon */}
+                <polygon
+                  points={poly1.map(p => `${p.x},${p.y}`).join(' ')}
+                  fill="rgba(99,102,241,0.2)"
+                  stroke="#6366F1"
+                  strokeWidth="2"
+                />
+                {poly1.map((p, i) => (
+                  <circle key={`c1-${i}`} cx={p.x} cy={p.y} r="3.5" fill="#6366F1" />
+                ))}
+                {/* Company 2 polygon */}
+                <polygon
+                  points={poly2.map(p => `${p.x},${p.y}`).join(' ')}
+                  fill="rgba(248,113,113,0.15)"
+                  stroke="#F87171"
+                  strokeWidth="2"
+                />
+                {poly2.map((p, i) => (
+                  <circle key={`c2-${i}`} cx={p.x} cy={p.y} r="3.5" fill="#F87171" />
+                ))}
+                {/* Labels */}
+                {radarMetrics.map((rm, i) => {
+                  const p = getPoint(i, 1.22);
+                  const anchor = p.x < cx - 10 ? 'end' : p.x > cx + 10 ? 'start' : 'middle';
+                  return (
+                    <text key={rm.code} x={p.x} y={p.y} textAnchor={anchor} dominantBaseline="central" fill="var(--text-secondary)" fontSize="11" fontWeight="500">
+                      {rm.label}
+                    </text>
+                  );
+                })}
+              </svg>
+            );
+          })()}
         </div>
       </div>
 
-      {/* Bar Charts */}
-      <div className="mb-4">
-        <div className="flex items-center gap-2 mb-2">
+      {/* Bar Charts - data driven */}
+      <div className="mb-5">
+        <div className="flex items-center gap-2 mb-3">
           <span className="text-sm">📊</span>
-          <h2 className="text-[#FAFAF9] text-sm font-semibold">关键指标柱状图对比</h2>
+          <h2 className="section-title text-sm">关键指标柱状图对比</h2>
         </div>
-        <div className="flex gap-2">
-          <div className="flex-1 bg-[#16161A] rounded-xl p-3 border border-[#2A2A2E]">
-            <p className="text-[#FAFAF9] text-xs font-semibold mb-2">盈利能力对比</p>
-            <div className="h-12 flex items-end justify-around gap-1">
-              <div className="flex gap-0.5">
-                <div className="w-2.5 h-2 bg-[#6366F1] rounded-t" />
-                <div className="w-2.5 h-10 bg-[#60A5FA] rounded-t" />
-              </div>
-              <div className="flex gap-0.5">
-                <div className="w-2.5 h-5 bg-[#6366F1] rounded-t" />
-                <div className="w-2.5 h-3 bg-[#60A5FA] rounded-t" />
-              </div>
-              <div className="flex gap-0.5">
-                <div className="w-2.5 h-1 bg-[#6366F1] rounded-t" />
-                <div className="w-2.5 h-2 bg-[#60A5FA] rounded-t" />
+        <div className="flex flex-col gap-3">
+          {[
+            { title: '盈利能力', items: [{ code: 'GROSS_MARGIN', label: '毛利率' }, { code: 'NET_MARGIN', label: '净利率' }, { code: 'ROE', label: 'ROE' }] },
+            { title: '偿债与效率', items: [{ code: 'CURRENT_RATIO', label: '流动比率' }, { code: 'DEBT_ASSET', label: '负债率' }, { code: 'ASSET_TURNOVER', label: '周转率' }] },
+          ].map((group) => (
+            <div key={group.title} className="card-surface p-4">
+              <p className="text-[var(--text-primary)] text-xs font-semibold mb-3">{group.title}</p>
+              <div className="space-y-3">
+                {group.items.map((item) => {
+                  const v1 = findMetric(m1, item.code);
+                  const v2 = findMetric(m2, item.code);
+                  const max = Math.max(Math.abs(Number(v1) || 0), Math.abs(Number(v2) || 0), 1);
+                  const w1 = v1 != null ? Math.max(4, (Math.abs(Number(v1)) / max) * 100) : 0;
+                  const w2 = v2 != null ? Math.max(4, (Math.abs(Number(v2)) / max) * 100) : 0;
+                  return (
+                    <div key={item.code}>
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-[var(--text-secondary)] text-[10px]">{item.label}</span>
+                        <div className="flex gap-3 text-[10px]">
+                          <span className="text-indigo-400">{v1 != null ? Number(v1).toFixed(1) : '-'}</span>
+                          <span className="text-red-400">{v2 != null ? Number(v2).toFixed(1) : '-'}</span>
+                        </div>
+                      </div>
+                      <div className="flex flex-col gap-1">
+                        <div className="h-2.5 bg-[var(--bg-page)] rounded-full overflow-hidden">
+                          <div className="h-full bg-indigo-500 rounded-full transition-all duration-500" style={{ width: `${w1}%` }} />
+                        </div>
+                        <div className="h-2.5 bg-[var(--bg-page)] rounded-full overflow-hidden">
+                          <div className="h-full bg-red-400 rounded-full transition-all duration-500" style={{ width: `${w2}%` }} />
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             </div>
-          </div>
-          <div className="flex-1 bg-[#16161A] rounded-xl p-3 border border-[#2A2A2E]">
-            <p className="text-[#FAFAF9] text-xs font-semibold mb-2">偿债能力对比</p>
-            <div className="h-12 flex items-end justify-around gap-1">
-              <div className="flex gap-0.5">
-                <div className="w-2.5 h-10 bg-[#6366F1] rounded-t" />
-                <div className="w-2.5 h-9 bg-[#60A5FA] rounded-t" />
-              </div>
-              <div className="flex gap-0.5">
-                <div className="w-2.5 h-1 bg-[#6366F1] rounded-t" />
-                <div className="w-2.5 h-1 bg-[#60A5FA] rounded-t" />
-              </div>
-            </div>
-          </div>
+          ))}
         </div>
       </div>
 
       {/* Back Button */}
       <Link
         href="/"
-        className="flex items-center justify-center gap-2 bg-[#1A1A1E] text-[#FAFAF9] rounded-xl py-3 px-4 font-medium text-sm border border-[#2A2A2E] hover:border-[#32D583] transition-all"
+        className="btn-secondary flex items-center justify-center gap-2 text-sm !py-3"
       >
         <ArrowLeft size={16} />
         返回仪表盘

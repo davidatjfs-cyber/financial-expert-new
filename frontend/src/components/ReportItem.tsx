@@ -9,10 +9,10 @@ interface ReportItemProps {
 }
 
 const statusConfig = {
-  done: { bg: 'bg-[#32D583]/20', text: 'text-[#32D583]', icon: '✓' },
-  running: { bg: 'bg-[#FFB547]/20', text: 'text-[#FFB547]', icon: '◐' },
-  failed: { bg: 'bg-[#E85A4F]/20', text: 'text-[#E85A4F]', icon: '✕' },
-  pending: { bg: 'bg-[#6B6B70]/20', text: 'text-[#6B6B70]', icon: '○' },
+  done: { bg: 'bg-emerald-500/15', text: 'text-emerald-400', icon: '✓' },
+  running: { bg: 'bg-amber-500/15', text: 'text-amber-400', icon: '◐' },
+  failed: { bg: 'bg-red-400/15', text: 'text-red-400', icon: '✕' },
+  pending: { bg: 'bg-zinc-500/15', text: 'text-zinc-400', icon: '○' },
 };
 
 export default function ReportItem({ title, source, date, status, onClick }: ReportItemProps) {
@@ -21,23 +21,23 @@ export default function ReportItem({ title, source, date, status, onClick }: Rep
   return (
     <div
       onClick={onClick}
-      className="bg-[#16161A] rounded-2xl p-5 border border-[#2A2A2E] flex items-center gap-4 cursor-pointer active:bg-[#1A1A1E]"
+      className="card-surface p-4 flex items-center gap-4 cursor-pointer active:scale-[0.99] transition-all duration-150"
     >
       {/* Status Icon */}
-      <div className={`w-12 h-12 rounded-xl ${bg} flex items-center justify-center flex-shrink-0`}>
-        <span className={`text-xl ${text}`}>{icon}</span>
+      <div className={`w-11 h-11 rounded-[12px] ${bg} flex items-center justify-center flex-shrink-0`}>
+        <span className={`text-lg ${text}`}>{icon}</span>
       </div>
 
       {/* Content */}
       <div className="flex-1 min-w-0">
-        <div className="text-[#FAFAF9] text-base font-semibold truncate mb-1">{title}</div>
-        <div className="text-[#6B6B70] text-sm">
+        <div className="text-[var(--text-primary)] text-[15px] font-semibold truncate mb-0.5">{title}</div>
+        <div className="text-[var(--text-secondary)] text-sm">
           {source} · {date}
         </div>
       </div>
 
       {/* Arrow */}
-      <ChevronRight size={24} className="text-[#6B6B70] flex-shrink-0" />
+      <ChevronRight size={20} className="text-[var(--text-muted)] flex-shrink-0" />
     </div>
   );
 }

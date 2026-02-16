@@ -40,27 +40,27 @@ export default function ReportsPage() {
   });
 
   return (
-    <div className="p-5 md:p-8 flex flex-col gap-6 max-w-2xl mx-auto pb-24">
+    <div className="p-5 md:p-8 flex flex-col gap-6 max-w-2xl mx-auto pb-24 animate-fade-in">
       {/* Header */}
       <div>
-        <h1 className="text-[#FAFAF9] text-xl md:text-2xl font-semibold">分析报告</h1>
-        <p className="text-[#6B6B70] text-sm mt-1">查看所有已上传和分析的财务报表</p>
+        <h1 className="text-[var(--text-primary)] text-xl md:text-2xl font-bold tracking-tight">分析报告</h1>
+        <p className="text-[var(--text-secondary)] text-sm mt-1">查看所有已上传和分析的财务报表</p>
       </div>
 
       {/* Search */}
       <div className="relative">
-        <Search className="absolute left-5 top-1/2 -translate-y-1/2 text-[#6B6B70]" size={22} />
+        <Search className="absolute left-5 top-1/2 -translate-y-1/2 text-[var(--text-muted)]" size={20} />
         <input
           type="text"
           placeholder="搜索报告..."
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
-          className="w-full bg-[#16161A] text-[#FAFAF9] rounded-xl py-4 pl-14 pr-5 text-base border border-[#2A2A2E] focus:border-[#32D583] focus:outline-none placeholder:text-[#6B6B70]"
+          className="input-base pl-14"
         />
       </div>
 
       {/* Filter Tabs */}
-      <div className="flex gap-3 overflow-x-auto pb-1">
+      <div className="flex gap-2.5 overflow-x-auto pb-1">
         {[
           { key: 'all', label: '全部' },
           { key: 'done', label: '已完成' },
@@ -71,10 +71,10 @@ export default function ReportsPage() {
           <button
             key={tab.key}
             onClick={() => setFilter(tab.key)}
-            className={`px-5 py-3 rounded-xl text-base font-medium whitespace-nowrap ${
+            className={`px-4 py-2.5 rounded-[var(--radius-sm)] text-sm font-semibold whitespace-nowrap transition-all ${
               filter === tab.key
-                ? 'bg-[#32D583] text-white'
-                : 'bg-[#16161A] text-[#6B6B70] border border-[#2A2A2E]'
+                ? 'bg-[var(--accent-primary)] text-[var(--bg-page)]'
+                : 'bg-[var(--bg-surface)] text-[var(--text-secondary)] border border-[var(--border-color)]'
             }`}
           >
             {tab.label}
@@ -83,8 +83,8 @@ export default function ReportsPage() {
       </div>
 
       {/* Tip */}
-      <div className="bg-[#6366F1]/10 rounded-xl p-4 border border-[#6366F1]/30">
-        <p className="text-[#6366F1] text-sm">
+      <div className="bg-indigo-500/10 rounded-[var(--radius-md)] p-4 border border-indigo-500/25">
+        <p className="text-indigo-400 text-sm">
           💡 提示：通过"股票查询"获取的A股报告（如贵州茅台、五粮液）有完整的财务分析数据
         </p>
       </div>
@@ -92,8 +92,8 @@ export default function ReportsPage() {
       {/* Reports List */}
       <div className="flex flex-col gap-3">
         {loading ? (
-          <div className="bg-[#16161A] rounded-2xl p-10 border border-[#2A2A2E] text-center">
-            <p className="text-[#6B6B70] text-base">加载中...</p>
+          <div className="card-surface p-10 text-center">
+            <p className="text-[var(--text-secondary)] text-base">加载中...</p>
           </div>
         ) : filteredReports.length > 0 ? (
           filteredReports.map((report) => (
@@ -107,8 +107,8 @@ export default function ReportsPage() {
             />
           ))
         ) : (
-          <div className="bg-[#16161A] rounded-2xl p-10 border border-[#2A2A2E] text-center">
-            <p className="text-[#6B6B70] text-base">没有找到匹配的报告</p>
+          <div className="card-surface p-10 text-center">
+            <p className="text-[var(--text-secondary)] text-base">没有找到匹配的报告</p>
           </div>
         )}
       </div>

@@ -50,6 +50,100 @@ def test_qwen_connection(api_key: Optional[str] = None) -> tuple[bool, str]:
         return False, f"exception:{e}"
 
 
+def _smart_truncate_for_ai(text: str, max_len: int = 30000) -> str:
+    """智能截断：优先保留财务报表关键段落（利润表、资产负债表、现金流量表）"""
+    if len(text) <= max_len:
+        return text
+
+    # 定义关键段落的标记词（中英文）
+    section_markers = [
+        # 英文
+        "CONSOLIDATED STATEMENTS OF EARNINGS",
+        "CONSOLIDATED STATEMENTS OF OPERATIONS",
+        "CONSOLIDATED BALANCE SHEETS",
+        "CONSOLIDATED STATEMENTS OF CASH FLOWS",
+        "STATEMENTS OF EARNINGS",
+        "STATEMENTS OF OPERATIONS",
+        "BALANCE SHEETS",
+        "INCOME STATEMENT",
+        "TOTAL ASSETS",
+        "TOTAL LIABILITIES",
+        "NET REVENUES",
+        "NET SALES",
+        "NET INCOME",
+        "FISCAL YEAR ENDED",
+        # 中文
+        "合并利润表",
+        "合并资产负债表",
+        "合并现金流量表",
+        "利润表",
+        "资产负债表",
+        "现金流量表",
+        "营业收入",
+        "营业总收入",
+        "净利润",
+        "资产总计",
+        "负债合计",
+        "所有者权益",
+        "基本每股收益",
+        "毛利率",
+        "净资产收益率",
+    ]
+
+    upper_text = text.upper()
+    # 找到所有关键段落的位置
+    key_positions: list[int] = []
+    for marker in section_markers:
+        pos = upper_text.find(marker.upper()) if marker.isascii() else text.find(marker)
+        if pos >= 0:
+            key_positions.append(pos)
+
+    if not key_positions:
+        # 没找到关键段落，取前面和后面
+        half = max_len // 2
+        return text[:half] + "\n...（中间部分已省略）...\n" + text[-half:]
+
+    # 围绕每个关键位置取上下文窗口
+    window = 3000  # 每个关键位置前后各取3000字符
+    intervals: list[tuple[int, int]] = []
+    # 始终保留开头（报告标题/期间信息）
+    intervals.append((0, min(2000, len(text))))
+    for pos in sorted(set(key_positions)):
+        start = max(0, pos - window)
+        end = min(len(text), pos + window)
+        intervals.append((start, end))
+
+    # 合并重叠区间
+    intervals.sort()
+    merged: list[tuple[int, int]] = [intervals[0]]
+    for s, e in intervals[1:]:
+        if s <= merged[-1][1] + 200:  # 允许200字符间隙也合并
+            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+        else:
+            merged.append((s, e))
+
+    # 拼接
+    parts: list[str] = []
+    total = 0
+    for i, (s, e) in enumerate(merged):
+        chunk = text[s:e]
+        if total + len(chunk) > max_len:
+            remaining = max_len - total
+            if remaining > 500:
+                parts.append(chunk[:remaining])
+            break
+        parts.append(chunk)
+        total += len(chunk)
+        if i < len(merged) - 1:
+            parts.append("\n...\n")
+            total += 5
+
+    result = "".join(parts)
+    if len(result) < len(text):
+        result += "\n...(部分内容已省略)"
+    return result
+
+
 def extract_financials_with_ai(pdf_text: str, api_key: Optional[str] = None, raise_on_error: bool = False) -> dict:
     """使用 AI 从 PDF 文本中提取财务数据"""
     key = api_key or get_api_key()
@@ -58,10 +152,8 @@ def extract_financials_with_ai(pdf_text: str, api_key: Optional[str] = None, rai
             raise RuntimeError("missing_api_key")
         return {}
     
-    # 限制文本长度
-    max_len = 15000
-    if len(pdf_text) > max_len:
-        pdf_text = pdf_text[:max_len] + "\n...(文本已截断)"
+    # 智能截断，保留财务报表关键段落
+    pdf_text = _smart_truncate_for_ai(pdf_text, max_len=30000)
     
     prompt = """请从以下财务报表文本中提取关键财务数据。严格按照 JSON 格式返回，不要添加任何其他文字。
 
@@ -69,28 +161,35 @@ def extract_financials_with_ai(pdf_text: str, api_key: Optional[str] = None, rai
 {
     "report_period": "报告期，格式：YYYY-MM-DD",
     "report_year": "报告年份，如 2024",
-    "revenue": "营业收入/营业总收入（数字，单位：百万元）",
-    "net_profit": "净利润/归属于股东的净利润（数字，单位：百万元）",
-    "total_assets": "资产总额/总资产（数字，单位：百万元）",
-    "total_liabilities": "负债总额/总负债（数字，单位：百万元）",
-    "total_equity": "股东权益/所有者权益（数字，单位：百万元）",
-    "gross_profit": "毛利润（数字，单位：百万元）",
+    "revenue": "营业收入/营业总收入/Total revenues/Net sales（数字）",
+    "cost": "营业成本/Cost of sales/Cost of revenues（数字）",
+    "gross_profit": "毛利润/Gross profit（数字）",
+    "net_profit": "净利润/归属于股东的净利润/Net income（数字）",
+    "total_assets": "资产总额/总资产/Total assets（数字）",
+    "total_liabilities": "负债总额/总负债/Total liabilities（数字）",
+    "total_equity": "股东权益/所有者权益/Total equity（数字）",
+    "current_assets": "流动资产合计/Total current assets（数字）",
+    "current_liabilities": "流动负债合计/Total current liabilities（数字）",
+    "cash": "货币资金/现金及现金等价物/Cash and cash equivalents（数字）",
+    "inventory": "存货/Inventories（数字）",
+    "receivables": "应收账款/Accounts receivable（数字）",
+    "fixed_assets": "固定资产/Property, plant and equipment（数字）",
     "gross_margin": "毛利率（百分比数字，如 32.5）",
     "net_margin": "净利率（百分比数字）",
     "roe": "净资产收益率/ROE（百分比数字）",
     "roa": "总资产收益率/ROA（百分比数字）",
     "current_ratio": "流动比率（数字）",
     "quick_ratio": "速动比率（数字）",
-    "debt_ratio": "资产负债率（百分比数字）",
-    "current_assets": "流动资产（数字，单位：百万元）",
-    "current_liabilities": "流动负债（数字，单位：百万元）"
+    "debt_ratio": "资产负债率（百分比数字）"
 }
 
-注意：
-1. 数字不要包含逗号，直接返回数值
-2. 如果是亿元单位，请转换为百万元（乘以100）
-3. 如果是万元单位，请转换为百万元（除以100）
+重要注意事项：
+1. 金额数字不要包含逗号，直接返回数值
+2. 请保持原始报表中的单位（如百万美元、百万元、元等），不需要做单位转换
+3. 如果报表中标注了单位（如"in millions"、"百万元"、"万元"、"元"），请在返回的JSON中额外增加一个 "unit" 字段说明单位，如 "unit": "millions_usd" 或 "unit": "万元" 或 "unit": "元"
 4. 百分比只返回数字部分，不要包含%符号
+5. 如果有多个报告期的数据，请提取最新一期的数据
+6. 负数用负号表示，不要用括号
 
 财务报表文本：
 """ + pdf_text + """
@@ -105,19 +204,19 @@ def extract_financials_with_ai(pdf_text: str, api_key: Optional[str] = None, rai
                 "Content-Type": "application/json",
             },
             json={
-                "model": "qwen-plus",  # 使用更强的模型提取数据
+                "model": "qwen-plus",
                 "input": {
                     "messages": [
-                        {"role": "system", "content": "你是一个财务数据提取专家。你只返回 JSON 格式的数据，不添加任何解释文字。"},
+                        {"role": "system", "content": "你是一个财务数据提取专家。你的任务是从财务报表文本中精确提取所有可用的财务数据。你只返回 JSON 格式的数据，不添加任何解释文字。请尽可能提取所有字段，不要遗漏。"},
                         {"role": "user", "content": prompt},
                     ]
                 },
                 "parameters": {
-                    "temperature": 0.1,  # 低温度确保准确性
-                    "max_tokens": 1500,
+                    "temperature": 0.1,
+                    "max_tokens": 2000,
                 },
             },
-            timeout=60.0,
+            timeout=90.0,
         )
         response.raise_for_status()
         data = response.json()
@@ -178,6 +277,7 @@ def merge_ai_extracted_data(extracted: dict, ai_data: dict):
         "report_period": "report_period",
         "report_year": "report_year",
         "revenue": "revenue",
+        "cost": "cost",
         "net_profit": "net_profit",
         "total_assets": "total_assets",
         "total_liabilities": "total_liabilities",
@@ -185,6 +285,10 @@ def merge_ai_extracted_data(extracted: dict, ai_data: dict):
         "gross_profit": "gross_profit",
         "current_assets": "current_assets",
         "current_liabilities": "current_liabilities",
+        "cash": "cash",
+        "inventory": "inventory",
+        "receivables": "receivables",
+        "fixed_assets": "fixed_assets",
         "gross_margin": "gross_margin_direct",
         "net_margin": "net_margin_direct",
         "roe": "roe_direct",

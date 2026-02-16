@@ -123,6 +123,22 @@ class PortfolioTrade(Base):
     created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
 
 
+class PortfolioAutoTrade(Base):
+    __tablename__ = "portfolio_auto_trades"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    position_id: Mapped[str] = mapped_column(String, ForeignKey("portfolio_positions.id"), index=True)
+
+    side: Mapped[str] = mapped_column(String)  # BUY / SELL
+    trigger_price: Mapped[float] = mapped_column(Float)
+    quantity: Mapped[float] = mapped_column(Float)
+    status: Mapped[str] = mapped_column(String, index=True, default="PENDING")  # PENDING / EXECUTED / CANCELLED
+
+    created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
+    executed_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    executed_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
 class MappingRule(Base):
     __tablename__ = "mapping_rules"
 

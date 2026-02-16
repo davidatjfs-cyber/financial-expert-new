@@ -8,7 +8,7 @@ import {
   Search,
   Upload,
   FileText,
-  Calculator,
+  Briefcase,
   AlertTriangle,
   TrendingUp,
 } from 'lucide-react';
@@ -24,7 +24,7 @@ const navItems: NavItem[] = [
   { href: '/stock', icon: <Search size={20} />, label: '股票' },
   { href: '/upload', icon: <Upload size={20} />, label: '上传' },
   { href: '/reports', icon: <FileText size={20} />, label: '报告' },
-  { href: '/indicators', icon: <Calculator size={20} />, label: '指标' },
+  { href: '/indicators', icon: <Briefcase size={20} />, label: '持仓' },
   { href: '/risk', icon: <AlertTriangle size={20} />, label: '预警' },
   { href: '/trends', icon: <TrendingUp size={20} />, label: '趋势' },
 ];
@@ -33,17 +33,17 @@ export default function Sidebar() {
   const pathname = usePathname();
 
   return (
-    <aside className="w-[72px] h-full bg-[#16161A] flex flex-col items-center py-4 px-2 gap-2 border-r border-[#2A2A2E] flex-shrink-0">
+    <aside className="w-[72px] h-full bg-[var(--bg-surface)] flex flex-col items-center py-5 px-2 gap-2 border-r border-[var(--border-color)] flex-shrink-0">
       {/* Logo */}
-      <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[#32D583] to-[#059669] flex items-center justify-center">
+      <div className="w-10 h-10 rounded-[12px] bg-gradient-to-br from-[var(--accent-primary)] to-emerald-600 flex items-center justify-center shadow-lg shadow-emerald-500/20">
         <Activity size={20} className="text-white" />
       </div>
       
       {/* Divider */}
-      <div className="w-10 h-px bg-[#2A2A2E]" />
+      <div className="w-9 h-px bg-[var(--border-color)] my-1" />
       
       {/* Navigation */}
-      <nav className="flex flex-col gap-2">
+      <nav className="flex flex-col gap-1.5">
         {navItems.map((item) => {
           const isActive = pathname === item.href || 
             (item.href !== '/' && pathname.startsWith(item.href));
@@ -52,14 +52,14 @@ export default function Sidebar() {
             <Link
               key={item.href}
               href={item.href}
-              className={`w-14 h-14 rounded-xl flex flex-col items-center justify-center gap-1 transition-all ${
+              className={`w-[52px] h-[52px] rounded-[12px] flex flex-col items-center justify-center gap-0.5 transition-all duration-200 ${
                 isActive
-                  ? 'bg-[#32D583] text-white'
-                  : 'text-[#6B6B70]'
+                  ? 'bg-[var(--accent-primary)] text-white shadow-lg shadow-emerald-500/25'
+                  : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-elevated)]'
               }`}
             >
               {item.icon}
-              <span className="text-[9px] font-medium">{item.label}</span>
+              <span className="text-[9px] font-semibold leading-none">{item.label}</span>
             </Link>
           );
         })}

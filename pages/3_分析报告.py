@@ -110,27 +110,89 @@ INDUSTRY_BENCHMARKS_BY_SECTOR = {
 
 def detect_industry(company_name: str) -> str:
     """根据公司名称检测行业"""
-    if any(kw in company_name for kw in ["银行", "Bank"]):
+    combined = (company_name or "").strip().lower()
+    if any(kw in combined for kw in ["银行", "bank"]):
         return "银行"
-    if any(kw in company_name for kw in ["保险", "人寿", "财险", "Insurance"]):
+    if any(kw in combined for kw in ["保险", "人寿", "财险", "insurance"]):
         return "保险"
-    if any(kw in company_name for kw in ["五粮液", "茅台", "泸州老窖", "洋河", "汾酒", "酒"]):
+    if any(kw in combined for kw in ["白酒", "五粮液", "茅台", "泸州老窖", "洋河", "汾酒", "酒"]):
         return "白酒"
-    if any(kw in company_name for kw in ["制造", "机械", "汽车", "电子"]):
+    if any(kw in combined for kw in [
+        "餐饮", "火锅", "海底捞", "小菜园", "小南国", "呷哺", "九毛九", "太二", "奈雪", "喜茶",
+        "restaurant", "food service", "catering", "dining", "mcdonald", "starbucks", "yum",
+        "chipotle", "darden", "domino", "pizza", "cafe", "coffee",
+    ]):
+        return "餐饮"
+    if any(kw in combined for kw in [
+        "零售", "retail", "超市", "百货", "walmart", "costco", "电商",
+        "specialty retail", "grocery", "department store",
+    ]):
+        return "零售"
+    if any(kw in combined for kw in ["医药", "制药", "生物", "pharma", "biotech", "drug", "health", "medical"]):
+        return "医药"
+    if any(kw in combined for kw in [
+        "互联网", "internet", "腾讯", "阿里", "美团", "字节", "百度", "京东", "拼多多",
+        "meta", "google", "alphabet", "amazon", "netflix",
+    ]):
+        return "互联网"
+    if any(kw in combined for kw in [
+        "科技", "tech", "软件", "software", "芯片", "半导体", "semiconductor",
+        "apple", "microsoft", "nvidia", "苹果", "英伟达",
+    ]):
+        return "科技"
+    if any(kw in combined for kw in ["房地产", "地产", "real estate", "property", "万科", "碧桂园", "恒大"]):
+        return "房地产"
+    if any(kw in combined for kw in ["能源", "石油", "石化", "energy", "oil", "gas", "煤炭", "电力"]):
+        return "能源"
+    if any(kw in combined for kw in ["消费", "consumer", "食品", "饮料", "日用", "家电", "packaged food", "beverage"]):
+        return "消费品"
+    if any(kw in combined for kw in ["制造", "机械", "汽车", "电子", "工业", "manufacturing", "industrial", "auto"]):
         return "制造业"
     return "默认"
 
 def _normalize_industry_bucket(industry: str | None, company_name: str) -> str:
-    s = (industry or "").strip()
-    if s:
-        if any(kw in s for kw in ["银行", "Bank"]):
-            return "银行"
-        if any(kw in s for kw in ["保险", "人寿", "财险", "Insurance"]):
-            return "保险"
-        if any(kw in s for kw in ["白酒", "酒", "食品饮料"]):
-            return "白酒"
-        if any(kw in s for kw in ["制造", "机械", "汽车", "电子", "工业"]):
-            return "制造业"
+    s = (industry or "").strip().lower()
+    name = (company_name or "").strip().lower()
+    combined = s + " " + name
+    if any(kw in combined for kw in ["银行", "bank"]):
+        return "银行"
+    if any(kw in combined for kw in ["保险", "人寿", "财险", "insurance"]):
+        return "保险"
+    if any(kw in combined for kw in ["白酒", "酒", "食品饮料"]):
+        return "白酒"
+    if any(kw in combined for kw in [
+        "餐饮", "火锅", "海底捞", "小菜园", "小南国", "呷哺", "九毛九", "太二", "奈雪", "喜茶",
+        "restaurant", "food service", "catering", "dining", "mcdonald", "starbucks", "yum",
+        "chipotle", "darden", "domino", "pizza", "cafe", "coffee",
+    ]):
+        return "餐饮"
+    if any(kw in combined for kw in [
+        "零售", "retail", "超市", "百货", "walmart", "costco", "电商",
+        "specialty retail", "grocery", "department store",
+    ]):
+        return "零售"
+    if any(kw in combined for kw in ["医药", "制药", "生物", "pharma", "biotech", "drug", "health", "medical"]):
+        return "医药"
+    if any(kw in combined for kw in [
+        "互联网", "internet", "腾讯", "阿里", "美团", "字节", "百度", "京东", "拼多多",
+        "meta", "google", "alphabet", "amazon", "netflix",
+        "interactive media", "internet content",
+    ]):
+        return "互联网"
+    if any(kw in combined for kw in [
+        "科技", "tech", "软件", "software", "芯片", "半导体", "semiconductor",
+        "apple", "microsoft", "nvidia", "苹果", "英伟达",
+        "information technology", "electronic", "computing", "cloud",
+    ]):
+        return "科技"
+    if any(kw in combined for kw in ["房地产", "地产", "real estate", "property", "万科", "碧桂园", "恒大", "reit"]):
+        return "房地产"
+    if any(kw in combined for kw in ["能源", "石油", "石化", "energy", "oil", "gas", "煤炭", "电力", "petroleum", "utilities"]):
+        return "能源"
+    if any(kw in combined for kw in ["消费", "consumer", "食品", "饮料", "日用", "家电", "packaged food", "beverage", "household"]):
+        return "消费品"
+    if any(kw in combined for kw in ["制造", "机械", "汽车", "电子", "工业", "manufacturing", "industrial", "auto", "aerospace"]):
+        return "制造业"
     return detect_industry(company_name)
 
 

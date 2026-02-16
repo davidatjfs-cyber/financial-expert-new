@@ -7,14 +7,14 @@ interface StatCardProps {
 
 export default function StatCard({ icon, label, value, subtitle }: StatCardProps) {
   return (
-    <div className="bg-[#16161A] rounded-2xl p-4 border border-[#2A2A2E] hover:border-[#32D583] transition-all">
-      <div className="flex items-center gap-2 text-[#6B6B70] text-xs mb-3">
+    <div className="card-surface p-4 hover:border-[var(--accent-primary)]/40 transition-all duration-200">
+      <div className="flex items-center gap-2 text-[var(--text-secondary)] text-xs mb-3">
         <span>{icon}</span>
-        <span>{label}</span>
+        <span className="font-medium">{label}</span>
       </div>
-      <div className="text-[#FAFAF9] text-2xl font-bold">{value}</div>
+      <div className="text-[var(--text-primary)] text-2xl font-bold tracking-tight">{value}</div>
       {subtitle && (
-        <div className="text-[#6B6B70] text-xs mt-1">{subtitle}</div>
+        <div className="text-[var(--text-secondary)] text-xs mt-1.5">{subtitle}</div>
       )}
     </div>
   );

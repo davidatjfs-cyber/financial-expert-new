@@ -7,13 +7,17 @@ from __future__ import annotations
 import json
 import multiprocessing
 import os
+import re
 import threading
 import time
+import html
 from io import BytesIO
 from pathlib import Path
+import datetime as _dt
 from datetime import date
 from typing import Optional
-from urllib.parse import unquote
+from zoneinfo import ZoneInfo as _ZoneInfo
+from urllib.parse import unquote, urljoin, urlparse, parse_qs
 import numpy as np
 import pandas as pd
 import requests
@@ -29,6 +33,7 @@ from core.models import (
     Alert,
     Company,
     ComputedMetric,
+    PortfolioAutoTrade,
     PortfolioPosition,
     PortfolioTrade,
     Report,
@@ -61,6 +66,24 @@ _SPOT_CACHE: dict[str, tuple[float, "pd.DataFrame"]] = {}
 
 # If yfinance is rate-limited for US symbols, skip yfinance for a short cooldown window.
 _YF_US_COOLDOWN_UNTIL: float = 0.0
+
+
+def _latest_closed_trade_date_us(now_ny: _dt.datetime | None = None) -> date:
+    """Return the latest *closed* US trading date (weekday-only approximation)."""
+    ny = now_ny or _dt.datetime.now(_ZoneInfo("America/New_York"))
+    d = ny.date()
+
+    # Weekend: roll back to Friday.
+    if d.weekday() >= 5:
+        d = d - _dt.timedelta(days=(d.weekday() - 4))
+        return d
+
+    # Weekday before close (16:00 NY): current day's bar is still forming.
+    if ny.time() < _dt.time(16, 0):
+        d = d - _dt.timedelta(days=1)
+        while d.weekday() >= 5:
+            d = d - _dt.timedelta(days=1)
+    return d
 
 
 def _pdf_extract_worker(
@@ -164,6 +187,14 @@ class ReportResponse(BaseModel):
     status: str
     created_at: int
     updated_at: int
+    company_id: Optional[str] = None
+
+
+class CompanyHistoryResponse(BaseModel):
+    company_name: str
+    website: Optional[str] = None
+    source_url: Optional[str] = None
+    history_text: str = ""
 
 
 class ReportDetailResponse(BaseModel):
@@ -220,9 +251,11 @@ class PortfolioPositionResponse(BaseModel):
     strategy_buy_price: Optional[float] = None
     strategy_buy_ok: Optional[bool] = None
     strategy_buy_reason: Optional[str] = None
+    strategy_buy_desc: Optional[str] = None
     strategy_sell_price: Optional[float] = None
     strategy_sell_ok: Optional[bool] = None
     strategy_sell_reason: Optional[str] = None
+    strategy_sell_desc: Optional[str] = None
     updated_at: int
 
 
@@ -254,6 +287,28 @@ class PortfolioTradeResponse(BaseModel):
     quantity: float
     amount: float
     created_at: int
+
+
+class PortfolioAutoTradeRequest(BaseModel):
+    position_id: str
+    side: str  # BUY / SELL
+    trigger_price: float
+    quantity: float
+
+
+class PortfolioAutoTradeResponse(BaseModel):
+    id: str
+    position_id: str
+    side: str
+    trigger_price: float
+    quantity: float
+    status: str
+    created_at: int
+    executed_at: Optional[int] = None
+    executed_price: Optional[float] = None
+    symbol: Optional[str] = None
+    name: Optional[str] = None
+    market: Optional[str] = None
 
 
 class PortfolioAlertResponse(BaseModel):
@@ -316,6 +371,7 @@ def get_reports(limit: int = 50, status: Optional[str] = None):
             status=r.status,
             created_at=getattr(r, "created_at", r.updated_at),
             updated_at=r.updated_at,
+            company_id=getattr(r, "company_id", None),
         )
         for r in reports
     ]
@@ -361,13 +417,493 @@ def get_report_detail(report_id: str):
     )
 
 
+_COMPANY_HISTORY_CACHE: dict[str, tuple[float, dict]] = {}
+_COMPANY_HISTORY_CACHE_TTL = 12 * 3600
+
+
+def _extract_text_from_html(raw_html: str) -> str:
+    if not raw_html:
+        return ""
+    text = raw_html
+    text = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", text)
+    text = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", text)
+    text = re.sub(r"(?is)<noscript[^>]*>.*?</noscript>", " ", text)
+    text = re.sub(r"(?is)<[^>]+>", " ", text)
+    text = html.unescape(text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _score_history_text(text: str) -> int:
+    if not text:
+        return 0
+    kws = ["发展历程", "历史", "里程碑", "成立", "创立", "上市", "改制", "history", "founded", "milestone"]
+    score = 0
+    for kw in kws:
+        score += text.lower().count(kw.lower()) * 10
+    score += min(len(text) // 50, 200)
+    return score
+
+
+def _extract_links(base_url: str, raw_html: str) -> list[str]:
+    hrefs = re.findall(r"(?is)href\s*=\s*['\"]([^'\"]+)['\"]", raw_html or "")
+    out: list[str] = []
+    base_netloc = urlparse(base_url).netloc
+    for href in hrefs:
+        if not href or href.startswith("#") or href.startswith("javascript:"):
+            continue
+        u = urljoin(base_url, href.strip())
+        pu = urlparse(u)
+        if pu.scheme not in ("http", "https"):
+            continue
+        if base_netloc and pu.netloc and pu.netloc != base_netloc:
+            continue
+        out.append(u)
+    uniq: list[str] = []
+    seen: set[str] = set()
+    for u in out:
+        if u not in seen:
+            seen.add(u)
+            uniq.append(u)
+    return uniq
+
+
+def _find_official_website(report: Report, company_name: str) -> Optional[str]:
+    market = (report.market or "").upper()
+    symbol = ""
+    if report.company_id and ":" in report.company_id:
+        symbol = report.company_id.split(":", 1)[1]
+
+    try:
+        meta = json.loads(report.source_meta or "{}") if report.source_meta else {}
+        for k in ("website", "official_website", "company_website", "url"):
+            v = (meta.get(k) or "").strip() if isinstance(meta, dict) else ""
+            if v.startswith("http"):
+                return v
+    except Exception:
+        pass
+
+    # CN profile may contain official website field.
+    if market == "CN" and symbol:
+        try:
+            import akshare as ak
+
+            df = ak.stock_individual_info_em(symbol=symbol[:6])
+            if df is not None and not df.empty:
+                for _, row in df.iterrows():
+                    item = str(row.get("item") or row.get("项目") or "")
+                    val = str(row.get("value") or row.get("值") or "").strip()
+                    if any(x in item for x in ["官网", "网站"]) and val.startswith("http"):
+                        return val
+        except Exception:
+            pass
+
+    # HK company profile often includes official website directly.
+    if market == "HK" and symbol:
+        try:
+            import akshare as ak
+
+            stock = symbol.split(".", 1)[0].zfill(5)
+            df = ak.stock_hk_company_profile_em(symbol=stock)
+            if df is not None and not df.empty:
+                val = str(df.iloc[0].get("公司网址") or "").strip()
+                if val and val not in ("--", "None", "nan"):
+                    if not val.startswith("http"):
+                        val = f"https://{val}"
+                    return val
+        except Exception:
+            pass
+
+    # US/HK: yfinance often exposes official website.
+    if symbol:
+        try:
+            import yfinance as yf
+
+            symbol_up = symbol.upper()
+            if market == "HK":
+                code = symbol_up.split(".", 1)[0].lstrip("0") or symbol_up.split(".", 1)[0]
+                yf_symbol = f"{code}.HK"
+            elif market == "US":
+                yf_symbol = symbol_up.split(".", 1)[0]
+            else:
+                yf_symbol = symbol_up
+            tk = yf.Ticker(yf_symbol)
+            info = tk.info or {}
+            w = (info.get("website") or "").strip()
+            if w.startswith("http"):
+                return w
+        except Exception:
+            pass
+
+    # CN fallback by company name -> symbol -> profile website
+    if market == "CN" and not symbol and company_name:
+        try:
+            import akshare as ak
+
+            cn_df = ak.stock_info_a_code_name()
+            if cn_df is not None and not cn_df.empty:
+                cols = set(cn_df.columns)
+                name_col = "name" if "name" in cols else ("名称" if "名称" in cols else None)
+                code_col = "code" if "code" in cols else ("代码" if "代码" in cols else None)
+                if name_col and code_col:
+                    q = (company_name or "").strip()
+                    # Prefer exact match, then prefix/contains.
+                    cand = cn_df[cn_df[name_col].astype(str) == q]
+                    if cand.empty:
+                        cand = cn_df[cn_df[name_col].astype(str).str.startswith(q)]
+                    if cand.empty:
+                        cand = cn_df[cn_df[name_col].astype(str).str.contains(q, regex=False)]
+                    if not cand.empty:
+                        guess_symbol = str(cand.iloc[0][code_col])[:6]
+                        info_df = ak.stock_individual_info_em(symbol=guess_symbol)
+                        if info_df is not None and not info_df.empty:
+                            for _, row in info_df.iterrows():
+                                item = str(row.get("item") or row.get("项目") or "")
+                                val = str(row.get("value") or row.get("值") or "").strip()
+                                if any(x in item for x in ["官网", "网站"]) and val.startswith("http"):
+                                    return val
+        except Exception:
+            pass
+
+    # Last fallback: search engine result (best effort).
+    try:
+        q = f"{company_name} 官方网站"
+        r = requests.get(
+            "https://duckduckgo.com/html/",
+            params={"q": q},
+            timeout=8,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        if r.ok:
+            links = re.findall(r'(?is)<a[^>]+class="result__a"[^>]+href="([^"]+)"', r.text)
+            for u in links[:5]:
+                # DuckDuckGo HTML often returns /l/?uddg=<encoded_target>
+                if u.startswith("/"):
+                    qd = parse_qs(urlparse(u).query)
+                    uddg = (qd.get("uddg") or [""])[0]
+                    if uddg:
+                        u = unquote(uddg)
+                pu = urlparse(u)
+                if pu.scheme in ("http", "https") and pu.netloc:
+                    return u
+    except Exception:
+        pass
+    return None
+
+
+def _fetch_company_history_from_website(website: str) -> tuple[str, Optional[str]]:
+    if not website:
+        return "", None
+    try:
+        homepage = requests.get(website, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+    except Exception:
+        return "", None
+    if not homepage.ok:
+        return "", None
+
+    raw = homepage.text or ""
+    links = _extract_links(website, raw)
+    history_keywords = ["发展历程", "发展历史", "里程碑", "关于我们", "公司简介", "history", "about", "milestone"]
+
+    candidates: list[str] = [website]
+    for u in links:
+        ul = u.lower()
+        if any(k.lower() in ul for k in history_keywords):
+            candidates.append(u)
+        if len(candidates) >= 10:
+            break
+
+    best_text = _extract_text_from_html(raw)
+    best_url = website
+    best_score = _score_history_text(best_text)
+
+    for u in candidates[1:10]:
+        try:
+            r = requests.get(u, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+            if not r.ok:
+                continue
+            t = _extract_text_from_html(r.text or "")
+            s = _score_history_text(t)
+            if s > best_score:
+                best_score = s
+                best_text = t
+                best_url = u
+        except Exception:
+            continue
+
+    if not best_text:
+        return "", None
+
+    # Keep only dense history-like fragments.
+    segs = re.split(r"[。.!?；;]", best_text)
+    picked: list[str] = []
+    for seg in segs:
+        s = seg.strip()
+        if len(s) < 12:
+            continue
+        if any(k in s.lower() for k in ["发展", "历史", "成立", "创立", "上市", "里程碑", "history", "founded", "milestone"]):
+            picked.append(s)
+        if len("。".join(picked)) > 900:
+            break
+
+    if not picked:
+        picked = [best_text[:900]] if best_text else []
+    result = "。".join(picked).strip()
+    if result and not result.endswith("。"):
+        result += "。"
+    return result[:1200], best_url
+
+
+def _normalize_company_name(name: str) -> str:
+    s = (name or "").strip()
+    if not s:
+        return s
+    # Remove common appended report date fragments, e.g. "百胜中国 2024-12-31"
+    s = re.sub(r"\s*\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}日?\s*$", "", s)
+    s = re.sub(r"\s*(年报|季报|中报|财报)\s*$", "", s)
+    return s.strip()
+
+
+@app.get("/api/reports/{report_id}/company-history", response_model=CompanyHistoryResponse)
+def get_report_company_history(report_id: str):
+    report = get_report(report_id)
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    company_name = _normalize_company_name(report.report_name or "")
+    if report.company_id:
+        try:
+            with session_scope() as s:
+                c = s.get(Company, report.company_id)
+                if c and c.name:
+                    company_name = _normalize_company_name(c.name)
+        except Exception:
+            pass
+
+    cache_key = f"{report_id}|{company_name}|{report.company_id or ''}|{report.market or ''}"
+    now = time.time()
+    hit = _COMPANY_HISTORY_CACHE.get(cache_key)
+    if hit and now - hit[0] < _COMPANY_HISTORY_CACHE_TTL:
+        data = hit[1]
+        return CompanyHistoryResponse(**data)
+
+    website = _find_official_website(report, company_name)
+    history_text = ""
+    source_url = None
+
+    # HK company profile includes rich introduction/development history text.
+    if report.company_id and report.company_id.startswith("HK:"):
+        try:
+            import akshare as ak
+
+            symbol = report.company_id.split(":", 1)[1]
+            stock = symbol.split(".", 1)[0].zfill(5)
+            df = ak.stock_hk_company_profile_em(symbol=stock)
+            if df is not None and not df.empty:
+                intro = str(df.iloc[0].get("公司介绍") or "").strip()
+                if intro and intro not in ("--", "None", "nan"):
+                    history_text = intro[:1200]
+                    source_url = website
+                if not website:
+                    w = str(df.iloc[0].get("公司网址") or "").strip()
+                    if w and w not in ("--", "None", "nan"):
+                        website = w if w.startswith("http") else f"https://{w}"
+        except Exception:
+            pass
+
+    if website:
+        web_history, web_source_url = _fetch_company_history_from_website(website)
+        if web_history and len(web_history) >= len(history_text):
+            history_text = web_history
+            source_url = web_source_url
+
+    payload = {
+        "company_name": company_name,
+        "website": website,
+        "source_url": source_url,
+        "history_text": history_text or "未能从公司官网提取到可用的发展历史，请稍后重试或补充公司官网链接。",
+    }
+    _COMPANY_HISTORY_CACHE[cache_key] = (now, payload)
+    return CompanyHistoryResponse(**payload)
+
+
+@app.get("/api/reports/{report_id}/industry-benchmarks")
+def get_report_industry_benchmarks(report_id: str):
+    """Get industry-specific benchmark averages for a report's company."""
+    # Industry benchmark data by sector
+    INDUSTRY_BENCHMARKS_BY_SECTOR = {
+        "银行": {
+            "GROSS_MARGIN": {"avg": None}, "NET_MARGIN": {"avg": 35.0}, "ROE": {"avg": 10.0},
+            "ROA": {"avg": 0.8}, "CURRENT_RATIO": {"avg": None}, "DEBT_ASSET": {"avg": 92.0},
+            "ASSET_TURNOVER": {"avg": 0.02},
+        },
+        "保险": {
+            "GROSS_MARGIN": {"avg": None}, "NET_MARGIN": {"avg": 8.0}, "ROE": {"avg": 12.0},
+            "ROA": {"avg": 1.0}, "CURRENT_RATIO": {"avg": None}, "DEBT_ASSET": {"avg": 88.0},
+            "ASSET_TURNOVER": {"avg": 0.15},
+        },
+        "白酒": {
+            "GROSS_MARGIN": {"avg": 75.0}, "NET_MARGIN": {"avg": 35.0}, "ROE": {"avg": 25.0},
+            "ROA": {"avg": 18.0}, "CURRENT_RATIO": {"avg": 3.0}, "DEBT_ASSET": {"avg": 30.0},
+            "ASSET_TURNOVER": {"avg": 0.5},
+        },
+        "制造业": {
+            "GROSS_MARGIN": {"avg": 25.0}, "NET_MARGIN": {"avg": 8.0}, "ROE": {"avg": 12.0},
+            "ROA": {"avg": 6.0}, "CURRENT_RATIO": {"avg": 1.5}, "DEBT_ASSET": {"avg": 55.0},
+            "ASSET_TURNOVER": {"avg": 0.7},
+        },
+        "科技": {
+            "GROSS_MARGIN": {"avg": 50.0}, "NET_MARGIN": {"avg": 18.0}, "ROE": {"avg": 18.0},
+            "ROA": {"avg": 10.0}, "CURRENT_RATIO": {"avg": 2.5}, "DEBT_ASSET": {"avg": 35.0},
+            "ASSET_TURNOVER": {"avg": 0.6},
+        },
+        "互联网": {
+            "GROSS_MARGIN": {"avg": 45.0}, "NET_MARGIN": {"avg": 15.0}, "ROE": {"avg": 15.0},
+            "ROA": {"avg": 8.0}, "CURRENT_RATIO": {"avg": 2.0}, "DEBT_ASSET": {"avg": 40.0},
+            "ASSET_TURNOVER": {"avg": 0.5},
+        },
+        "餐饮": {
+            "GROSS_MARGIN": {"avg": 60.0}, "NET_MARGIN": {"avg": 8.0}, "ROE": {"avg": 15.0},
+            "ROA": {"avg": 8.0}, "CURRENT_RATIO": {"avg": 1.0}, "DEBT_ASSET": {"avg": 60.0},
+            "ASSET_TURNOVER": {"avg": 1.2},
+        },
+        "零售": {
+            "GROSS_MARGIN": {"avg": 25.0}, "NET_MARGIN": {"avg": 3.0}, "ROE": {"avg": 12.0},
+            "ROA": {"avg": 5.0}, "CURRENT_RATIO": {"avg": 1.2}, "DEBT_ASSET": {"avg": 60.0},
+            "ASSET_TURNOVER": {"avg": 2.0},
+        },
+        "医药": {
+            "GROSS_MARGIN": {"avg": 60.0}, "NET_MARGIN": {"avg": 15.0}, "ROE": {"avg": 15.0},
+            "ROA": {"avg": 8.0}, "CURRENT_RATIO": {"avg": 2.0}, "DEBT_ASSET": {"avg": 35.0},
+            "ASSET_TURNOVER": {"avg": 0.5},
+        },
+        "房地产": {
+            "GROSS_MARGIN": {"avg": 25.0}, "NET_MARGIN": {"avg": 8.0}, "ROE": {"avg": 10.0},
+            "ROA": {"avg": 2.0}, "CURRENT_RATIO": {"avg": 1.3}, "DEBT_ASSET": {"avg": 78.0},
+            "ASSET_TURNOVER": {"avg": 0.2},
+        },
+        "能源": {
+            "GROSS_MARGIN": {"avg": 30.0}, "NET_MARGIN": {"avg": 10.0}, "ROE": {"avg": 12.0},
+            "ROA": {"avg": 5.0}, "CURRENT_RATIO": {"avg": 1.2}, "DEBT_ASSET": {"avg": 55.0},
+            "ASSET_TURNOVER": {"avg": 0.6},
+        },
+        "消费品": {
+            "GROSS_MARGIN": {"avg": 40.0}, "NET_MARGIN": {"avg": 10.0}, "ROE": {"avg": 15.0},
+            "ROA": {"avg": 8.0}, "CURRENT_RATIO": {"avg": 1.8}, "DEBT_ASSET": {"avg": 45.0},
+            "ASSET_TURNOVER": {"avg": 0.8},
+        },
+        "默认": {
+            "GROSS_MARGIN": {"avg": 32.0}, "NET_MARGIN": {"avg": 10.0}, "ROE": {"avg": 13.0},
+            "ROA": {"avg": 6.0}, "CURRENT_RATIO": {"avg": 1.5}, "DEBT_ASSET": {"avg": 55.0},
+            "ASSET_TURNOVER": {"avg": 0.7},
+        },
+    }
+
+    def _detect_industry(company_name: str, industry_code: str | None) -> str:
+        """Detect industry bucket from industry_code and company name."""
+        s = (industry_code or "").strip().lower()
+        name = (company_name or "").strip()
+        combined = s + " " + name.lower()
+
+        if any(kw in combined for kw in ["银行", "bank"]):
+            return "银行"
+        if any(kw in combined for kw in ["保险", "人寿", "财险", "insurance"]):
+            return "保险"
+        if any(kw in combined for kw in ["白酒", "五粮液", "茅台", "泸州老窖", "洋河", "汾酒", "酒"]):
+            return "白酒"
+        if any(kw in combined for kw in [
+            "餐饮", "火锅", "海底捞", "小菜园", "小南国", "呷哺", "九毛九", "太二", "奈雪", "喜茶",
+            "restaurant", "food service", "catering", "dining", "mcdonald", "starbucks", "yum",
+            "chipotle", "darden", "domino", "pizza", "cafe", "coffee",
+        ]):
+            return "餐饮"
+        if any(kw in combined for kw in [
+            "零售", "retail", "超市", "百货", "walmart", "costco", "电商",
+            "specialty retail", "grocery", "department store", "discount store",
+            "home improvement", "apparel retail",
+        ]):
+            return "零售"
+        if any(kw in combined for kw in [
+            "医药", "制药", "生物", "pharma", "biotech", "drug", "health",
+            "medical", "hospital", "diagnostic", "therapeut",
+        ]):
+            return "医药"
+        if any(kw in combined for kw in [
+            "互联网", "internet", "腾讯", "阿里", "美团", "字节", "百度", "京东", "拼多多",
+            "meta", "google", "alphabet", "amazon", "netflix", "online",
+            "interactive media", "internet content",
+        ]):
+            return "互联网"
+        if any(kw in combined for kw in [
+            "科技", "tech", "软件", "software", "芯片", "半导体", "semiconductor",
+            "apple", "microsoft", "nvidia", "苹果", "英伟达",
+            "information technology", "electronic", "computing", "cloud",
+        ]):
+            return "科技"
+        if any(kw in combined for kw in ["房地产", "地产", "real estate", "property", "万科", "碧桂园", "恒大", "reit"]):
+            return "房地产"
+        if any(kw in combined for kw in [
+            "能源", "石油", "石化", "energy", "oil", "gas", "煤炭", "电力",
+            "petroleum", "natural gas", "utilities", "solar", "wind power",
+        ]):
+            return "能源"
+        if any(kw in combined for kw in [
+            "消费", "consumer", "食品", "饮料", "日用", "家电",
+            "packaged food", "beverage", "household", "personal product",
+            "consumer defensive", "consumer cyclical",
+        ]):
+            return "消费品"
+        if any(kw in combined for kw in [
+            "制造", "机械", "汽车", "电子", "工业", "manufacturing", "industrial",
+            "auto", "aerospace", "defense", "machinery", "construction",
+        ]):
+            return "制造业"
+        return "默认"
+
+    report = get_report(report_id)
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    company_name = report.report_name or ""
+    industry_code = None
+    try:
+        if report.company_id:
+            with session_scope() as s:
+                c = s.get(Company, report.company_id)
+                if c:
+                    industry_code = c.industry_code
+                    if c.name:
+                        company_name = c.name
+    except Exception:
+        pass
+
+    bucket = _detect_industry(company_name, industry_code)
+    benchmarks = INDUSTRY_BENCHMARKS_BY_SECTOR.get(bucket, INDUSTRY_BENCHMARKS_BY_SECTOR["默认"])
+
+    return {
+        "industry": bucket,
+        "industry_code": industry_code,
+        "company_name": company_name,
+        "benchmarks": {
+            "grossMargin": benchmarks["GROSS_MARGIN"]["avg"],
+            "netMargin": benchmarks["NET_MARGIN"]["avg"],
+            "roe": benchmarks["ROE"]["avg"],
+            "roa": benchmarks["ROA"]["avg"],
+            "currentRatio": benchmarks["CURRENT_RATIO"]["avg"],
+            "debtRatio": benchmarks["DEBT_ASSET"]["avg"],
+            "assetTurnover": benchmarks["ASSET_TURNOVER"]["avg"],
+        },
+    }
+
+
 @app.get("/api/reports/{report_id}/metrics", response_model=list[MetricResponse])
 def get_report_metrics(report_id: str):
     """Get computed metrics for a report."""
     with session_scope() as s:
+        report = s.get(Report, report_id)
         stmt = select(ComputedMetric).where(ComputedMetric.report_id == report_id)
         metrics = s.execute(stmt).scalars().all()
-        return [
+        rows = [
             MetricResponse(
                 metric_code=m.metric_code,
                 metric_name=m.metric_name,
@@ -377,6 +913,609 @@ def get_report_metrics(report_id: str):
             )
             for m in metrics
         ]
+
+        # Backfill raw metrics for legacy reports:
+        # TOTAL_REVENUE <- IS.REVENUE / statement aliases
+        # OPERATING_CASH_FLOW <- CF.CFO / statement aliases
+        alias_map = {
+            "TOTAL_REVENUE": {
+                "metric_aliases": ["IS.REVENUE"],
+                "statement_aliases": ["IS.REVENUE", "IS.OPERATE_INCOME", "IS.TOTAL_REVENUE"],
+                "name": "营业总收入",
+                "unit": "",
+            },
+            "OPERATING_CASH_FLOW": {
+                "metric_aliases": ["CF.CFO"],
+                "statement_aliases": ["CF.CFO", "CF.NET_CASH_OPERATE", "CF.NET_CASH_FROM_OPERATING_ACTIVITIES"],
+                "name": "经营现金流量净额",
+                "unit": "",
+            },
+        }
+
+        existing = {(r.metric_code, r.period_end) for r in rows}
+        row_pos = {(r.metric_code, r.period_end): i for i, r in enumerate(rows)}
+
+        def _upsert_metric(metric_code: str, metric_name: str, period_end: str, value: float, unit: str = "", *, prefer_larger: bool = False):
+            key = (metric_code, period_end)
+            idx = row_pos.get(key)
+            if idx is None:
+                rows.append(MetricResponse(metric_code=metric_code, metric_name=metric_name, value=value, unit=unit, period_end=period_end))
+                existing.add(key)
+                row_pos[key] = len(rows) - 1
+                return
+            try:
+                old_v = rows[idx].value
+                old_f = float(old_v) if old_v is not None else None
+            except Exception:
+                old_f = None
+            should_replace = old_f is None
+            if not should_replace and prefer_larger:
+                try:
+                    should_replace = abs(float(value)) > abs(float(old_f)) * 1.2
+                except Exception:
+                    should_replace = True
+            if should_replace:
+                rows[idx] = MetricResponse(metric_code=metric_code, metric_name=metric_name, value=value, unit=unit, period_end=period_end)
+
+        def _infer_market_symbol_from_report() -> tuple[str | None, str | None]:
+            if not report:
+                return None, None
+            if report.company_id and ":" in report.company_id:
+                mk, sym = report.company_id.split(":", 1)
+                return (mk or "").upper(), sym
+            if report.source_type != "market_fetch":
+                return None, None
+
+            base_name = str(report.report_name or "").strip()
+            base_name = re.sub(r"\s*\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}日?\s*$", "", base_name)
+            base_name = re.sub(r"\s*(年报|季报|中报|财报)\s*$", "", base_name).strip()
+            if not base_name:
+                return None, None
+
+            try:
+                import akshare as ak
+
+                us_df = ak.stock_us_spot_em()
+                if us_df is not None and not us_df.empty:
+                    name_col = "名称" if "名称" in us_df.columns else ("name" if "name" in us_df.columns else None)
+                    code_col = "代码" if "代码" in us_df.columns else ("code" if "code" in us_df.columns else None)
+                    if name_col and code_col:
+                        hit = us_df[us_df[name_col].astype(str).str.contains(base_name, na=False)]
+                        if not hit.empty:
+                            sym = str(hit.iloc[0].get(code_col) or "").strip().upper()
+                            if sym:
+                                return "US", sym.split(".", 1)[0]
+            except Exception:
+                pass
+
+            try:
+                import akshare as ak
+
+                hk_df = ak.stock_hk_spot_em()
+                if hk_df is not None and not hk_df.empty:
+                    name_col = "名称" if "名称" in hk_df.columns else ("name" if "name" in hk_df.columns else None)
+                    code_col = "代码" if "代码" in hk_df.columns else ("code" if "code" in hk_df.columns else None)
+                    if name_col and code_col:
+                        hit = hk_df[hk_df[name_col].astype(str).str.contains(base_name, na=False)]
+                        if not hit.empty:
+                            raw = str(hit.iloc[0].get(code_col) or "").strip()
+                            if raw:
+                                code = raw.split(".", 1)[0].zfill(5)
+                                return "HK", code
+            except Exception:
+                pass
+
+            return None, None
+
+        # 1) from existing computed metric aliases
+        by_period_code: dict[tuple[str, str], float] = {}
+        for r in rows:
+            try:
+                if r.value is not None:
+                    by_period_code[(r.period_end, r.metric_code)] = float(r.value)
+            except Exception:
+                continue
+
+        for target_code, cfg in alias_map.items():
+            alias_codes = cfg["metric_aliases"]
+            periods = sorted({p for (p, _) in by_period_code.keys()})
+            for p in periods:
+                if (target_code, p) in existing:
+                    continue
+                v = None
+                for ac in alias_codes:
+                    v = by_period_code.get((p, ac))
+                    if v is not None:
+                        break
+                if v is None:
+                    continue
+                rows.append(MetricResponse(metric_code=target_code, metric_name=cfg["name"], value=v, unit=cfg["unit"], period_end=p))
+                existing.add((target_code, p))
+
+        # 2) from statement items aliases
+        all_statement_aliases = set()
+        for cfg in alias_map.values():
+            all_statement_aliases.update(cfg["statement_aliases"])
+        if all_statement_aliases:
+            item_stmt = select(StatementItem).where(
+                StatementItem.report_id == report_id,
+                StatementItem.standard_item_code.in_(list(all_statement_aliases)),
+            )
+            items = s.execute(item_stmt).scalars().all()
+            item_map: dict[tuple[str, str], float] = {}
+            for it in items:
+                try:
+                    if it.value is None:
+                        continue
+                    item_map[(it.period_end, it.standard_item_code)] = float(it.value)
+                except Exception:
+                    continue
+
+            periods = sorted({p for (p, _) in item_map.keys()})
+            for target_code, cfg in alias_map.items():
+                for p in periods:
+                    if (target_code, p) in existing:
+                        continue
+                    v = None
+                    for ac in cfg["statement_aliases"]:
+                        v = item_map.get((p, ac))
+                        if v is not None:
+                            break
+                    if v is None:
+                        continue
+                    rows.append(MetricResponse(metric_code=target_code, metric_name=cfg["name"], value=v, unit=cfg["unit"], period_end=p))
+                    existing.add((target_code, p))
+
+        # 3) from statement names (legacy/unknown item codes)
+        missing_targets = [tc for tc in alias_map.keys() if not any(r.metric_code == tc for r in rows)]
+        if missing_targets:
+            name_stmt = select(StatementItem).where(StatementItem.report_id == report_id)
+            all_items = s.execute(name_stmt).scalars().all()
+            name_patterns = {
+                "TOTAL_REVENUE": ["营业总收入", "营业收入", "总收入", "revenue"],
+                "OPERATING_CASH_FLOW": ["经营活动产生的现金流量净额", "经营现金流量净额", "经营活动现金流净额", "经营业务现金净额", "cash from operations", "operating cash flow"],
+            }
+
+            for tc in missing_targets:
+                pats = [x.lower() for x in name_patterns.get(tc, [])]
+                best_by_period: dict[str, float] = {}
+                for it in all_items:
+                    if it.value is None:
+                        continue
+                    n1 = str(it.standard_item_name or "").lower()
+                    n2 = str(it.original_item_name or "").lower()
+                    text = f"{n1} {n2}"
+                    if not any(p in text for p in pats):
+                        continue
+                    try:
+                        best_by_period[it.period_end] = float(it.value)
+                    except Exception:
+                        continue
+
+                cfg = alias_map[tc]
+                for p, v in best_by_period.items():
+                    if (tc, p) in existing:
+                        continue
+                    rows.append(MetricResponse(metric_code=tc, metric_name=cfg["name"], value=v, unit=cfg["unit"], period_end=p))
+                    existing.add((tc, p))
+
+        # 4) yfinance fallback for market_fetch HK/US when OCF/revenue are still missing.
+        try:
+            missing_now = [tc for tc in alias_map.keys() if not any(r.metric_code == tc for r in rows)]
+            if missing_now and report and report.source_type == "market_fetch" and report.company_id and ":" in report.company_id:
+                market, symbol = report.company_id.split(":", 1)
+                market = (market or "").upper()
+                if market in ("HK", "US"):
+                    import yfinance as yf
+
+                    sym_up = (symbol or "").upper()
+                    if market == "HK":
+                        code = sym_up.split(".", 1)[0].lstrip("0") or sym_up.split(".", 1)[0]
+                        yf_symbol = f"{code}.HK"
+                    else:
+                        yf_symbol = sym_up.split(".", 1)[0]
+
+                    tk = yf.Ticker(yf_symbol)
+                    income_df = None
+                    cash_df = None
+                    try:
+                        income_df = tk.financials
+                    except Exception:
+                        income_df = None
+                    try:
+                        cash_df = tk.cashflow
+                    except Exception:
+                        cash_df = None
+
+                    def _pick_from_df(df, row_labels: list[str]) -> dict[str, float]:
+                        out: dict[str, float] = {}
+                        if df is None or getattr(df, "empty", True):
+                            return out
+                        idx_map = {str(i).strip().lower(): i for i in df.index}
+                        row_key = None
+                        for n in row_labels:
+                            if n.lower() in idx_map:
+                                row_key = idx_map[n.lower()]
+                                break
+                        if row_key is None:
+                            for raw in df.index:
+                                low = str(raw).strip().lower()
+                                for n in row_labels:
+                                    if n.lower() in low:
+                                        row_key = raw
+                                        break
+                                if row_key is not None:
+                                    break
+                        if row_key is None:
+                            return out
+                        ser = df.loc[row_key]
+                        for col, v in ser.items():
+                            try:
+                                if v is None or pd.isna(v):
+                                    continue
+                                d = pd.to_datetime(col).date().isoformat()
+                                out[d] = float(v)
+                            except Exception:
+                                continue
+                        return out
+
+                    rev_map = _pick_from_df(income_df, ["Total Revenue", "Revenue"])
+                    cfo_map = _pick_from_df(cash_df, ["Operating Cash Flow", "Cash Flow From Continuing Operating Activities"])
+
+                    for p, v in rev_map.items():
+                        if report and report.period_end and p > report.period_end:
+                            continue
+                        if "TOTAL_REVENUE" not in missing_now:
+                            continue
+                        if ("TOTAL_REVENUE", p) in existing:
+                            continue
+                        rows.append(MetricResponse(metric_code="TOTAL_REVENUE", metric_name="营业总收入", value=v, unit="", period_end=p))
+                        existing.add(("TOTAL_REVENUE", p))
+                    for p, v in cfo_map.items():
+                        if report and report.period_end and p > report.period_end:
+                            continue
+                        if "OPERATING_CASH_FLOW" not in missing_now:
+                            continue
+                        if ("OPERATING_CASH_FLOW", p) in existing:
+                            continue
+                        rows.append(MetricResponse(metric_code="OPERATING_CASH_FLOW", metric_name="经营现金流量净额", value=v, unit="", period_end=p))
+                        existing.add(("OPERATING_CASH_FLOW", p))
+        except Exception:
+            pass
+
+        # 5) HK AkShare indicator fallback (often has 营业总收入 / 经营现金流量净额).
+        try:
+            missing_now = [tc for tc in alias_map.keys() if not any(r.metric_code == tc for r in rows)]
+            need_prev = []
+            if report and report.period_end:
+                for tc in alias_map.keys():
+                    has_prev = any((r.metric_code == tc) and (r.period_end or "") < (report.period_end or "") for r in rows)
+                    if not has_prev:
+                        need_prev.append(tc)
+            if (missing_now or need_prev) and report and report.source_type == "market_fetch" and report.company_id and report.company_id.startswith("HK:"):
+                import akshare as ak
+
+                symbol = report.company_id.split(":", 1)[1]
+                stock = symbol.split(".", 1)[0].zfill(5)
+                ind_df = ak.stock_hk_financial_indicator_em(symbol=stock)
+                if ind_df is not None and not ind_df.empty:
+                    date_col = None
+                    for c in ("REPORT_DATE", "报告期", "STD_REPORT_DATE", "日期"):
+                        if c in ind_df.columns:
+                            date_col = c
+                            break
+
+                    for _, row in ind_df.iterrows():
+                        pe = report.period_end
+                        if date_col:
+                            try:
+                                pe = pd.to_datetime(row.get(date_col)).date().isoformat()
+                            except Exception:
+                                pe = report.period_end
+
+                        if ("TOTAL_REVENUE" in missing_now or "TOTAL_REVENUE" in need_prev) and ("TOTAL_REVENUE", pe) not in existing:
+                            for k in ("营业总收入", "营业收入", "总收入"):
+                                v = row.get(k)
+                                try:
+                                    if v is not None and str(v) not in ("", "--", "nan", "None"):
+                                        rows.append(MetricResponse(metric_code="TOTAL_REVENUE", metric_name="营业总收入", value=float(v), unit="", period_end=pe))
+                                        existing.add(("TOTAL_REVENUE", pe))
+                                        break
+                                except Exception:
+                                    continue
+
+                        if ("OPERATING_CASH_FLOW" in missing_now or "OPERATING_CASH_FLOW" in need_prev) and ("OPERATING_CASH_FLOW", pe) not in existing:
+                            for k in ("经营活动产生的现金流量净额", "经营现金流量净额", "经营活动现金流净额", "经营业务现金净额"):
+                                v = row.get(k)
+                                try:
+                                    if v is not None and str(v) not in ("", "--", "nan", "None"):
+                                        rows.append(MetricResponse(metric_code="OPERATING_CASH_FLOW", metric_name="经营现金流量净额", value=float(v), unit="", period_end=pe))
+                                        existing.add(("OPERATING_CASH_FLOW", pe))
+                                        break
+                                except Exception:
+                                    continue
+        except Exception:
+            pass
+
+        # 6) HK financial statements fallback for missing cash flow/revenue.
+        try:
+            missing_now = [tc for tc in alias_map.keys() if not any(r.metric_code == tc for r in rows)]
+            need_prev = []
+            if report and report.period_end:
+                for tc in alias_map.keys():
+                    has_prev = any((r.metric_code == tc) and (r.period_end or "") < (report.period_end or "") for r in rows)
+                    if not has_prev:
+                        need_prev.append(tc)
+            if (missing_now or need_prev) and report and report.source_type == "market_fetch" and report.company_id and report.company_id.startswith("HK:"):
+                import akshare as ak
+
+                symbol = report.company_id.split(":", 1)[1]
+                stock = symbol.split(".", 1)[0].zfill(5)
+
+                def _pick_amount(df, keywords: list[str]) -> dict[str, float]:
+                    out: dict[str, float] = {}
+                    if df is None or df.empty:
+                        return out
+                    item_col = None
+                    for c in ("STD_ITEM_NAME", "ITEM_NAME", "项目名称"):
+                        if c in df.columns:
+                            item_col = c
+                            break
+                    amt_col = "AMOUNT" if "AMOUNT" in df.columns else ("金额" if "金额" in df.columns else None)
+                    date_col = None
+                    for c in ("STD_REPORT_DATE", "REPORT_DATE", "报告期"):
+                        if c in df.columns:
+                            date_col = c
+                            break
+                    if not item_col or not amt_col:
+                        return out
+
+                    for _, rr in df.iterrows():
+                        item_name = str(rr.get(item_col) or "")
+                        if not any(k in item_name for k in keywords):
+                            continue
+                        v = rr.get(amt_col)
+                        if v is None or str(v) in ("", "--", "None", "nan"):
+                            continue
+                        try:
+                            pe = report.period_end
+                            if date_col:
+                                pe = pd.to_datetime(rr.get(date_col)).date().isoformat()
+                            out[pe] = float(v)
+                        except Exception:
+                            continue
+                    return out
+
+                profit_df = None
+                cash_df = None
+                try:
+                    profit_df = ak.stock_financial_hk_report_em(stock=stock, symbol="利润表", indicator="年度")
+                except Exception:
+                    profit_df = None
+                try:
+                    cash_df = ak.stock_financial_hk_report_em(stock=stock, symbol="现金流量表", indicator="年度")
+                except Exception:
+                    cash_df = None
+
+                if "TOTAL_REVENUE" in missing_now or "TOTAL_REVENUE" in need_prev:
+                    rev_map = _pick_amount(profit_df, ["营业额", "营运收入", "营业总收入", "营业收入", "总收入", "Turnover", "Revenue", "Total revenue"])
+                    for pe, v in rev_map.items():
+                        _upsert_metric("TOTAL_REVENUE", "营业总收入", pe, v, "", prefer_larger=True)
+
+                if "OPERATING_CASH_FLOW" in missing_now or "OPERATING_CASH_FLOW" in need_prev:
+                    cfo_map = _pick_amount(cash_df, ["经营活动产生的现金流量净额", "经营现金流量净额", "经营活动现金流净额", "经营业务现金净额"])
+                    for pe, v in cfo_map.items():
+                        _upsert_metric("OPERATING_CASH_FLOW", "经营现金流量净额", pe, v, "", prefer_larger=True)
+        except Exception:
+            pass
+
+        # 7) US AkShare statements fallback for missing/previous-period revenue & CFO.
+        try:
+            missing_now = [tc for tc in alias_map.keys() if not any(r.metric_code == tc for r in rows)]
+            need_prev = []
+            if report and report.period_end:
+                for tc in alias_map.keys():
+                    has_prev = any((r.metric_code == tc) and (r.period_end or "") < (report.period_end or "") for r in rows)
+                    if not has_prev:
+                        need_prev.append(tc)
+            if (missing_now or need_prev) and report and report.source_type == "market_fetch" and report.company_id and report.company_id.startswith("US:"):
+                import akshare as ak
+
+                symbol = report.company_id.split(":", 1)[1]
+                stock = symbol.split(".", 1)[0].upper()
+
+                def _pick_amount_map(df, keywords: list[str]) -> dict[str, float]:
+                    out = {}
+                    if df is None or df.empty:
+                        return out
+                    item_col = "ITEM_NAME" if "ITEM_NAME" in df.columns else ("STD_ITEM_NAME" if "STD_ITEM_NAME" in df.columns else None)
+                    amt_col = "AMOUNT" if "AMOUNT" in df.columns else ("金额" if "金额" in df.columns else None)
+                    date_col = "REPORT_DATE" if "REPORT_DATE" in df.columns else ("STD_REPORT_DATE" if "STD_REPORT_DATE" in df.columns else None)
+                    if not item_col or not amt_col:
+                        return out
+                    for _, rr in df.iterrows():
+                        nm = str(rr.get(item_col) or "")
+                        if not any(k.lower() in nm.lower() for k in keywords):
+                            continue
+                        v = rr.get(amt_col)
+                        if v is None or str(v) in ("", "--", "None", "nan"):
+                            continue
+                        try:
+                            pe = report.period_end
+                            if date_col:
+                                pe = pd.to_datetime(rr.get(date_col)).date().isoformat()
+                            out[pe] = float(v)
+                        except Exception:
+                            continue
+                    return out
+
+                income_df = None
+                cash_df = None
+                try:
+                    income_df = ak.stock_financial_us_report_em(stock=stock, symbol="综合损益表", indicator="年报")
+                except Exception:
+                    income_df = None
+                try:
+                    cash_df = ak.stock_financial_us_report_em(stock=stock, symbol="现金流量表", indicator="年报")
+                except Exception:
+                    cash_df = None
+
+                if "TOTAL_REVENUE" in missing_now or "TOTAL_REVENUE" in need_prev:
+                    rev_map = _pick_amount_map(income_df, ["营业收入", "营业总收入", "总收入", "Revenue", "Total revenue"])
+                    for pe, v in rev_map.items():
+                        _upsert_metric("TOTAL_REVENUE", "营业总收入", pe, v, "", prefer_larger=True)
+
+                if "OPERATING_CASH_FLOW" in missing_now or "OPERATING_CASH_FLOW" in need_prev:
+                    cfo_map = _pick_amount_map(cash_df, ["经营活动产生的现金流量净额", "经营活动现金流量净额", "经营现金流量净额", "Operating Cash Flow", "Cash Flow From Continuing Operating Activities"])
+                    for pe, v in cfo_map.items():
+                        _upsert_metric("OPERATING_CASH_FLOW", "经营现金流量净额", pe, v, "", prefer_larger=True)
+        except Exception:
+            pass
+
+        # 8) Backfill previous-period ratio metrics for market_fetch HK/US (YoY display support).
+        try:
+            ratio_map = {
+                "GROSS_MARGIN": ("毛利率", "%"),
+                "NET_MARGIN": ("净利率", "%"),
+                "ROE": ("ROE", "%"),
+                "ROA": ("ROA", "%"),
+                "DEBT_ASSET": ("资产负债率", "%"),
+                "CURRENT_RATIO": ("流动比率", "times"),
+                "QUICK_RATIO": ("速动比率", "times"),
+            }
+            need_prev_ratio = []
+            if report and report.period_end:
+                for code in ratio_map.keys():
+                    has_prev = any((r.metric_code == code) and (r.period_end or "") < report.period_end for r in rows)
+                    if not has_prev:
+                        need_prev_ratio.append(code)
+
+            if need_prev_ratio and report and report.source_type == "market_fetch":
+                mk, sym = _infer_market_symbol_from_report()
+                if mk in ("US", "HK") and sym:
+                    import akshare as ak
+
+                    if mk == "US":
+                        ind_df = ak.stock_financial_us_analysis_indicator_em(symbol=sym.split(".", 1)[0].upper(), indicator="年报")
+                        if ind_df is not None and not ind_df.empty:
+                            date_col = "REPORT_DATE" if "REPORT_DATE" in ind_df.columns else ("STD_REPORT_DATE" if "STD_REPORT_DATE" in ind_df.columns else None)
+                            col_map = {
+                                "GROSS_MARGIN": ["GROSS_PROFIT_RATIO"],
+                                "NET_MARGIN": ["NET_PROFIT_RATIO"],
+                                "ROE": ["ROE_AVG", "ROE"],
+                                "ROA": ["ROA"],
+                                "DEBT_ASSET": ["DEBT_ASSET_RATIO"],
+                                "CURRENT_RATIO": ["CURRENT_RATIO"],
+                                "QUICK_RATIO": ["SPEED_RATIO", "QUICK_RATIO"],
+                            }
+                            for _, rr in ind_df.iterrows():
+                                pe = report.period_end
+                                if date_col:
+                                    try:
+                                        pe = pd.to_datetime(rr.get(date_col)).date().isoformat()
+                                    except Exception:
+                                        pe = report.period_end
+                                if report.period_end and pe > report.period_end:
+                                    continue
+                                for code in need_prev_ratio:
+                                    if code not in col_map:
+                                        continue
+                                    val = None
+                                    for c in col_map[code]:
+                                        if c in ind_df.columns:
+                                            try:
+                                                v = rr.get(c)
+                                                if v is not None and str(v) not in ("", "--", "nan", "None"):
+                                                    val = float(v)
+                                                    break
+                                            except Exception:
+                                                continue
+                                    if val is None:
+                                        continue
+                                    nm, unit = ratio_map[code]
+                                    _upsert_metric(code, nm, pe, val, unit, prefer_larger=False)
+                    elif mk == "HK":
+                        stock = sym.split(".", 1)[0].zfill(5)
+                        profit_df = ak.stock_financial_hk_report_em(stock=stock, symbol="利润表", indicator="年度")
+                        balance_df = ak.stock_financial_hk_report_em(stock=stock, symbol="资产负债表", indicator="年度")
+
+                        def _map_amount(df, keywords: list[str]) -> dict[str, float]:
+                            out: dict[str, float] = {}
+                            if df is None or df.empty:
+                                return out
+                            date_col = "REPORT_DATE" if "REPORT_DATE" in df.columns else ("STD_REPORT_DATE" if "STD_REPORT_DATE" in df.columns else None)
+                            item_col = "STD_ITEM_NAME" if "STD_ITEM_NAME" in df.columns else ("ITEM_NAME" if "ITEM_NAME" in df.columns else None)
+                            val_col = "AMOUNT" if "AMOUNT" in df.columns else ("金额" if "金额" in df.columns else None)
+                            if not item_col or not val_col:
+                                return out
+                            for _, rr in df.iterrows():
+                                nm = str(rr.get(item_col) or "")
+                                low = nm.lower()
+                                if not any((k in nm) or (k.lower() in low) for k in keywords):
+                                    continue
+                                v = rr.get(val_col)
+                                if v is None or str(v) in ("", "--", "nan", "None"):
+                                    continue
+                                try:
+                                    pe = report.period_end
+                                    if date_col:
+                                        pe = pd.to_datetime(rr.get(date_col)).date().isoformat()
+                                    if report.period_end and pe > report.period_end:
+                                        continue
+                                    fv = float(v)
+                                    old = out.get(pe)
+                                    if old is None or abs(fv) > abs(float(old)):
+                                        out[pe] = fv
+                                except Exception:
+                                    continue
+                            return out
+
+                        rev = _map_amount(profit_df, ["营运收入", "营业额", "营业总收入", "营业收入", "总收入", "Turnover", "Revenue", "Total revenue"])
+                        gp = _map_amount(profit_df, ["毛利", "毛利润", "Gross profit"])
+                        np_map = _map_amount(profit_df, ["股东应占溢利", "净利润", "本年溢利", "年度利润", "Net profit"])
+
+                        ta = _map_amount(balance_df, ["总资产", "资产总计", "资产合计", "Total Assets"])
+                        tl = _map_amount(balance_df, ["负债合计", "总负债", "Total Liabilities"])
+                        te = _map_amount(balance_df, ["股东权益", "权益合计", "总权益", "净资产", "Total Equity"])
+                        ca = _map_amount(balance_df, ["流动资产合计", "流动资产总值", "Current Assets"])
+                        cl = _map_amount(balance_df, ["流动负债合计", "流动负债总额", "Current Liabilities"])
+                        inv = _map_amount(balance_df, ["存货", "Inventory"])
+
+                        all_periods = sorted(set(list(rev.keys()) + list(np_map.keys()) + list(ta.keys()) + list(tl.keys()) + list(te.keys()) + list(ca.keys()) + list(cl.keys())))
+                        for pe in all_periods:
+                            if report.period_end and pe > report.period_end:
+                                continue
+                            rv = rev.get(pe)
+                            gpv = gp.get(pe)
+                            npv = np_map.get(pe)
+                            tav = ta.get(pe)
+                            tlv = tl.get(pe)
+                            tev = te.get(pe)
+                            cav = ca.get(pe)
+                            clv = cl.get(pe)
+                            iv = inv.get(pe)
+
+                            try:
+                                if "GROSS_MARGIN" in need_prev_ratio and rv not in (None, 0) and gpv is not None:
+                                    _upsert_metric("GROSS_MARGIN", "毛利率", pe, float(gpv) / float(rv) * 100.0, "%")
+                                if "NET_MARGIN" in need_prev_ratio and rv not in (None, 0) and npv is not None:
+                                    _upsert_metric("NET_MARGIN", "净利率", pe, float(npv) / float(rv) * 100.0, "%")
+                                if "ROE" in need_prev_ratio and tev not in (None, 0) and npv is not None:
+                                    _upsert_metric("ROE", "ROE", pe, float(npv) / float(tev) * 100.0, "%")
+                                if "ROA" in need_prev_ratio and tav not in (None, 0) and npv is not None:
+                                    _upsert_metric("ROA", "ROA", pe, float(npv) / float(tav) * 100.0, "%")
+                                if "DEBT_ASSET" in need_prev_ratio and tav not in (None, 0) and tlv is not None:
+                                    _upsert_metric("DEBT_ASSET", "资产负债率", pe, float(tlv) / float(tav) * 100.0, "%")
+                                if "CURRENT_RATIO" in need_prev_ratio and clv not in (None, 0) and cav is not None:
+                                    _upsert_metric("CURRENT_RATIO", "流动比率", pe, float(cav) / float(clv), "times")
+                                if "QUICK_RATIO" in need_prev_ratio and clv not in (None, 0) and cav is not None and iv is not None:
+                                    _upsert_metric("QUICK_RATIO", "速动比率", pe, (float(cav) - float(iv)) / float(clv), "times")
+                            except Exception:
+                                continue
+        except Exception:
+            pass
+
+        return rows
 
 
 @app.get("/api/reports/{report_id}/alerts", response_model=list[AlertResponse])
@@ -429,35 +1568,42 @@ def list_portfolio_positions():
                 pnl = (current_price - avg_cost) * qty
                 pnl_pct = None if avg_cost <= 0 else (current_price / avg_cost - 1.0) * 100.0
 
+            # Use cached indicators only (no blocking fetch).
+            # If cache is empty, return nulls — frontend or direct
+            # /api/stock/indicators call will populate the cache.
             strategy_buy_price = None
             strategy_buy_ok = None
             strategy_buy_reason = None
+            strategy_buy_desc = None
             strategy_sell_price = None
             strategy_sell_ok = None
             strategy_sell_reason = None
+            strategy_sell_desc = None
             try:
-                si = get_stock_indicators(symbol=symbol, market=market)
-                if isinstance(si, dict):
-                    strategy_buy_price = si.get("buy_price_aggressive")
-                    strategy_buy_ok = si.get("buy_price_aggressive_ok")
-                    strategy_buy_reason = si.get("buy_reason")
-                    strategy_sell_price = si.get("sell_price")
-                    strategy_sell_ok = si.get("sell_price_ok")
-                    strategy_sell_reason = si.get("sell_reason")
-                else:
-                    strategy_buy_price = getattr(si, "buy_price_aggressive", None)
-                    strategy_buy_ok = getattr(si, "buy_price_aggressive_ok", None)
-                    strategy_buy_reason = getattr(si, "buy_reason", None)
-                    strategy_sell_price = getattr(si, "sell_price", None)
-                    strategy_sell_ok = getattr(si, "sell_price_ok", None)
-                    strategy_sell_reason = getattr(si, "sell_reason", None)
+                _ind_key = (market, symbol)
+                _ind_cached = _INDICATOR_CACHE.get(_ind_key)
+                si = _ind_cached[1] if _ind_cached else None
+                if si is not None:
+                    if isinstance(si, dict):
+                        strategy_buy_price = si.get("buy_price_aggressive")
+                        strategy_buy_ok = si.get("buy_price_aggressive_ok")
+                        strategy_buy_reason = si.get("buy_reason")
+                        strategy_buy_desc = si.get("buy_condition_desc")
+                        strategy_sell_price = si.get("sell_price")
+                        strategy_sell_ok = si.get("sell_price_ok")
+                        strategy_sell_reason = si.get("sell_reason")
+                        strategy_sell_desc = si.get("sell_condition_desc")
+                    else:
+                        strategy_buy_price = getattr(si, "buy_price_aggressive", None)
+                        strategy_buy_ok = getattr(si, "buy_price_aggressive_ok", None)
+                        strategy_buy_reason = getattr(si, "buy_reason", None)
+                        strategy_buy_desc = getattr(si, "buy_condition_desc", None)
+                        strategy_sell_price = getattr(si, "sell_price", None)
+                        strategy_sell_ok = getattr(si, "sell_price_ok", None)
+                        strategy_sell_reason = getattr(si, "sell_reason", None)
+                        strategy_sell_desc = getattr(si, "sell_condition_desc", None)
             except Exception:
-                strategy_buy_price = None
-                strategy_buy_ok = None
-                strategy_buy_reason = None
-                strategy_sell_price = None
-                strategy_sell_ok = None
-                strategy_sell_reason = None
+                pass
 
             out.append(
                 PortfolioPositionResponse(
@@ -476,9 +1622,11 @@ def list_portfolio_positions():
                     strategy_buy_price=strategy_buy_price,
                     strategy_buy_ok=strategy_buy_ok,
                     strategy_buy_reason=strategy_buy_reason,
+                    strategy_buy_desc=strategy_buy_desc,
                     strategy_sell_price=strategy_sell_price,
                     strategy_sell_ok=strategy_sell_ok,
                     strategy_sell_reason=strategy_sell_reason,
+                    strategy_sell_desc=strategy_sell_desc,
                     updated_at=int(p.updated_at or 0),
                 )
             )
@@ -561,6 +1709,7 @@ def delete_portfolio_position(position_id: str):
         p = s.get(PortfolioPosition, position_id)
         if not p:
             return {"ok": True}
+        s.execute(delete(PortfolioAutoTrade).where(PortfolioAutoTrade.position_id == position_id))
         s.execute(delete(PortfolioTrade).where(PortfolioTrade.position_id == position_id))
         s.execute(delete(PortfolioPosition).where(PortfolioPosition.id == position_id))
     return {"ok": True}
@@ -620,15 +1769,349 @@ def create_portfolio_trade(req: PortfolioTradeRequest):
         s.add(t)
         s.flush()
 
+        pos_id = p.id
+        # Auto-delete position when fully sold (quantity reaches 0)
+        if side == "SELL" and new_qty <= 0:
+            s.query(PortfolioTrade).filter(PortfolioTrade.position_id == pos_id, PortfolioTrade.id != t.id).delete()
+            s.delete(t)
+            s.delete(p)
+
         return PortfolioTradeResponse(
             id=t.id,
-            position_id=p.id,
+            position_id=pos_id,
             side=side,
             price=price,
             quantity=qty,
             amount=amount,
             created_at=now,
         )
+
+
+# ── Auto-Trade endpoints ──────────────────────────────────────────────
+
+@app.post("/api/portfolio/auto-trades", response_model=PortfolioAutoTradeResponse)
+def create_auto_trade(req: PortfolioAutoTradeRequest):
+    side = (req.side or "").strip().upper()
+    if side not in {"BUY", "SELL"}:
+        raise HTTPException(status_code=400, detail="invalid side")
+    if req.trigger_price <= 0:
+        raise HTTPException(status_code=400, detail="invalid trigger_price")
+    if req.quantity <= 0:
+        raise HTTPException(status_code=400, detail="invalid quantity")
+
+    now = int(time.time())
+    with session_scope() as s:
+        p = s.get(PortfolioPosition, req.position_id)
+        if not p:
+            raise HTTPException(status_code=404, detail="position not found")
+        at = PortfolioAutoTrade(
+            position_id=p.id,
+            side=side,
+            trigger_price=req.trigger_price,
+            quantity=req.quantity,
+            status="PENDING",
+            created_at=now,
+        )
+        s.add(at)
+        s.flush()
+        return PortfolioAutoTradeResponse(
+            id=at.id, position_id=p.id, side=side,
+            trigger_price=req.trigger_price, quantity=req.quantity,
+            status="PENDING", created_at=now,
+            symbol=p.symbol, name=p.name, market=p.market,
+        )
+
+
+@app.get("/api/portfolio/auto-trades", response_model=list[PortfolioAutoTradeResponse])
+def list_auto_trades():
+    with session_scope() as s:
+        rows = s.execute(
+            select(PortfolioAutoTrade, PortfolioPosition)
+            .join(PortfolioPosition, PortfolioAutoTrade.position_id == PortfolioPosition.id)
+            .order_by(PortfolioAutoTrade.created_at.desc())
+        ).all()
+        result = []
+        for at, p in rows:
+            result.append(PortfolioAutoTradeResponse(
+                id=at.id, position_id=at.position_id, side=at.side,
+                trigger_price=at.trigger_price, quantity=at.quantity,
+                status=at.status, created_at=at.created_at,
+                executed_at=at.executed_at, executed_price=at.executed_price,
+                symbol=p.symbol, name=p.name, market=p.market,
+            ))
+        return result
+
+
+@app.delete("/api/portfolio/auto-trades/{auto_trade_id}")
+def cancel_auto_trade(auto_trade_id: str):
+    with session_scope() as s:
+        at = s.get(PortfolioAutoTrade, auto_trade_id)
+        if not at:
+            return {"ok": True}
+        if at.status == "PENDING":
+            at.status = "CANCELLED"
+    return {"ok": True}
+
+
+def _get_today_high_low(symbol: str, market: str):
+    """Get today's high and low price from history data (cached, no real-time fetch)."""
+    import pandas as pd
+    try:
+        df = _fetch_history_df(symbol, market)
+        if df is None or df.empty:
+            return None, None
+        last_row = df.iloc[-1]
+        high = pd.to_numeric(last_row.get("high"), errors="coerce")
+        low = pd.to_numeric(last_row.get("low"), errors="coerce")
+        close = pd.to_numeric(last_row.get("close"), errors="coerce")
+        h = float(high) if pd.notna(high) else None
+        l = float(low) if pd.notna(low) else None
+        c = float(close) if pd.notna(close) else None
+        return h, l, c
+    except Exception:
+        return None, None, None
+
+
+def _execute_auto_trade(at_id: str):
+    """Execute a single triggered auto-trade order using today's high/low."""
+    import logging
+    log = logging.getLogger("auto_trade")
+    try:
+        with session_scope() as s:
+            at = s.get(PortfolioAutoTrade, at_id)
+            if not at or at.status != "PENDING":
+                return
+            p = s.get(PortfolioPosition, at.position_id)
+            if not p:
+                at.status = "CANCELLED"
+                return
+
+            market = (p.market or "CN").strip().upper()
+            symbol = (p.symbol or "").strip().upper()
+
+            result = _get_today_high_low(symbol, market)
+            if result is None or len(result) < 3:
+                return
+            day_high, day_low, day_close = result
+            if day_high is None or day_low is None:
+                return
+
+            # Check if trigger price was reached intraday
+            triggered = False
+            exec_price = None
+            if at.side == "BUY" and day_low <= at.trigger_price:
+                triggered = True
+                exec_price = at.trigger_price  # assume filled at trigger price
+            elif at.side == "SELL" and day_high >= at.trigger_price:
+                triggered = True
+                exec_price = at.trigger_price
+
+            if not triggered:
+                return
+
+            qty = float(at.quantity)
+            old_qty = float(p.quantity or 0.0)
+            old_avg = float(p.avg_cost or 0.0)
+            now = int(time.time())
+
+            if at.side == "BUY":
+                new_qty = old_qty + qty
+                new_avg = (old_qty * old_avg + qty * exec_price) / new_qty if new_qty > 0 else 0.0
+                p.quantity = new_qty
+                p.avg_cost = new_avg
+            else:
+                if old_qty <= 0:
+                    at.status = "CANCELLED"
+                    return
+                actual_qty = min(qty, old_qty)
+                new_qty = old_qty - actual_qty
+                p.quantity = new_qty
+                if new_qty <= 0:
+                    p.avg_cost = 0.0
+
+            p.updated_at = now
+
+            trade = PortfolioTrade(
+                position_id=p.id, side=at.side, price=exec_price,
+                quantity=qty, amount=exec_price * qty, created_at=now,
+            )
+            s.add(trade)
+
+            at.status = "EXECUTED"
+            at.executed_at = now
+            at.executed_price = exec_price
+
+            # Auto-delete position when fully sold
+            if at.side == "SELL" and new_qty <= 0:
+                s.query(PortfolioTrade).filter(PortfolioTrade.position_id == p.id).delete()
+                s.query(PortfolioAutoTrade).filter(
+                    PortfolioAutoTrade.position_id == p.id,
+                    PortfolioAutoTrade.id != at.id,
+                ).delete()
+                s.delete(at)
+                s.delete(p)
+
+            log.info(f"Auto-trade executed: {at.side} {qty} of {symbol} @ {exec_price} (day H/L: {day_high}/{day_low})")
+    except Exception as e:
+        import logging
+        logging.getLogger("auto_trade").error(f"Auto-trade error: {e}")
+
+
+# ── Market-aware auto-trade scheduler ──────────────────────────────────
+# Each market checks once per trading day after close.
+#   CN (A股): Mon-Fri, check at 17:00 Beijing time
+#   HK (港股): Mon-Fri, check at 17:30 Beijing time
+#   US (美股): Mon-Fri, check at 05:30 Beijing time (next calendar day vs US trading day)
+# After checking, untriggered PENDING orders for that market are auto-cancelled.
+
+_TZ_BEIJING = _ZoneInfo("Asia/Shanghai")
+
+# (check_hour, check_minute) in Beijing time
+_MARKET_CHECK_TIMES: dict[str, tuple[int, int]] = {
+    "CN": (17, 0),
+    "HK": (17, 30),
+    "US": (5, 30),   # next calendar day in Beijing = after US close
+}
+
+# Track which (market, date_str) combos have already been checked today
+_auto_trade_checked: dict[tuple[str, str], bool] = {}
+
+
+def _is_trading_day(market: str, dt_beijing: _dt.datetime) -> bool:
+    """Return True if dt_beijing falls on a trading day for the market.
+    Simple rule: weekdays only (Mon-Fri). Does not account for public holidays."""
+    wd = dt_beijing.weekday()  # 0=Mon .. 6=Sun
+    if market == "US":
+        # For US, the trading day that closes at 05:30 Beijing time on day D
+        # is actually the US trading day of (D-1) in New York.
+        # But the relevant question is: was yesterday (Beijing) a US weekday?
+        us_trade_date = (dt_beijing - _dt.timedelta(days=1)).date()
+        return us_trade_date.weekday() < 5
+    return wd < 5  # CN / HK: same calendar day
+
+
+def _check_time_key(market: str, dt_beijing: _dt.datetime) -> str:
+    """Return a date-string key representing which trading session this check covers."""
+    if market == "US":
+        return (dt_beijing - _dt.timedelta(days=1)).date().isoformat()
+    return dt_beijing.date().isoformat()
+
+
+def _auto_trade_checker():
+    """Background thread: market-aware auto-trade checker.
+    Wakes every 5 minutes, checks if any market's post-close check time has arrived,
+    and if so processes pending orders for that market exactly once per trading day."""
+    import logging
+    log = logging.getLogger("auto_trade")
+    log.info("Auto-trade checker started (market-aware scheduler)")
+    while True:
+        try:
+            time.sleep(300)  # wake every 5 minutes
+            now_bj = _dt.datetime.now(_TZ_BEIJING)
+
+            for mkt, (chk_h, chk_m) in _MARKET_CHECK_TIMES.items():
+                # Has the check time passed today?
+                check_dt = now_bj.replace(hour=chk_h, minute=chk_m, second=0, microsecond=0)
+                if now_bj < check_dt:
+                    continue  # not yet time
+
+                if not _is_trading_day(mkt, now_bj):
+                    continue  # not a trading day
+
+                day_key = _check_time_key(mkt, now_bj)
+                cache_key = (mkt, day_key)
+                if _auto_trade_checked.get(cache_key):
+                    continue  # already checked this session
+
+                log.info(f"[{mkt}] Post-close check for trading day {day_key}")
+                _auto_trade_checked[cache_key] = True
+
+                # Gather pending orders for this market
+                with session_scope() as s:
+                    pending = s.execute(
+                        select(PortfolioAutoTrade)
+                        .join(PortfolioPosition, PortfolioAutoTrade.position_id == PortfolioPosition.id)
+                        .where(PortfolioAutoTrade.status == "PENDING")
+                        .where(PortfolioPosition.market == mkt)
+                    ).scalars().all()
+                    at_ids = [at.id for at in pending]
+
+                if not at_ids:
+                    log.info(f"[{mkt}] No pending orders")
+                    continue
+
+                # Try to execute each; those not triggered will be cancelled below
+                executed = set()
+                for at_id in at_ids:
+                    _execute_auto_trade(at_id)
+                    # Check if it was executed
+                    with session_scope() as s:
+                        at = s.get(PortfolioAutoTrade, at_id)
+                        if at and at.status == "EXECUTED":
+                            executed.add(at_id)
+
+                # Cancel remaining untriggered orders for this market
+                cancelled_count = 0
+                with session_scope() as s:
+                    for at_id in at_ids:
+                        if at_id in executed:
+                            continue
+                        at = s.get(PortfolioAutoTrade, at_id)
+                        if at and at.status == "PENDING":
+                            at.status = "CANCELLED"
+                            cancelled_count += 1
+
+                log.info(f"[{mkt}] Executed: {len(executed)}, Cancelled: {cancelled_count}")
+
+            # Housekeeping: prune old checked keys (keep last 7 days)
+            cutoff = (now_bj - _dt.timedelta(days=7)).date().isoformat()
+            stale = [k for k in _auto_trade_checked if k[1] < cutoff]
+            for k in stale:
+                del _auto_trade_checked[k]
+
+        except Exception as e:
+            import logging
+            logging.getLogger("auto_trade").error(f"Auto-trade checker error: {e}")
+
+
+# Start auto-trade background checker
+_auto_trade_thread = threading.Thread(target=_auto_trade_checker, daemon=True)
+_auto_trade_thread.start()
+
+
+def _indicator_cache_warmer():
+    """Background thread: pre-warm indicator cache for all portfolio positions.
+    Runs once on startup (after 10s delay) then every hour.
+    This ensures /api/portfolio/positions always has strategy data from cache."""
+    import logging
+    log = logging.getLogger("indicator_warmer")
+    time.sleep(10)  # wait for app startup
+    while True:
+        try:
+            with session_scope() as s:
+                rows = s.execute(select(PortfolioPosition)).scalars().all()
+                symbols = [(
+                    (r.symbol or "").strip().upper(),
+                    (r.market or "CN").strip().upper()
+                ) for r in rows]
+            if symbols:
+                log.info(f"Pre-warming indicator cache for {len(symbols)} positions")
+                for sym, mkt in symbols:
+                    try:
+                        get_stock_indicators(symbol=sym, market=mkt)
+                    except Exception as e:
+                        log.warning(f"Indicator warm failed for {sym}/{mkt}: {e}")
+                log.info("Indicator cache warm complete")
+            else:
+                log.info("No positions to warm")
+        except Exception as e:
+            log.error(f"Indicator warmer error: {e}")
+        time.sleep(3600)  # repeat every hour
+
+
+if (os.environ.get("ENABLE_INDICATOR_WARMER") or "").strip() == "1":
+    _indicator_warmer_thread = threading.Thread(target=_indicator_cache_warmer, daemon=True)
+    _indicator_warmer_thread.start()
 
 
 @app.get("/api/portfolio/alerts", response_model=list[PortfolioAlertResponse])
@@ -743,6 +2226,276 @@ def get_portfolio_alerts():
                 )
 
     return alerts
+
+
+@app.get("/api/portfolio/{position_id}/ai-advice")
+def get_portfolio_ai_advice(position_id: str):
+    """Generate AI expert advice for a portfolio position, combining buy cost, indicators, and market data.
+    All advice is strictly based on real-time data passed in the prompt — no training-data knowledge allowed.
+    """
+    import os
+    from datetime import datetime, timezone, timedelta
+
+    with session_scope() as s:
+        p = s.get(PortfolioPosition, position_id)
+        if not p:
+            raise HTTPException(status_code=404, detail="position not found")
+        market = (p.market or "CN").strip().upper()
+        symbol = (p.symbol or "").strip().upper()
+        name = (p.name or "").strip() or symbol
+        quantity = float(p.quantity or 0)
+        avg_cost = float(p.avg_cost or 0)
+
+    now_dt = datetime.now(timezone(timedelta(hours=8)))
+    today_str = now_dt.strftime("%Y-%m-%d %H:%M")
+
+    # Fetch current price (real-time)
+    sp = None
+    current_price = None
+    try:
+        sp = get_stock_price(symbol=symbol, market=market)
+        current_price = float(sp.price) if sp and sp.price is not None else None
+    except Exception:
+        pass
+
+    # Fetch indicators (computed from real-time data)
+    si = None
+    try:
+        si = get_stock_indicators(symbol=symbol, market=market)
+    except Exception:
+        pass
+
+    # Build context — all real-time data
+    cost_total = avg_cost * quantity if quantity > 0 else 0
+    market_val = (current_price or 0) * quantity
+    pnl = market_val - cost_total if current_price and quantity > 0 else None
+    pnl_pct = (pnl / cost_total * 100) if pnl is not None and cost_total > 0 else None
+
+    # Helper: read from dict or object attribute (get_stock_indicators / get_stock_price
+    # may return dict or Pydantic model depending on call context)
+    def _g(obj, key, default=None):
+        if obj is None:
+            return default
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
+
+    def _safe(v, fmt=".2f"):
+        if v is None:
+            return "N/A"
+        try:
+            return f"{float(v):{fmt}}"
+        except Exception:
+            return str(v)
+
+    lines = [
+        f"数据获取时间: {today_str} (北京时间，以下所有数据均为此刻实时数据)",
+        "",
+        "=== 持仓信息 ===",
+        f"股票名称: {name}",
+        f"代码: {symbol}",
+        f"市场: {market}",
+        f"持仓数量: {quantity}",
+        f"买入均价: {_safe(avg_cost, '.4f')}" if avg_cost > 0 else "买入均价: 未记录（尚未模拟买入）",
+        f"当前实时价格: {_safe(current_price, '.4f')}" if current_price else "当前实时价格: 未获取",
+    ]
+    if pnl is not None:
+        lines.append(f"浮动盈亏: {pnl:+.2f} ({pnl_pct:+.2f}%)")
+
+    # Real-time intraday data from price API
+    if sp:
+        lines += [
+            "",
+            "=== 今日实时行情 ===",
+            f"今日开盘: {_safe(_g(sp, 'open'))}",
+            f"今日最高: {_safe(_g(sp, 'high'))}",
+            f"今日最低: {_safe(_g(sp, 'low'))}",
+            f"昨日收盘: {_safe(_g(sp, 'prev_close'))}",
+            f"今日涨跌额: {_safe(_g(sp, 'change'))}",
+            f"今日涨跌幅: {_safe(_g(sp, 'change_pct'))}%",
+            f"成交量: {_safe(_g(sp, 'volume'), '.0f')}",
+            f"成交额: {_safe(_g(sp, 'amount'), '.0f')}",
+            f"换手率: {_safe(_g(sp, 'turnover_rate'))}%",
+            f"量比: {_safe(_g(sp, 'volume_ratio'))}",
+            f"振幅: {_safe(_g(sp, 'amplitude'))}%",
+            f"总市值: {_safe(_g(sp, 'market_cap'), '.0f')}",
+        ]
+
+    if si:
+        def _v(attr, fmt=".2f"):
+            v = _g(si, attr)
+            if v is None:
+                return "N/A"
+            try:
+                return f"{float(v):{fmt}}"
+            except Exception:
+                return str(v)
+
+        def _bool(attr):
+            v = _g(si, attr)
+            if v is True:
+                return '是'
+            if v is False:
+                return '否'
+            return '否'
+
+        # Position relative to 52-week range
+        pos_52w = ""
+        h52 = _g(si, 'high_52w')
+        l52 = _g(si, 'low_52w')
+        if current_price and h52 and l52 and h52 != l52:
+            try:
+                pct_in_range = (current_price - float(l52)) / (float(h52) - float(l52)) * 100
+                pos_52w = f"  (当前处于52周区间的 {pct_in_range:.0f}% 位置)"
+            except Exception:
+                pass
+
+        lines += [
+            "",
+            "=== 技术指标（基于最新收盘数据计算） ===",
+            f"MA5(5日均线): {_v('ma5')}",
+            f"MA20(20日均线): {_v('ma20')}",
+            f"MA60(60日均线): {_v('ma60')}",
+            f"均线趋势判定: {_g(si, 'trend', 'N/A')}",
+            f"MA60斜率: {_v('slope_pct')}%",
+            f"斜率建议: {_g(si, 'slope_advice', 'N/A')}",
+            f"RSI(14): {_v('rsi14')}  (>70超买, <30超卖)",
+            f"RSI拐头向上: {_bool('rsi_rebound')}",
+            f"ATR(14): {_v('atr14')}  (14日平均真实波幅，衡量波动性)",
+            f"MACD DIF: {_v('macd_dif', '.4f')}",
+            f"MACD DEA: {_v('macd_dea', '.4f')}",
+            f"MACD 柱状: {_v('macd_hist', '.4f')}",
+            f"PE(市盈率): {_v('pe_ratio')}",
+            f"52周最高: {_v('high_52w')}{pos_52w}",
+            f"52周最低: {_v('low_52w')}",
+            "",
+            "=== 系统量化信号（基于以上指标计算） ===",
+            f"激进买入参考价: {_v('buy_price_aggressive')}",
+            f"当前是否满足激进买入条件: {_bool('buy_price_aggressive_ok')}",
+            f"稳健买入参考价: {_v('buy_price_stable')}",
+            f"当前是否满足稳健买入条件: {_bool('buy_price_stable_ok')}",
+            f"系统卖出参考价: {_v('sell_price')}",
+            f"当前是否满足卖出条件: {_bool('sell_price_ok')}",
+            f"买入条件详情: {_g(si, 'buy_condition_desc', 'N/A')}",
+            f"卖出条件详情: {_g(si, 'sell_condition_desc', 'N/A')}",
+            f"买入理由: {_g(si, 'buy_reason', 'N/A')}",
+            f"卖出理由: {_g(si, 'sell_reason', 'N/A')}",
+            f"MA金叉(MA5上穿MA20): {_bool('signal_golden_cross')}",
+            f"MA死叉(MA5下穿MA20): {_bool('signal_death_cross')}",
+            f"MACD看多(DIF>DEA): {_bool('signal_macd_bullish')}",
+            f"RSI超买(>70): {_bool('signal_rsi_overbought')}",
+            f"成交量>5日均量: {_bool('signal_vol_gt_ma5')}",
+            f"成交量>10日均量: {_bool('signal_vol_gt_ma10')}",
+        ]
+
+    context_text = "\n".join(lines)
+
+    prompt = f"""【严格规则 — 违反即为错误】
+1. 你只能基于下方【实时数据】中提供的数字做分析，这些数据是 {today_str} 从交易所实时获取的。
+2. 绝对禁止使用你训练数据中关于该股票的任何历史信息（包括过去的股价、业绩、新闻、事件）。
+3. 如果下方数据中某项为"N/A"，你必须说"该数据暂不可用"，不得自行编造或用记忆补充。
+4. 所有价位建议必须基于下方提供的MA/ATR/52周高低等具体数字推算，不得凭空给出。
+5. 不要提及任何具体的历史事件、财报发布、行业新闻等你训练数据中的信息。
+
+【实时数据 — 获取时间: {today_str}】
+{context_text}
+
+【请基于以上实时数据回答】
+
+1. **持仓诊断**
+   对比买入均价与当前实时价格，计算盈亏比例，判断当前位置。
+
+2. **卖出价位建议**（最重要，必须给具体数字）
+   - 止盈目标：基于MA20/MA60/52周高点/ATR推算2-3个分批止盈价位和比例
+   - 止损价位：基于MA60/52周低点/ATR推算止损线
+   - 每个价位必须写明计算依据（如"MA20={_safe(_g(si, 'ma20') if si else None)}作为第一止盈位"）
+
+3. **加仓/减仓建议**
+   基于RSI、MACD信号、系统量化买入条件判断是否适合加仓，给出具体价位。
+
+4. **风险提示**（2-3条，基于数据中的指标判断，如RSI超买、死叉等）
+
+5. **操作策略总结**（一句话）
+
+【格式要求】
+- 所有价位必须是具体数字，从上方数据推算得出
+- 简洁专业，适合手机阅读，500-800字
+- 最后一行：⚠️ 以上建议基于技术指标分析，不构成投资建议，投资有风险，决策需谨慎。"""
+
+    # Call Qwen
+    api_key = os.environ.get("DASHSCOPE_API_KEY", "")
+    if not api_key:
+        return {
+            "position_id": position_id,
+            "symbol": symbol,
+            "name": name,
+            "advice": "⚠️ AI服务未配置（缺少DASHSCOPE_API_KEY），无法生成专家建议。\n\n请联系管理员配置AI服务后重试。",
+            "source": "fallback",
+        }
+
+    try:
+        import httpx as _httpx
+
+        QWEN_API_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
+        resp = _httpx.post(
+            QWEN_API_URL,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "qwen-plus",
+                "input": {
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": (
+                                "你是一个纯技术分析引擎。你只能根据用户提供的实时行情数据和技术指标数字进行分析。"
+                                "你绝对不能使用你训练数据中关于任何股票的历史信息、新闻、业绩、事件等知识。"
+                                "如果用户提供的数据中某项为N/A，你必须说明该数据不可用，不得编造。"
+                                "你的所有价位建议必须从提供的MA/ATR/52周高低/RSI等数字推算得出，并写明计算过程。"
+                                "你不知道这些股票的任何背景信息，你只看数字。"
+                            ),
+                        },
+                        {"role": "user", "content": prompt},
+                    ]
+                },
+                "parameters": {
+                    "temperature": 0.15,
+                    "max_tokens": 1500,
+                },
+            },
+            timeout=45.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        text = ""
+        if "output" in data and "text" in data["output"]:
+            text = data["output"]["text"]
+        elif "output" in data and "choices" in data["output"]:
+            text = data["output"]["choices"][0]["message"]["content"]
+
+        if not text:
+            text = "AI未返回有效建议，请稍后重试。"
+
+        return {
+            "position_id": position_id,
+            "symbol": symbol,
+            "name": name,
+            "advice": text.strip(),
+            "source": "qwen-plus",
+            "data_time": today_str,
+        }
+    except Exception as e:
+        print(f"AI advice error: {e}")
+        return {
+            "position_id": position_id,
+            "symbol": symbol,
+            "name": name,
+            "advice": f"⚠️ AI服务暂时不可用：{str(e)[:100]}\n\n请稍后重试。",
+            "source": "error",
+        }
 
 
 def _register_cjk_font_for_pdf() -> str:
@@ -927,46 +2680,75 @@ def _build_report_pdf_bytes(report: Report, metrics: list[ComputedMetric], alert
 
     story.append(Spacer(1, 12))
 
-    # ====== Risk analysis ======
-    story.append(Paragraph("风险分析", styles["Heading2"]))
-    def _risk_texts() -> list[str]:
-        out: list[str] = []
-        if net_margin is None:
-            out.append("净利率数据缺失，建议补齐利润表相关字段以提高分析质量。")
-        elif net_margin < industry_avg["netMargin"]:
-            out.append(f"净利率 {_fmt(net_margin)}% 低于行业均值 {industry_avg['netMargin']}%，需关注费用率、一次性损益与价格竞争导致的利润挤压。")
+    # ====== Risk analysis (professional framework) ======
+    story.append(Paragraph("专业风险评估框架", styles["Heading2"]))
+    story.append(Paragraph("参考穆迪/标普评级方法论，从多维度系统评估企业风险", styles["Normal"]))
+    story.append(Spacer(1, 6))
+
+    # 1. DuPont
+    story.append(Paragraph("1. 杜邦分解分析 (DuPont Analysis)", styles["Heading3"]))
+    if net_margin is not None:
+        txt = f"净利率 {_fmt(net_margin)}%" + ("，高于行业均值，但需警惕是否依赖非经常性损益（资产处置、政府补贴、投资收益）支撑。" if net_margin > industry_avg["netMargin"] else "，低于行业均值，表明费用控制或定价能力存在压力，需关注销售费用率、管理费用率的变动趋势。")
+        story.append(Paragraph(f"• 净利率驱动：{txt}", styles["Normal"]))
+    if asset_turnover is not None:
+        txt = f"总资产周转率 {_fmt(asset_turnover)}" + ("，低于行业水平，可能存在产能过剩、固定资产利用率不足或应收/存货占比过高的问题。" if asset_turnover < industry_avg["assetTurnover"] else "，处于行业正常水平，资产利用效率尚可。")
+        story.append(Paragraph(f"• 资产周转驱动：{txt}", styles["Normal"]))
+    if debt_ratio is not None:
+        eq_mult = 100 / max(1, 100 - debt_ratio)
+        txt = f"资产负债率 {_fmt(debt_ratio)}%，权益乘数约 {eq_mult:.2f}x。" + ("高杠杆虽可放大ROE，但在利率上行周期或营收下滑时，利息覆盖倍数可能快速恶化。" if debt_ratio > 60 else "杠杆水平适中，财务弹性较好。")
+        story.append(Paragraph(f"• 财务杠杆驱动：{txt}", styles["Normal"]))
+    story.append(Spacer(1, 6))
+
+    # 2. Liquidity
+    story.append(Paragraph("2. 流动性与偿债能力", styles["Heading3"]))
+    if current_ratio is not None:
+        if current_ratio < 1:
+            txt = f"流动比率 {_fmt(current_ratio)}，流动资产不足以覆盖流动负债，存在短期偿债缺口。建议关注银行授信额度和短期融资渠道。"
+        elif current_ratio > 3:
+            txt = f"流动比率 {_fmt(current_ratio)}，偏高，虽然偿债无忧，但大量资金闲置可能拉低资本回报率。"
         else:
-            out.append(f"净利率 {_fmt(net_margin)}% 高于行业均值 {industry_avg['netMargin']}%，但仍需关注高利润是否来自阶段性红利（原材料、补贴、资产处置等）。")
-
-        if debt_ratio is None:
-            out.append("资产负债率数据缺失，建议补齐资产负债表相关字段。")
-        elif debt_ratio > 70:
-            out.append(f"资产负债率 {_fmt(debt_ratio)}% 偏高，利率上行或现金流波动时可能带来再融资压力，需重点关注短期债务结构与融资成本。")
+            txt = f"流动比率 {_fmt(current_ratio)}，短期偿债能力处于合理区间，需持续监控应收账款账龄和存货跌价风险。"
+        story.append(Paragraph(f"• 短期偿债：{txt}", styles["Normal"]))
+    if debt_ratio is not None:
+        if debt_ratio > 70:
+            txt = f"资产负债率 {_fmt(debt_ratio)}%，高负债率意味着在经济下行期可能面临银行抽贷、再融资成本上升等连锁风险。"
+        elif debt_ratio < 30:
+            txt = f"资产负债率 {_fmt(debt_ratio)}%，极低的负债率表明财务极为保守，几乎无债务违约风险。"
         else:
-            out.append(f"资产负债率 {_fmt(debt_ratio)}% 处于可控区间，但仍建议关注表外负债与或有事项（担保/诉讼/回购条款）。")
+            txt = f"资产负债率 {_fmt(debt_ratio)}%，处于可控区间，建议关注有息负债占比和债务期限结构。"
+        story.append(Paragraph(f"• 资本结构：{txt}", styles["Normal"]))
+    story.append(Spacer(1, 6))
 
-        if current_ratio is None:
-            out.append("流动比率数据缺失，建议补齐流动资产/流动负债相关字段。")
-        elif current_ratio < 1:
-            out.append(f"流动比率 {_fmt(current_ratio)} 偏低，短期偿债安全边际不足；若同时出现应收回款变慢或存货积压，风险将放大。")
+    # 3. Operating Quality
+    story.append(Paragraph("3. 营运质量与周转风险", styles["Heading3"]))
+    if inv_turnover is not None:
+        txt = f"存货周转率 {_fmt(inv_turnover)} 次。" + ("周转偏慢，可能面临存货跌价、产品过时或滞销风险。" if inv_turnover < 4 else "存货周转效率尚可，建议对比同行业竞争对手的周转水平。")
+        story.append(Paragraph(f"• 存货管理：{txt}", styles["Normal"]))
+    if recv_turnover is not None:
+        days = 365 / recv_turnover if recv_turnover > 0 else 999
+        txt = f"应收账款周转率 {_fmt(recv_turnover)} 次（约 {days:.0f} 天回款周期）。" + ("回款周期超过60天，需警惕客户信用风险和坏账计提不足。" if recv_turnover < 6 else "回款效率尚可。")
+        story.append(Paragraph(f"• 应收账款：{txt}", styles["Normal"]))
+    story.append(Spacer(1, 6))
+
+    # 4. Growth Sustainability
+    story.append(Paragraph("4. 增长可持续性风险", styles["Heading3"]))
+    if roe is not None and net_margin is not None:
+        sgr = roe * 0.7
+        txt = f"ROE {_fmt(roe)}%，可持续增长率(SGR)约 {_fmt(sgr)}%（假设70%留存率）。"
+        if gross_margin is not None and gross_margin > 50 and net_margin > 20:
+            txt += " 作为高利润率企业，未来增长面临基数效应挑战，需不断开拓新市场或推出新产品线。"
+        elif net_margin < 5:
+            txt += " 低利润率限制了内生增长能力，企业可能需要依赖外部融资支撑扩张。"
         else:
-            out.append(f"流动比率 {_fmt(current_ratio)} 尚可，仍建议结合速动比率与经营性现金流一起判断真实流动性。")
+            txt += " 盈利水平支撑一定的内生增长能力，但需关注行业竞争格局变化对利润率的侵蚀。"
+        story.append(Paragraph(f"• {txt}", styles["Normal"]))
+    else:
+        story.append(Paragraph("• 关键盈利指标缺失，无法评估增长可持续性。", styles["Normal"]))
 
-        if asset_turnover is None:
-            out.append("总资产周转率数据缺失，建议补齐收入/资产规模相关字段。")
-        elif asset_turnover < industry_avg["assetTurnover"]:
-            out.append(f"总资产周转率 {_fmt(asset_turnover)} 低于行业均值 {industry_avg['assetTurnover']}，可能存在产能利用率偏低或资本开支效率不高的问题。")
-        else:
-            out.append(f"总资产周转率 {_fmt(asset_turnover)} 不低于行业均值 {industry_avg['assetTurnover']}，运营效率相对稳健。")
-
-        return out
-
-    for t in _risk_texts():
-        story.append(Paragraph(f"• {t}", styles["Normal"]))
-
+    # Alert details
     if alerts:
         story.append(Spacer(1, 8))
-        story.append(Paragraph("风险预警明细", styles["Heading3"]))
+        story.append(Paragraph("系统风险预警明细", styles["Heading3"]))
         for a in alerts:
             lvl = getattr(a, "level", "") or ""
             ttl = getattr(a, "title", "") or ""
@@ -974,83 +2756,156 @@ def _build_report_pdf_bytes(report: Report, metrics: list[ComputedMetric], alert
             story.append(Paragraph(f"[{lvl}] {ttl}", styles["Normal"]))
             story.append(Paragraph(str(msg).replace("\n", "<br/>") or "-", styles["Normal"]))
             story.append(Spacer(1, 4))
-    else:
-        story.append(Spacer(1, 4))
-        story.append(Paragraph("暂无风险预警", styles["Normal"]))
 
     story.append(Spacer(1, 12))
 
-    # ====== Opportunities ======
-    story.append(Paragraph("机会识别", styles["Heading2"]))
-    def _opp_texts() -> list[str]:
-        out: list[str] = []
-        if gross_margin is None:
-            out.append("毛利率数据缺失，建议补齐成本/收入口径后再评估盈利弹性。")
+    # ====== Opportunities (professional framework) ======
+    story.append(Paragraph("投资机会识别框架", styles["Heading2"]))
+    story.append(Paragraph("参考高盛/摩根士丹利研究方法论，从竞争壁垒、价值创造、资本优化三大维度识别机会", styles["Normal"]))
+    story.append(Spacer(1, 6))
+
+    # 1. Competitive Moat
+    story.append(Paragraph("1. 竞争壁垒与护城河", styles["Heading3"]))
+    if gross_margin is not None:
+        if gross_margin >= 40:
+            txt = f"毛利率 {_fmt(gross_margin)}%，高毛利率（>40%）通常意味着企业拥有较强的品牌溢价、技术壁垒或网络效应。参考晨星'宽护城河'标准，持续高毛利率是竞争优势的核心体现。"
         elif gross_margin >= industry_avg["grossMargin"]:
-            out.append(f"毛利率 {_fmt(gross_margin)}% 不低于行业均值 {industry_avg['grossMargin']}%，若在竞争加剧环境下仍能维持，体现较强议价能力。")
+            txt = f"毛利率 {_fmt(gross_margin)}%，高于行业均值，表明具备一定的产品差异化或成本优势。"
         else:
-            out.append(f"毛利率 {_fmt(gross_margin)}% 低于行业均值 {industry_avg['grossMargin']}%，若未来通过产品结构升级/提价/降本改善，可能带来利润弹性。")
+            txt = f"毛利率 {_fmt(gross_margin)}%，低于行业均值，但若企业正处于市场扩张期，未来随着规模效应释放，毛利率存在改善空间。"
+        story.append(Paragraph(f"• 定价权：{txt}", styles["Normal"]))
+    if net_margin is not None and gross_margin is not None:
+        expense_rate = gross_margin - net_margin
+        txt = f"费用率约 {_fmt(expense_rate)}%。" + ("费用率控制良好，表明企业运营效率较高。" if expense_rate < 20 else "费用率偏高，但若处于研发投入期或渠道扩张期，可能是为未来增长播种。")
+        story.append(Paragraph(f"• 成本效率：{txt}", styles["Normal"]))
+    story.append(Spacer(1, 6))
 
-        if roe is None:
-            out.append("ROE 数据缺失，建议补齐净利润与净资产口径。")
+    # 2. Value Creation
+    story.append(Paragraph("2. 价值创造能力", styles["Heading3"]))
+    if roe is not None:
+        if roe > 20:
+            txt = f"ROE {_fmt(roe)}%，优秀的ROE（>20%）表明企业正在为股东创造显著超额回报。参考巴菲特选股标准，持续ROE>20%的企业通常具备经济特许权。"
         elif roe > industry_avg["roe"]:
-            out.append(f"ROE {_fmt(roe)}% 高于行业均值 {industry_avg['roe']}%，若盈利可持续，具备长期复利潜力。")
+            txt = f"ROE {_fmt(roe)}%，高于行业均值{industry_avg['roe']}%，资本回报效率较好，具备长期复利潜力。"
         else:
-            out.append(f"ROE {_fmt(roe)}% 低于行业均值 {industry_avg['roe']}%，通过改善利润率、周转率或优化资本结构存在提升空间。")
+            txt = f"ROE {_fmt(roe)}%，低于行业均值{industry_avg['roe']}%，但若企业正处于转型期，未来ROE存在较大提升空间。"
+        story.append(Paragraph(f"• 股东价值：{txt}", styles["Normal"]))
+    if roa is not None:
+        txt = f"ROA {_fmt(roa)}%。" + ("资产回报率高于行业水平，表明企业资产质量较好、运营效率较高。" if roa > industry_avg["roa"] else "ROA低于行业水平，可能存在资产利用效率不足的问题。")
+        story.append(Paragraph(f"• 资产创利：{txt}", styles["Normal"]))
+    story.append(Spacer(1, 6))
 
-        if debt_ratio is None:
-            out.append("资产负债率数据缺失，建议补齐资产负债表口径。")
+    # 3. Capital Optimization
+    story.append(Paragraph("3. 资本结构优化空间", styles["Heading3"]))
+    if debt_ratio is not None:
+        if debt_ratio < 40:
+            txt = f"资产负债率 {_fmt(debt_ratio)}%，较低的负债率意味着企业拥有充足的融资弹药。适度增加杠杆可以利用税盾效应降低加权资本成本(WACC)。"
         elif debt_ratio < industry_avg["debtRatio"]:
-            out.append(f"资产负债率 {_fmt(debt_ratio)}% 低于行业均值 {industry_avg['debtRatio']}%，在周期波动或融资收紧时更具抗风险能力。")
+            txt = f"资产负债率 {_fmt(debt_ratio)}%，低于行业均值，财务结构稳健，在行业整合期具备更强的抗风险能力和并购扩张能力。"
         else:
-            out.append(f"资产负债率 {_fmt(debt_ratio)}% 不低于行业均值 {industry_avg['debtRatio']}%，若公司具备稳定现金流，仍可能通过杠杆放大 ROE。")
-
-        if asset_turnover is None:
-            out.append("总资产周转率数据缺失，建议补齐收入与资产规模。")
-        elif asset_turnover < industry_avg["assetTurnover"]:
-            out.append(f"总资产周转率 {_fmt(asset_turnover)} 低于行业均值 {industry_avg['assetTurnover']}，若通过渠道效率、产能利用率或库存周转改善，有望提升 ROA/ROE。")
-        else:
-            out.append(f"总资产周转率 {_fmt(asset_turnover)} 不低于行业均值 {industry_avg['assetTurnover']}，运营效率具备一定优势。")
-
-        return out
-
-    for t in _opp_texts():
-        story.append(Paragraph(f"• {t}", styles["Normal"]))
+            txt = f"资产负债率 {_fmt(debt_ratio)}%，高于行业均值，但若企业现金流稳定且利息覆盖充足，适度杠杆可以放大股东回报。"
+        story.append(Paragraph(f"• 杠杆优化：{txt}", styles["Normal"]))
 
     story.append(Spacer(1, 12))
 
-    # ====== AI Insights (rule-based, consistent with frontend) ======
-    story.append(Paragraph("AI 洞察", styles["Heading2"]))
+    # ====== AI Insights (professional, consistent with frontend) ======
+    story.append(Paragraph("AI 综合研判", styles["Heading2"]))
+    story.append(Paragraph("参考CFA研究框架，融合定量分析与定性判断", styles["Normal"]))
+    story.append(Spacer(1, 6))
+
     if metrics_sorted:
+        # Scorecard
+        def _grade(val: float | None, thresholds: list[tuple[float, str]], reverse: bool = False) -> str:
+            if val is None:
+                return "-"
+            for t, g in thresholds:
+                if (not reverse and val > t) or (reverse and val < t):
+                    return g
+            return thresholds[-1][1] if thresholds else "C"
+
+        profit_grade = _grade(net_margin, [(15, "A"), (10, "B+"), (5, "B")]) if net_margin is not None else "-"
+        safety_grade = _grade(debt_ratio, [(40, "A"), (50, "B+"), (65, "B")], reverse=True) if debt_ratio is not None else "-"
+        efficiency_grade = _grade(roe, [(20, "A"), (15, "B+"), (10, "B")]) if roe is not None else "-"
+        story.append(Paragraph(f"财务健康评分卡：盈利能力 {profit_grade} | 财务安全 {safety_grade} | 资本效率 {efficiency_grade}", styles["Normal"]))
+        story.append(Spacer(1, 6))
+
+        # Profitability
         if gross_margin is not None and net_margin is not None:
-            story.append(Paragraph(f"• 盈利能力：毛利率 {_fmt(gross_margin, 1)}%，净利率 {_fmt(net_margin, 1)}%，{('盈利能力较强' if net_margin > 10 else '盈利能力一般')}。", styles["Normal"]))
-        else:
-            story.append(Paragraph("• 盈利能力：数据不足，无法分析盈利能力。", styles["Normal"]))
+            expense = gross_margin - net_margin
+            detail = f"毛利率 {_fmt(gross_margin, 1)}%，净利率 {_fmt(net_margin, 1)}%，费用消耗率 {_fmt(expense, 1)}%。"
+            if net_margin > 20:
+                detail += " 净利率超过20%属于优质盈利水平，需重点验证高利润是否来自核心业务而非一次性收益。"
+            elif net_margin > 10:
+                detail += " 净利率处于中等偏上水平，建议关注费用率是否有优化空间。"
+            else:
+                detail += " 净利率偏低，需分析是行业特性还是竞争力不足。"
+            story.append(Paragraph(f"• 盈利质量：{detail}", styles["Normal"]))
 
+        # DuPont
         if roe is not None and roa is not None:
-            story.append(Paragraph(f"• 资本效率：ROE {_fmt(roe, 1)}%，ROA {_fmt(roa, 1)}%，{('资本运用效率优秀' if roe > 15 else '资本运用效率一般')}。", styles["Normal"]))
-        else:
-            story.append(Paragraph("• 资本效率：数据不足，无法分析资本效率。", styles["Normal"]))
+            detail = f"ROE {_fmt(roe, 1)}%，ROA {_fmt(roa, 1)}%。"
+            if roe > 15 and roa > 8:
+                detail += " 高ROE且高ROA表明企业通过经营能力而非财务杠杆创造回报，这是最健康的盈利模式。"
+            elif roe > 15:
+                detail += " ROE较高但ROA偏低，说明高ROE主要依赖财务杠杆放大，下行期风险会被同步放大。"
+            else:
+                detail += " ROE和ROA均处于一般水平，建议从杜邦三因素中寻找最大改善空间。"
+            story.append(Paragraph(f"• 杜邦分解：{detail}", styles["Normal"]))
 
+        # Financial Health
         if debt_ratio is not None and current_ratio is not None:
-            story.append(Paragraph(f"• 财务健康：资产负债率 {_fmt(debt_ratio, 1)}%，流动比率 {_fmt(current_ratio, 2)}，{('财务结构稳健' if debt_ratio < 60 else '需关注债务风险')}。", styles["Normal"]))
-        else:
-            story.append(Paragraph("• 财务健康：数据不足，无法分析财务健康状况。", styles["Normal"]))
+            detail = f"资产负债率 {_fmt(debt_ratio, 1)}%，流动比率 {_fmt(current_ratio, 2)}。"
+            if debt_ratio < 50 and current_ratio > 1.5:
+                detail += " 财务结构稳健，短期偿债能力充足，企业拥有充足的财务弹性。"
+            elif debt_ratio > 65:
+                detail += " 负债率偏高，需密切关注有息负债占比、短期债务占比和经营性现金流覆盖能力。"
+            else:
+                detail += " 财务结构处于中等水平，建议关注债务期限结构和利率敏感性。"
+            story.append(Paragraph(f"• 财务稳健性：{detail}", styles["Normal"]))
+
+        # Operating Efficiency
+        if asset_turnover is not None:
+            detail = f"总资产周转率 {_fmt(asset_turnover)}。"
+            if inv_turnover is not None:
+                detail += f" 存货周转 {_fmt(inv_turnover)} 次（{365/inv_turnover:.0f}天）。"
+            if recv_turnover is not None:
+                detail += f" 应收周转 {_fmt(recv_turnover)} 次（{365/recv_turnover:.0f}天）。"
+            detail += " 运营效率直接影响现金转化周期——周转越快，企业对外部融资的依赖越低。"
+            story.append(Paragraph(f"• 运营效率：{detail}", styles["Normal"]))
 
         story.append(Spacer(1, 6))
-        story.append(Paragraph("投资建议", styles["Heading3"]))
-        sugg: list[str] = []
+
+        # Investment Thesis
+        story.append(Paragraph("投资论点与建议", styles["Heading3"]))
         if roe is not None and roe > 20:
-            sugg.append("高ROE表明公司具有竞争优势，可考虑长期持有")
-        if debt_ratio is not None and debt_ratio > 70:
-            sugg.append("负债率偏高，需关注偿债风险和利率变化影响")
-        if net_margin is not None and net_margin > 20:
-            sugg.append("净利率优秀，关注是否可持续及行业竞争态势")
-        if current_ratio is not None and current_ratio < 1:
-            sugg.append("流动比率偏低，需关注短期偿债能力")
-        sugg.append("建议结合行业对比和历史趋势进行综合判断")
-        for s in sugg:
-            story.append(Paragraph(f"• {s}", styles["Normal"]))
+            story.append(Paragraph(f"• [看多] ROE {_fmt(roe)}% 显著高于资本成本，企业正在为股东创造超额价值。", styles["Normal"]))
+        if gross_margin is not None and gross_margin > 40:
+            story.append(Paragraph(f"• [看多] 高毛利率 {_fmt(gross_margin)}% 体现强定价权，在通胀环境下具备成本转嫁能力。", styles["Normal"]))
+        if debt_ratio is not None and debt_ratio > 65:
+            story.append(Paragraph(f"• [风险] 高负债率 {_fmt(debt_ratio)}% 在利率上行周期可能侵蚀利润。", styles["Normal"]))
+        if current_ratio is not None and current_ratio < 1.2:
+            story.append(Paragraph(f"• [风险] 流动比率 {_fmt(current_ratio)} 接近警戒线，短期偿债安全边际不足。", styles["Normal"]))
+        if net_margin is not None and net_margin > 15:
+            story.append(Paragraph(f"• [看多] 净利率 {_fmt(net_margin)}% 处于优秀水平。", styles["Normal"]))
+
+        # Composite recommendation
+        scores: list[int] = []
+        if roe is not None:
+            scores.append(2 if roe > 15 else (1 if roe > 10 else 0))
+        if net_margin is not None:
+            scores.append(2 if net_margin > 10 else (1 if net_margin > 5 else 0))
+        if debt_ratio is not None:
+            scores.append(2 if debt_ratio < 50 else (1 if debt_ratio < 65 else 0))
+        if current_ratio is not None:
+            scores.append(2 if current_ratio > 1.5 else (1 if current_ratio > 1 else 0))
+        avg_score = sum(scores) / len(scores) if scores else 0
+        if avg_score >= 1.5:
+            rec = "综合财务质量较好，建议关注估值水平和行业前景，在合理估值区间内可考虑配置。"
+        elif avg_score >= 1:
+            rec = "财务表现中等，存在改善空间。建议等待更多积极信号后再做配置决策。"
+        else:
+            rec = "当前财务指标偏弱，建议谨慎观望。重点关注管理层改善计划和行业周期位置。"
+        story.append(Paragraph(f"• 综合建议：{rec}", styles["Normal"]))
     else:
         story.append(Paragraph("暂无足够数据生成AI洞察，请确保报告已完成分析。", styles["Normal"]))
 
@@ -1446,6 +3301,18 @@ def _stooq_fetch_history_df(symbol: str, count: int = 800):
         out = out.dropna(subset=["date"]).sort_values("date")
         if out.empty:
             return None
+
+        # US daily indicators should use latest fully closed trading day only.
+        try:
+            closed_date = _latest_closed_trade_date_us()
+            dseries = pd.to_datetime(out["date"], errors="coerce")
+            out = out[dseries.dt.date <= closed_date]
+        except Exception:
+            pass
+
+        if out.empty:
+            return None
+
         out["amount"] = out["close"] * out["volume"]
 
         try:
@@ -1470,7 +3337,7 @@ def _tencent_fetch_history_df(symbol: str, market: str, count: int = 420):
         import httpx
 
         url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={q},day,,,{count},qfq"
-        with httpx.Client(timeout=12, follow_redirects=True) as client:
+        with httpx.Client(timeout=6, follow_redirects=True) as client:
             resp = client.get(url)
             resp.raise_for_status()
             data = resp.json()
@@ -1500,16 +3367,22 @@ def _tencent_fetch_history_df(symbol: str, market: str, count: int = 420):
 
 
 @app.get("/api/stock/search", response_model=list[StockSearchResult])
-def search_stocks(q: str, market: str = "CN"):
-    """Search for stocks by keyword using real market data."""
+def search_stocks(q: str, market: str = "ALL"):
+    """Search for stocks by keyword across CN/HK/US markets.
+    market=ALL searches all 3 markets; market=CN/HK/US searches a single market.
+    Always supplements with Tencent smartbox for best coverage.
+    """
     try:
+        import concurrent.futures
+
         def _tencent_smartbox(query: str) -> list[StockSearchResult]:
             try:
                 import httpx
+                from urllib.parse import quote_plus
 
                 disable_proxies_for_process()
-                url = f"https://smartbox.gtimg.cn/s3/?q={query}&t=all"
-                with httpx.Client(timeout=10, follow_redirects=True) as client:
+                url = f"https://smartbox.gtimg.cn/s3/?q={quote_plus(query)}&t=all"
+                with httpx.Client(timeout=4, follow_redirects=True) as client:
                     text = client.get(url).text
 
                 if '"' not in text:
@@ -1549,70 +3422,168 @@ def search_stocks(q: str, market: str = "CN"):
                         base = code.split('.', 1)[0].upper()
                         if base:
                             out.append(StockSearchResult(symbol=base, name=name, market="US"))
-                    if len(out) >= 10:
+                    if len(out) >= 15:
                         break
                 return out
             except Exception:
                 return []
 
-        df = _get_stock_spot_data(market)
-        if df is None or df.empty:
-            # Fallback to Tencent smartbox (all markets)
-            out = _tencent_smartbox(q.strip())
-            if out:
-                return out
-
-            # Last fallback to mock data
-            mock_stocks = [
-                {"symbol": "600519.SH", "name": "贵州茅台", "market": "CN"},
-                {"symbol": "00700.HK", "name": "腾讯控股", "market": "HK"},
-                {"symbol": "AAPL", "name": "苹果公司", "market": "US"},
-                {"symbol": "BABA", "name": "阿里巴巴", "market": "US"},
-                {"symbol": "601318.SH", "name": "中国平安", "market": "CN"},
-                {"symbol": "000858.SZ", "name": "五粮液", "market": "CN"},
-            ]
-            q_lower = q.lower()
-            return [
-                StockSearchResult(symbol=s["symbol"], name=s["name"], market=s["market"])
-                for s in mock_stocks
-                if q_lower in s["symbol"].lower() or q_lower in s["name"].lower()
-            ][:10]
-        
-        # Search in real data
-        code_col = "代码" if "代码" in df.columns else df.columns[0]
-        name_col = "名称" if "名称" in df.columns else (df.columns[1] if len(df.columns) > 1 else None)
-        
-        q_lower = q.lower()
-        results = []
-        
-        for _, row in df.iterrows():
-            code = str(row.get(code_col, ""))
-            name = str(row.get(name_col, "")) if name_col else ""
-            
-            if q_lower in code.lower() or q_lower in name.lower():
-                # Format symbol based on market
-                if market == "CN":
-                    if code.startswith("6"):
-                        symbol = f"{code}.SH"
-                    elif code.startswith(("0", "3")):
-                        symbol = f"{code}.SZ"
-                    else:
-                        symbol = f"{code}.BJ"
-                elif market == "HK":
-                    symbol = f"{code.zfill(5)}.HK"
+        def _search_single_market(mkt: str, query_lower: str) -> list[StockSearchResult]:
+            """Search a single market's spot data with fuzzy matching."""
+            try:
+                df = _get_stock_spot_data(mkt)
+                if df is None or df.empty:
+                    return []
+                code_col = "代码" if "代码" in df.columns else df.columns[0]
+                name_col = "名称" if "名称" in df.columns else (df.columns[1] if len(df.columns) > 1 else None)
+                # Fast pre-filter to avoid scanning full dataframe row-by-row.
+                code_series = df[code_col].astype(str).str.lower()
+                if name_col:
+                    name_series = df[name_col].astype(str).str.lower()
+                    mask = code_series.str.contains(query_lower, regex=False, na=False) | name_series.str.contains(query_lower, regex=False, na=False)
                 else:
-                    symbol = code
-                
-                results.append(StockSearchResult(symbol=symbol, name=name, market=market))
-                
-                if len(results) >= 10:
-                    break
+                    mask = code_series.str.contains(query_lower, regex=False, na=False)
 
-        if results:
-            return results
+                filtered = df[mask].head(50)
+                hits: list[StockSearchResult] = []
+                for _, row in filtered.iterrows():
+                    code = str(row.get(code_col, ""))
+                    name = str(row.get(name_col, "")) if name_col else ""
+                    name_lower = name.lower()
+                    code_lower = code.lower()
+                    # Direct substring match
+                    matched = query_lower in code_lower or query_lower in name_lower
+                    # Reverse match: stock name contains query (handles "美团" matching "美团-W")
+                    if not matched and len(query_lower) >= 2:
+                        matched = any(ch in name_lower for ch in [query_lower]) or name_lower.startswith(query_lower)
+                    if matched:
+                        if mkt == "CN":
+                            if code.startswith("6"):
+                                sym = f"{code}.SH"
+                            elif code.startswith(("0", "3")):
+                                sym = f"{code}.SZ"
+                            else:
+                                sym = f"{code}.BJ"
+                        elif mkt == "HK":
+                            sym = f"{code.zfill(5)}.HK"
+                        else:
+                            sym = code
+                        hits.append(StockSearchResult(symbol=sym, name=name, market=mkt))
+                        if len(hits) >= 5:
+                            break
+                return hits
+            except Exception:
+                return []
 
-        # If the specified market cannot find results (e.g. search HK code/name while market=CN), fallback
-        return _tencent_smartbox(q.strip())
+        import re as _re
+
+        q_stripped = q.strip()
+        q_lower = q_stripped.lower()
+        m_upper = (market or "ALL").strip().upper()
+
+        # --- Smart query preprocessing ---
+        # 1) Detect "hk3690", "HK03690", "us.AAPL", "sh600519", "sz002594" patterns
+        _prefix_market_map = {
+            "hk": "HK", "港": "HK", "港股": "HK",
+            "us": "US", "美": "US", "美股": "US",
+            "sh": "CN", "sz": "CN", "bj": "CN", "cn": "CN", "a股": "CN", "沪": "CN", "深": "CN",
+        }
+        _prefix_match = _re.match(r'^(hk|us|sh|sz|bj|cn|港股?|美股?|a股|沪|深)[.\-_]?(\d{1,6}|[a-zA-Z]{1,10})$', q_lower)
+        if _prefix_match:
+            _pfx = _prefix_match.group(1)
+            _code = _prefix_match.group(2)
+            _detected_mkt = _prefix_market_map.get(_pfx, None)
+            if _detected_mkt:
+                m_upper = _detected_mkt
+                q_stripped = _code.upper() if _detected_mkt == "US" else _code
+                q_lower = q_stripped.lower()
+
+        # 2) Strip trailing market suffixes from Chinese name queries: "美团香港" -> "美团", "苹果美股" -> "苹果"
+        _suffix_strip_re = _re.sub(r'(香港|美股|港股|A股|a股|沪股|深股|美国|中国)$', '', q_stripped)
+        extra_queries = []
+        if _suffix_strip_re and _suffix_strip_re != q_stripped:
+            extra_queries.append(_suffix_strip_re.lower())
+
+        # Determine which markets to search
+        markets_to_search = ["CN", "HK", "US"] if m_upper == "ALL" else [m_upper]
+
+        # Fast path: smartbox is usually enough and much lighter than loading full spot tables.
+        # If smartbox already has results, return immediately to avoid expensive scans
+        # that can impact responsiveness of other endpoints (e.g. indicators loading in UI).
+        quick_results: list[StockSearchResult] = []
+        quick_results.extend(_tencent_smartbox(q_stripped))
+        for eq in extra_queries:
+            quick_results.extend(_tencent_smartbox(eq))
+        if quick_results:
+            seen_quick = set()
+            deduped_quick: list[StockSearchResult] = []
+            for r in quick_results:
+                key = (r.symbol.upper(), r.market.upper())
+                if key not in seen_quick:
+                    seen_quick.add(key)
+                    deduped_quick.append(r)
+            return deduped_quick[:15]
+
+        # Search spot data + Tencent smartbox in parallel
+        all_results: list[StockSearchResult] = []
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=6)
+        try:
+            futures = {}
+            for mkt in markets_to_search:
+                futures[pool.submit(_search_single_market, mkt, q_lower)] = f"spot_{mkt}"
+                # Also search with stripped query if different
+                for eq in extra_queries:
+                    futures[pool.submit(_search_single_market, mkt, eq)] = f"spot_{mkt}_alt"
+            futures[pool.submit(_tencent_smartbox, q_stripped)] = "smartbox"
+            # Also smartbox the stripped query
+            for eq in extra_queries:
+                futures[pool.submit(_tencent_smartbox, eq)] = "smartbox_alt"
+
+            done, not_done = concurrent.futures.wait(
+                list(futures.keys()),
+                timeout=5,
+                return_when=concurrent.futures.ALL_COMPLETED,
+            )
+            for fut in done:
+                try:
+                    all_results.extend(fut.result())
+                except Exception:
+                    pass
+
+            # Critical: never block request waiting for straggler tasks.
+            for fut in not_done:
+                fut.cancel()
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+
+        # Deduplicate by (symbol, market)
+        seen = set()
+        deduped: list[StockSearchResult] = []
+        for r in all_results:
+            key = (r.symbol.upper(), r.market.upper())
+            if key not in seen:
+                seen.add(key)
+                deduped.append(r)
+
+        if deduped:
+            return deduped[:15]
+
+        # Last fallback to mock data
+        mock_stocks = [
+            {"symbol": "600519.SH", "name": "贵州茅台", "market": "CN"},
+            {"symbol": "00700.HK", "name": "腾讯控股", "market": "HK"},
+            {"symbol": "AAPL", "name": "苹果公司", "market": "US"},
+            {"symbol": "BABA", "name": "阿里巴巴", "market": "US"},
+            {"symbol": "601318.SH", "name": "中国平安", "market": "CN"},
+            {"symbol": "000858.SZ", "name": "五粮液", "market": "CN"},
+            {"symbol": "MCD", "name": "麦当劳", "market": "US"},
+            {"symbol": "03690.HK", "name": "美团-W", "market": "HK"},
+        ]
+        return [
+            StockSearchResult(symbol=s["symbol"], name=s["name"], market=s["market"])
+            for s in mock_stocks
+            if q_lower in s["symbol"].lower() or q_lower in s["name"].lower()
+        ][:15]
     except Exception as e:
         print(f"Search error: {e}")
         return []
@@ -1670,6 +3641,9 @@ class StockIndicatorsResponse(BaseModel):
     buy_price_stable: Optional[float] = None
     sell_price: Optional[float] = None
 
+    buy_condition_desc: Optional[str] = None
+    sell_condition_desc: Optional[str] = None
+
     buy_reason: Optional[str] = None
     sell_reason: Optional[str] = None
 
@@ -1685,11 +3659,20 @@ class StockIndicatorsResponse(BaseModel):
     signal_vol_gt_ma10: Optional[bool] = None
 
 
+# Price cache: (market, symbol) -> (timestamp, StockPriceResponse)
+_PRICE_CACHE: dict[tuple[str, str], tuple[float, object]] = {}
+_PRICE_CACHE_TTL = 60  # seconds
+
+
 @app.get("/api/stock/price", response_model=Optional[StockPriceResponse])
 def get_stock_price(symbol: str, market: str = "CN"):
     """Get real-time stock price."""
     try:
         market = (market or "CN").upper()
+        _price_key = (market, (symbol or "").strip().upper())
+        _price_cached = _PRICE_CACHE.get(_price_key)
+        if _price_cached and (time.time() - _price_cached[0]) < _PRICE_CACHE_TTL:
+            return _price_cached[1]
 
         def _yfinance_market_cap_us(sym: str):
             try:
@@ -1787,10 +3770,12 @@ def get_stock_price(symbol: str, market: str = "CN"):
                 mc = _yfinance_market_cap_us(symbol)
                 if mc is not None and mc > 0:
                     tq_quote.market_cap = mc
+                _PRICE_CACHE[_price_key] = (time.time(), tq_quote)
                 return tq_quote
 
             yf_q = _yfinance_quote_us(symbol)
             if yf_q is not None:
+                _PRICE_CACHE[_price_key] = (time.time(), yf_q)
                 return yf_q
 
         df = _get_stock_spot_data(market)
@@ -1802,6 +3787,7 @@ def get_stock_price(symbol: str, market: str = "CN"):
                 mc = _yfinance_market_cap_us(symbol)
                 if mc is not None and mc > 0:
                     base.market_cap = mc
+            _PRICE_CACHE[_price_key] = (time.time(), base)
             return base
         
         # Extract code from symbol
@@ -1849,6 +3835,7 @@ def get_stock_price(symbol: str, market: str = "CN"):
                 mc = _yfinance_market_cap_us(symbol)
                 if mc is not None and mc > 0:
                     base.market_cap = mc
+            _PRICE_CACHE[_price_key] = (time.time(), base)
             return base
 
         row = row_df.iloc[0]
@@ -1914,7 +3901,7 @@ def get_stock_price(symbol: str, market: str = "CN"):
             if mc is not None and mc > 0:
                 market_cap = mc
         
-        return StockPriceResponse(
+        _result = StockPriceResponse(
             symbol=symbol,
             name=name,
             market=market,
@@ -1934,6 +3921,8 @@ def get_stock_price(symbol: str, market: str = "CN"):
             bid=bid,
             ask=ask,
         )
+        _PRICE_CACHE[_price_key] = (time.time(), _result)
+        return _result
     except Exception as e:
         print(f"Price error: {e}")
         return None
@@ -2028,11 +4017,143 @@ def _atr14(df, period: int = 14):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
 
     # Wilder ATR: first ATR is SMA(period), then recursive smoothing.
-    atr = tr.rolling(window=period, min_periods=period).mean()
-    for i in range(period + 1, len(tr)):
-        if not pd.isna(atr.iat[i - 1]):
-            atr.iat[i] = (atr.iat[i - 1] * (period - 1) + tr.iat[i]) / period
+    if tr is None or tr.empty:
+        return tr
+
+    atr = pd.Series(index=tr.index, dtype="float64")
+    valid_tr = pd.to_numeric(tr, errors="coerce")
+
+    if len(valid_tr.dropna()) < period:
+        # Short series fallback: keep a usable ATR curve.
+        return valid_tr.rolling(window=period, min_periods=1).mean()
+
+    seed = valid_tr.rolling(window=period, min_periods=period).mean()
+    try:
+        first_idx = seed.first_valid_index()
+        if first_idx is None:
+            return valid_tr.rolling(window=period, min_periods=1).mean()
+        atr.loc[first_idx] = float(seed.loc[first_idx])
+        started = False
+        prev_atr = None
+        for idx, trv in valid_tr.items():
+            if idx == first_idx:
+                started = True
+                prev_atr = atr.loc[idx]
+                continue
+            if not started:
+                continue
+            if pd.isna(trv):
+                atr.loc[idx] = prev_atr
+                continue
+            prev_atr = ((float(prev_atr) * (period - 1)) + float(trv)) / float(period)
+            atr.loc[idx] = prev_atr
+    except Exception:
+        return valid_tr.rolling(window=period, min_periods=1).mean()
+
     return atr
+
+
+def _build_buy_condition_desc(
+    *,
+    last_close: float | None,
+    ma20_now: float | None,
+    ma60_now: float | None,
+    slope_pct: float | None,
+    rsi14: float | None,
+    rsi_rebound: bool | None,
+    rsi_before_yesterday_v: float | None,
+    rsi_yesterday_v: float | None,
+    rsi_today_v: float | None,
+    aggressive_ok: bool | None,
+    tol: float = 0.02,
+) -> str | None:
+    try:
+        if ma20_now is None or ma60_now is None or slope_pct is None:
+            return None
+
+        low_p = float(ma20_now) * (1.0 - float(tol))
+        high_p = float(ma20_now) * (1.0 + float(tol))
+
+        c1 = bool(last_close is not None and float(last_close) > float(ma60_now))
+        c2 = bool(float(slope_pct) > 0)
+        c3 = bool(
+            last_close is not None
+            and abs(float(last_close) - float(ma20_now)) / max(abs(float(ma20_now)), 1e-9) <= float(tol)
+        )
+        c4 = bool(rsi_rebound)
+
+        missing = []
+        if not c1:
+            missing.append(">MA60")
+        if not c2:
+            missing.append("MA60上行")
+        if not c3:
+            missing.append("≈MA20")
+        if not c4:
+            missing.append("RSI拐头")
+
+        rsi_part = ""
+        if rsi14 is not None:
+            rsi_part = f"RSI14={float(rsi14):.1f}"
+        if rsi_before_yesterday_v is not None and rsi_yesterday_v is not None and rsi_today_v is not None:
+            if rsi_part:
+                rsi_part = rsi_part + (
+                    f"（前天={float(rsi_before_yesterday_v):.1f}, 昨天={float(rsi_yesterday_v):.1f}, 今天={float(rsi_today_v):.1f}）"
+                )
+            else:
+                rsi_part = (
+                    f"RSI（前天={float(rsi_before_yesterday_v):.1f}, 昨天={float(rsi_yesterday_v):.1f}, 今天={float(rsi_today_v):.1f}）"
+                )
+
+        tail = "可以买入" if aggressive_ok is True else ("暂不满足：" + "、".join(missing) if aggressive_ok is False else "-")
+        return (
+            f"当价格进入 {low_p:.2f}~{high_p:.2f}（≈MA20={float(ma20_now):.2f}）且 价格>MA60={float(ma60_now):.2f}，"
+            f"且 MA60趋势向上（Slope%={float(slope_pct):.3f}%/天），"
+            f"且 RSI出现低位拐头（{rsi_part or '-'}），则{tail}。"
+        )
+    except Exception:
+        return None
+
+
+def _build_sell_condition_desc(
+    *,
+    last_close: float | None,
+    ma20_now: float | None,
+    atr14: float | None,
+    rsi14: float | None,
+    prev_max_close: float | None,
+    prev_max_rsi: float | None,
+) -> str | None:
+    try:
+        if last_close is None:
+            return None
+
+        stop_part = None
+        if atr14 is not None:
+            stop_line2 = float(last_close) - 2 * float(atr14)
+            stop_part = f"B：止损条件：当价格≤{stop_line2:.2f}马上卖出（{float(last_close):.2f}-2×ATR{float(atr14):.3f}）"
+        else:
+            stop_part = "B：止损条件：当价格≤(今日价-2×ATR)马上卖出"
+
+        tp_parts = []
+        if rsi14 is not None:
+            if prev_max_close is not None and prev_max_rsi is not None:
+                tp_parts.append(
+                    f"RSI={float(rsi14):.1f}>70且顶背离：价格创新高>={float(prev_max_close):.2f}且RSI<{float(prev_max_rsi):.1f}"
+                )
+            else:
+                tp_parts.append(f"RSI={float(rsi14):.1f}>70且顶背离（创新高阈值取近窗历史高点）")
+        else:
+            tp_parts.append("RSI>70且顶背离")
+
+        if ma20_now is not None:
+            tp_parts.append(f"跌破MA20：当价格<{float(ma20_now):.2f}")
+        else:
+            tp_parts.append("跌破MA20")
+
+        return "A：止盈条件：" + " 或 ".join(tp_parts) + "；" + (stop_part or "")
+    except Exception:
+        return None
 
 
 def _safe_float(v):
@@ -2070,42 +4191,45 @@ def _fetch_history_df(symbol: str, market: str):
     start = end - dt.timedelta(days=800)
 
     if m == "CN":
-        try:
-            disable_proxies_for_process()
-            import akshare as ak
-
-            code = symbol.split(".")[0]
-            df = ak.stock_zh_a_hist(
-                symbol=code,
-                period="daily",
-                start_date=start.strftime("%Y%m%d"),
-                end_date=end.strftime("%Y%m%d"),
-                adjust="",
-            )
-            if df is None or df.empty:
-                raise ValueError("empty akshare history")
-            out = pd.DataFrame(
-                {
-                    "date": pd.to_datetime(df["日期"], errors="coerce"),
-                    "open": pd.to_numeric(df.get("开盘"), errors="coerce"),
-                    "high": pd.to_numeric(df.get("最高"), errors="coerce"),
-                    "low": pd.to_numeric(df.get("最低"), errors="coerce"),
-                    "close": pd.to_numeric(df.get("收盘"), errors="coerce"),
-                    "volume": pd.to_numeric(df.get("成交量"), errors="coerce") * 100,
-                    "amount": pd.to_numeric(df.get("成交额"), errors="coerce"),
-                }
-            )
-            out = out.dropna(subset=["date"]).sort_values("date")
-            if out is not None and not out.empty:
-                _HISTORY_CACHE[key] = (now, out)
-            return out
-        except Exception:
-            out = None
-
+        # Critical stability path: Tencent history is much more stable/fast in production.
+        # We intentionally avoid AkShare by default because intermittent hangs there can
+        # block indicators UI for a long time. AkShare fallback can be enabled explicitly.
         tdf = _tencent_fetch_history_df(symbol, market)
         if tdf is not None and not tdf.empty:
             _HISTORY_CACHE[key] = (now, tdf)
             return tdf
+
+        if (os.environ.get("ENABLE_AKSHARE_CN_HISTORY_FALLBACK") or "").strip() == "1":
+            try:
+                disable_proxies_for_process()
+                import akshare as ak
+
+                code = symbol.split(".")[0]
+                df = ak.stock_zh_a_hist(
+                    symbol=code,
+                    period="daily",
+                    start_date=start.strftime("%Y%m%d"),
+                    end_date=end.strftime("%Y%m%d"),
+                    adjust="",
+                )
+                if df is not None and not df.empty:
+                    out = pd.DataFrame(
+                        {
+                            "date": pd.to_datetime(df["日期"], errors="coerce"),
+                            "open": pd.to_numeric(df.get("开盘"), errors="coerce"),
+                            "high": pd.to_numeric(df.get("最高"), errors="coerce"),
+                            "low": pd.to_numeric(df.get("最低"), errors="coerce"),
+                            "close": pd.to_numeric(df.get("收盘"), errors="coerce"),
+                            "volume": pd.to_numeric(df.get("成交量"), errors="coerce") * 100,
+                            "amount": pd.to_numeric(df.get("成交额"), errors="coerce"),
+                        }
+                    )
+                    out = out.dropna(subset=["date"]).sort_values("date")
+                    if out is not None and not out.empty:
+                        _HISTORY_CACHE[key] = (now, out)
+                        return out
+            except Exception:
+                pass
         return None
 
     try:
@@ -2193,6 +4317,19 @@ def _fetch_history_df(symbol: str, market: str):
             }
         )
         out = out.dropna(subset=["date"]).sort_values("date")
+
+        # US daily indicators should use latest fully closed trading day only.
+        if m == "US":
+            try:
+                closed_date = _latest_closed_trade_date_us()
+                dseries = pd.to_datetime(out["date"], errors="coerce")
+                # yfinance can return timezone-aware timestamps for some calls.
+                if hasattr(dseries.dt, "tz") and dseries.dt.tz is not None:
+                    dseries = dseries.dt.tz_convert("America/New_York")
+                out = out[dseries.dt.date <= closed_date]
+            except Exception:
+                pass
+
         out["amount"] = out["close"] * out["volume"]
 
         def _looks_valid_history(df: "pd.DataFrame") -> bool:
@@ -2240,6 +4377,70 @@ def _fetch_history_df(symbol: str, market: str):
         return None
 
 
+class StockAnnouncementItem(BaseModel):
+    title: str
+    date: Optional[str] = None
+    url: Optional[str] = None
+
+
+@app.get("/api/stock/announcements", response_model=list[StockAnnouncementItem])
+def get_stock_announcements(symbol: str, market: str = "CN", limit: int = 5):
+    """Get latest stock announcements/news."""
+    market = (market or "CN").upper()
+    results: list[StockAnnouncementItem] = []
+    try:
+        disable_proxies_for_process()
+        if market == "CN":
+            import akshare as ak
+            code = symbol.split(".")[0]
+            try:
+                df = ak.stock_news_em(symbol=code)
+                if df is not None and not df.empty:
+                    for _, row in df.head(limit).iterrows():
+                        title = str(row.get("新闻标题", "")).strip()
+                        date_val = str(row.get("发布时间", "")).strip()
+                        url_val = row.get("新闻链接", None)
+                        if title:
+                            results.append(StockAnnouncementItem(
+                                title=title,
+                                date=date_val[:10] if date_val else None,
+                                url=str(url_val).strip() if url_val else None,
+                            ))
+            except Exception:
+                pass
+        elif market in ("US", "HK"):
+            import yfinance as yf
+            yf_symbol = symbol
+            if market == "HK" and not yf_symbol.upper().endswith(".HK"):
+                base = yf_symbol.replace(".HK", "")
+                yf_symbol = f"{base.zfill(4)}.HK" if base.isdigit() else f"{base}.HK"
+            try:
+                t = yf.Ticker(yf_symbol)
+                news = t.news or []
+                for item in news[:limit]:
+                    title = item.get("title", "")
+                    pub = item.get("providerPublishTime")
+                    date_str = None
+                    if pub:
+                        from datetime import datetime, timezone
+                        try:
+                            date_str = datetime.fromtimestamp(pub, tz=timezone.utc).strftime("%Y-%m-%d")
+                        except Exception:
+                            pass
+                    link = item.get("link", None)
+                    if title:
+                        results.append(StockAnnouncementItem(
+                            title=title.strip(),
+                            date=date_str,
+                            url=link,
+                        ))
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return results
+
+
 @app.get("/api/stock/indicators", response_model=Optional[StockIndicatorsResponse])
 def get_stock_indicators(symbol: str, market: str = "CN"):
     import time
@@ -2248,7 +4449,7 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
     key = (market or "CN").upper(), (symbol or "").upper()
     now = time.time()
     cached = _INDICATOR_CACHE.get(key)
-    if cached and (now - cached[0]) < 300:
+    if cached and (now - cached[0]) < 3600:
         return cached[1]
 
     df = _fetch_history_df(symbol, market)
@@ -2334,17 +4535,31 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
     signal_rsi_overbought = True if (rsi14 is not None and rsi14 > 70) else False if rsi14 is not None else None
 
     rsi_rebound = None
+    rsi_today_v = None
+    rsi_yesterday_v = None
+    rsi_before_yesterday_v = None
     try:
         if len(rsi) >= 3:
             rsi_today = rsi.iloc[-1]
             rsi_yesterday = rsi.iloc[-2]
             rsi_before_yesterday = rsi.iloc[-3]
             if pd.notna(rsi_today) and pd.notna(rsi_yesterday) and pd.notna(rsi_before_yesterday):
+                try:
+                    rsi_today_v = float(rsi_today)
+                    rsi_yesterday_v = float(rsi_yesterday)
+                    rsi_before_yesterday_v = float(rsi_before_yesterday)
+                except Exception:
+                    rsi_today_v = None
+                    rsi_yesterday_v = None
+                    rsi_before_yesterday_v = None
                 is_hook_up = bool(float(rsi_yesterday) < float(rsi_before_yesterday) and float(rsi_today) > float(rsi_yesterday))
                 is_low_position = bool(float(rsi_yesterday) < 40)
                 rsi_rebound = bool(is_hook_up and is_low_position)
     except Exception:
         rsi_rebound = None
+        rsi_today_v = None
+        rsi_yesterday_v = None
+        rsi_before_yesterday_v = None
 
     vol_ma5 = vol.rolling(window=5).mean()
     vol_ma10 = vol.rolling(window=10).mean()
@@ -2356,6 +4571,12 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
         signal_vol_gt_ma10 = float(vol.iloc[-1]) > float(vol_ma10.iloc[-2])
 
     last_close = float(close.iloc[-1]) if pd.notna(close.iloc[-1]) else None
+    # Fallback: if last_close is None but we have MA values, use the most recent valid close
+    if last_close is None and not close.empty:
+        # Try to find the last valid close price
+        valid_closes = close.dropna()
+        if not valid_closes.empty:
+            last_close = float(valid_closes.iloc[-1])
     last_open = float(df["open"].astype(float).iloc[-1]) if "open" in df.columns and pd.notna(df["open"].astype(float).iloc[-1]) else None
     last_low = float(low.iloc[-1]) if pd.notna(low.iloc[-1]) else None
     ma5_now = float(ma5.iloc[-1]) if pd.notna(ma5.iloc[-1]) else None
@@ -2571,49 +4792,54 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
             except Exception:
                 pe_ratio = None
 
-            disable_proxies_for_process()
-            import akshare as ak
-
-            code = symbol.split(".")[0]
-            if pe_ratio is None:
+            # AkShare PE fallback is expensive and occasionally hangs in production.
+            # Keep it opt-in to protect indicators endpoint latency.
+            if pe_ratio is None and (os.environ.get("ENABLE_AKSHARE_CN_PE_FALLBACK") or "").strip() == "1":
                 try:
-                    pe_df = ak.stock_a_indicator_lg(symbol=code)
-                    if pe_df is not None and not pe_df.empty:
-                        last = pe_df.iloc[-1]
+                    disable_proxies_for_process()
+                    import akshare as ak
 
-                        # Prefer TTM columns when present (case-insensitive).
-                        cols = [str(c) for c in list(pe_df.columns)]
-                        ttm_cols = [c for c in cols if ("ttm" in c.lower()) or ("市盈率" in c and "ttm" in c.upper())]
-                        prefer = []
-                        if ttm_cols:
-                            prefer.extend(ttm_cols)
-                        prefer.extend(["pe_ttm", "市盈率TTM", "市盈率(动)", "市盈率", "pe"])
+                    code = symbol.split(".")[0]
+                    try:
+                        pe_df = ak.stock_a_indicator_lg(symbol=code)
+                        if pe_df is not None and not pe_df.empty:
+                            last = pe_df.iloc[-1]
 
-                        for k in prefer:
-                            if k in pe_df.columns:
-                                pe_ratio = _safe_float(last.get(k))
-                                if pe_ratio is not None:
-                                    break
-                except Exception:
-                    pe_ratio = None
+                            # Prefer TTM columns when present (case-insensitive).
+                            cols = [str(c) for c in list(pe_df.columns)]
+                            ttm_cols = [c for c in cols if ("ttm" in c.lower()) or ("市盈率" in c and "ttm" in c.upper())]
+                            prefer = []
+                            if ttm_cols:
+                                prefer.extend(ttm_cols)
+                            prefer.extend(["pe_ttm", "市盈率TTM", "市盈率(动)", "市盈率", "pe"])
 
-            if pe_ratio is None:
-                try:
-                    spot = ak.stock_zh_a_spot_em()
-                    if spot is not None and not spot.empty:
-                        code_col = None
-                        for c in ("代码", "symbol", "Symbol"):
-                            if c in spot.columns:
-                                code_col = c
-                                break
-                        if code_col:
-                            base = (symbol or "").split(".", 1)[0].upper()
-                            hit = spot[spot[code_col].astype(str).str.upper() == base]
-                            if not hit.empty:
-                                row = hit.iloc[0]
-                                pe_col = _find_pe_column([str(c) for c in list(spot.columns)])
-                                if pe_col and pe_col in spot.columns:
-                                    pe_ratio = _safe_float(row.get(pe_col))
+                            for k in prefer:
+                                if k in pe_df.columns:
+                                    pe_ratio = _safe_float(last.get(k))
+                                    if pe_ratio is not None:
+                                        break
+                    except Exception:
+                        pe_ratio = None
+
+                    if pe_ratio is None:
+                        try:
+                            spot = ak.stock_zh_a_spot_em()
+                            if spot is not None and not spot.empty:
+                                code_col = None
+                                for c in ("代码", "symbol", "Symbol"):
+                                    if c in spot.columns:
+                                        code_col = c
+                                        break
+                                if code_col:
+                                    base = (symbol or "").split(".", 1)[0].upper()
+                                    hit = spot[spot[code_col].astype(str).str.upper() == base]
+                                    if not hit.empty:
+                                        row = hit.iloc[0]
+                                        pe_col = _find_pe_column([str(c) for c in list(spot.columns)])
+                                        if pe_col and pe_col in spot.columns:
+                                            pe_ratio = _safe_float(row.get(pe_col))
+                        except Exception:
+                            pe_ratio = None
                 except Exception:
                     pe_ratio = None
 
@@ -2660,8 +4886,9 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
     sell_ok = None
     sell_price = None
     sell_reason = None
+    prev_max_close = None
+    prev_max_rsi = None
     try:
-        reference_buy_price = float(last_close) if (aggressive_ok is True and last_close is not None) else None
         take_profit = False
         price_break_ma20 = False
         rsi_divergence = False
@@ -2681,15 +4908,18 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
                     prev_max_close = float(pd.to_numeric(prev_close_win, errors="coerce").max()) if not prev_close_win.empty else None
                     prev_max_rsi = float(pd.to_numeric(prev_rsi_win, errors="coerce").max()) if not prev_rsi_win.empty else None
                     if prev_max_close is not None and prev_max_rsi is not None and last_close is not None:
-                        rsi_divergence = bool(float(last_close) > prev_max_close and float(rsi14) < prev_max_rsi)
+                        rsi_divergence = bool(float(last_close) > float(prev_max_close) and float(rsi14) < float(prev_max_rsi))
             except Exception:
                 rsi_divergence = False
 
         # 止损：买入价 - 2×ATR
         # 在“股票信息”页：用计算出来的买入价位（buy_price_aggressive=当前价）作为参考买入价
-        if reference_buy_price is not None and atr14 is not None and last_close is not None:
-            stop_line = float(reference_buy_price) - 2 * float(atr14)
-            stop_loss_trigger = bool(float(last_close) <= float(stop_line))
+        if atr14 is not None and last_close is not None:
+            stop_line = float(last_close) - 2 * float(atr14)
+            if last_low is not None:
+                stop_loss_trigger = bool(float(last_low) <= float(stop_line))
+            else:
+                stop_loss_trigger = False
 
         # 卖出价位：
         # - 参考止损线：买入价 - 2×ATR
@@ -2705,7 +4935,7 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
 
         if sell_ok is True:
             if stop_loss_trigger:
-                sell_reason = f"止损：跌破 买入价-2×ATR（止损线≈{stop_line:.3f}）"
+                sell_reason = f"止损：跌破 今日价-2×ATR（止损线≈{stop_line:.3f}）"
             elif price_break_ma20:
                 sell_reason = "止盈：跌破 MA20（短期趋势结束）"
             elif take_profit and rsi_divergence:
@@ -2716,11 +4946,36 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
         sell_ok = None
         sell_price = None
         sell_reason = None
+        prev_max_close = None
+        prev_max_rsi = None
 
     # 买入价位：输出为“参考买入价位”，默认用 MA20（更贴近回调买点）；若不可用则回退现价。
     # buy_price_aggressive_ok 仍表示是否满足当前策略的强条件。
     buy_price_aggressive = float(ma20_now) if ma20_now is not None else (float(last_close) if last_close is not None else None)
     buy_price_stable = float(ma60_now) if 'ma60_now' in locals() and ma60_now is not None else None
+
+    buy_condition_desc = _build_buy_condition_desc(
+        last_close=last_close,
+        ma20_now=ma20_now,
+        ma60_now=ma60_now,
+        slope_pct=slope_pct,
+        rsi14=rsi14,
+        rsi_rebound=rsi_rebound,
+        rsi_before_yesterday_v=rsi_before_yesterday_v,
+        rsi_yesterday_v=rsi_yesterday_v,
+        rsi_today_v=rsi_today_v,
+        aggressive_ok=aggressive_ok,
+        tol=0.02,
+    )
+
+    sell_condition_desc = _build_sell_condition_desc(
+        last_close=last_close,
+        ma20_now=ma20_now,
+        atr14=atr14,
+        rsi14=rsi14,
+        prev_max_close=prev_max_close,
+        prev_max_rsi=prev_max_rsi,
+    )
 
     currency = "CNY" if market.upper() == "CN" else ("HKD" if market.upper() == "HK" else "USD")
     name = None
@@ -2792,6 +5047,9 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
         buy_price_aggressive=buy_price_aggressive,
         buy_price_stable=buy_price_stable,
         sell_price=sell_price,
+
+        buy_condition_desc=buy_condition_desc,
+        sell_condition_desc=sell_condition_desc,
 
         buy_reason=buy_reason,
         sell_reason=sell_reason,
@@ -3064,12 +5322,22 @@ def run_pdf_analysis_in_background(report_id: str, pdf_path: str):
                     metrics_to_save.append((code, name, float(v), unit))
 
             raw_metric_meta: dict[str, tuple[str, str, float | None]] = {
+                "TOTAL_REVENUE": ("营业总收入", "", financials.revenue),
+                "OPERATING_CASH_FLOW": ("经营现金流量净额", "", getattr(financials, "operating_cash_flow", None)),
                 "IS.REVENUE": ("营业收入", "", financials.revenue),
+                "IS.COST": ("营业成本", "", financials.cost),
+                "IS.GROSS_PROFIT": ("毛利润", "", financials.gross_profit),
                 "IS.NET_PROFIT": ("净利润", "", financials.net_profit),
+                "CF.CFO": ("经营活动现金流净额", "", getattr(financials, "operating_cash_flow", None)),
                 "BS.ASSET_TOTAL": ("资产总计", "", financials.total_assets),
                 "BS.LIAB_TOTAL": ("负债合计", "", financials.total_liabilities),
                 "BS.EQUITY_TOTAL": ("所有者权益合计", "", financials.total_equity),
+                "BS.CURRENT_ASSETS": ("流动资产合计", "", financials.current_assets),
+                "BS.CURRENT_LIAB": ("流动负债合计", "", financials.current_liabilities),
                 "BS.CASH": ("货币资金", "", financials.cash),
+                "BS.INVENTORY": ("存货", "", financials.inventory),
+                "BS.RECEIVABLES": ("应收账款", "", financials.receivables),
+                "BS.FIXED_ASSETS": ("固定资产", "", financials.fixed_assets),
             }
             for code, (name, unit, v) in raw_metric_meta.items():
                 if v is None:
@@ -3080,10 +5348,13 @@ def run_pdf_analysis_in_background(report_id: str, pdf_path: str):
             # If ratio metrics are still empty but we extracted some raw amounts, do not hard-fail.
             raw_fields = [
                 financials.revenue,
+                financials.cost,
                 financials.net_profit,
                 financials.total_assets,
                 financials.total_liabilities,
                 financials.total_equity,
+                financials.current_assets,
+                financials.current_liabilities,
             ]
             has_some_raw = any(v is not None for v in raw_fields)
 
@@ -3279,7 +5550,7 @@ def fetch_market_report(
     market: str = "CN",
     company_name: str | None = None,
     period_type: str = "annual",
-    period_end: str = "2024-12-31",
+    period_end: str | None = None,
 ):
     """Fetch financial report from market data and start analysis."""
     try:
@@ -3287,6 +5558,19 @@ def fetch_market_report(
         
         # Normalize symbol
         symbol_norm = normalize_symbol(market, symbol)
+
+        # Use latest closed annual period by default (e.g. 2025-12-31 in 2026).
+        today = _dt.date.today()
+        latest_annual_period_end = f"{today.year - 1}-12-31"
+        period_end_norm = (period_end or "").strip()
+        if not period_end_norm:
+            period_end_norm = latest_annual_period_end
+        elif (period_type or "").lower() == "annual":
+            try:
+                if _dt.date.fromisoformat(period_end_norm) < _dt.date.fromisoformat(latest_annual_period_end):
+                    period_end_norm = latest_annual_period_end
+            except Exception:
+                period_end_norm = latest_annual_period_end
 
         display_name = (company_name or "").strip() or symbol_norm
 
@@ -3330,10 +5614,10 @@ def fetch_market_report(
         # Create report record
         report_id = upsert_report_market_fetch(
             company_id=company_id,
-            report_name=f"{display_name} {period_end}",
+            report_name=f"{display_name} {period_end_norm}",
             market=market,
             period_type=period_type,
-            period_end=period_end,
+            period_end=period_end_norm,
             source_meta={"symbol": symbol_norm, "market": market, "company_name": display_name},
         )
         

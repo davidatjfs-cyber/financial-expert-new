@@ -3,7 +3,7 @@
 import { Suspense, useState, useEffect } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Search, Download, X } from 'lucide-react';
-import { searchStocks, getStockPrice, getStockIndicators, fetchMarketReport, type StockSearchResult, type StockPrice, type StockIndicators } from '@/services/api';
+import { searchStocks, getStockPrice, getStockIndicators, getStockAnnouncements, fetchMarketReport, type StockSearchResult, type StockPrice, type StockIndicators, type StockAnnouncement } from '@/services/api';
 
 function StockPageInner() {
   const router = useRouter();
@@ -18,6 +18,7 @@ function StockPageInner() {
   const [loadingPrice, setLoadingPrice] = useState(false);
   const [message, setMessage] = useState('');
   const [showDetail, setShowDetail] = useState(false);
+  const [announcements, setAnnouncements] = useState<StockAnnouncement[]>([]);
 
   const fmt = (v: number | null | undefined, digits = 2) => (v == null ? '-' : v.toFixed(digits));
 
@@ -92,9 +93,14 @@ function StockPageInner() {
       getStockIndicators(selectedStock.symbol, selectedStock.market)
         .then((v) => setStockIndicators(v))
         .catch(() => setStockIndicators(null));
+
+      getStockAnnouncements(selectedStock.symbol, selectedStock.market, 5)
+        .then((v) => setAnnouncements(v))
+        .catch(() => setAnnouncements([]));
     } else {
       setStockPrice(null);
       setStockIndicators(null);
+      setAnnouncements([]);
     }
   }, [selectedStock]);
 
@@ -151,8 +157,7 @@ function StockPageInner() {
       if (results.length === 0) {
         setMessage('未找到匹配的股票');
       } else {
-        // Auto-select first result
-        setSelectedStock(results[0]);
+        setMessage('请选择股票（可区分 A股 / 港股 / 美股）');
       }
     } catch (error) {
       console.error('Search error:', error);
@@ -171,7 +176,7 @@ function StockPageInner() {
         selectedStock.symbol,
         selectedStock.market,
         'annual',
-        '2024-12-31',
+        undefined,
         selectedStock.name
       );
       setMessage(resp.message || '已开始获取财报数据');
@@ -186,98 +191,98 @@ function StockPageInner() {
   };
 
   return (
-    <div className="p-4 md:p-10 flex flex-col gap-6 md:gap-7 max-w-3xl mx-auto pb-24 md:pb-10">
+    <div className="p-4 md:p-10 flex flex-col gap-6 md:gap-7 max-w-3xl mx-auto pb-24 md:pb-10 animate-fade-in">
       {/* Header */}
       <div>
-        <h1 className="text-[#FAFAF9] text-2xl md:text-3xl font-semibold">股票查询</h1>
-        <p className="text-[#6B6B70] text-base mt-2">搜索股票代码或公司名称，获取财务数据</p>
+        <h1 className="text-[var(--text-primary)] text-2xl md:text-3xl font-bold tracking-tight">股票查询</h1>
+        <p className="text-[var(--text-secondary)] text-base mt-2">搜索股票代码或公司名称，获取财务数据</p>
       </div>
 
-      {/* Search Card */}
-      <div className="hidden md:block">
-        <div className="max-w-3xl mx-auto bg-[#16161A] rounded-3xl p-4 md:p-7 border border-[#2A2A2E]">
-          <div className="relative mb-4 md:mb-6">
-            <Search className="absolute left-4 md:left-6 top-1/2 -translate-y-1/2 text-[#6B6B70]" size={22} />
-            <input
-              type="text"
-              placeholder="输入股票代码，如 600519"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
-              className="w-full bg-[#1A1A1E] text-[#FAFAF9] rounded-2xl md:rounded-3xl py-4 md:py-7 pl-12 md:pl-16 pr-4 md:pr-6 text-base md:text-3xl border-2 border-[#2A2A2E] focus:border-[#32D583] focus:outline-none placeholder:text-[#6B6B70]"
-            />
+      {/* Search Results */}
+      {searchResults.length > 0 && (
+        <div>
+          <h2 className="section-title mb-3">搜索结果</h2>
+          <div className="flex flex-col gap-2.5">
+            {searchResults.map((stock) => {
+              const isSelected = selectedStock?.symbol === stock.symbol && selectedStock?.market === stock.market;
+              return (
+                <button
+                  key={`${stock.market}:${stock.symbol}`}
+                  type="button"
+                  onClick={() => setSelectedStock(stock)}
+                  className={`card-surface p-5 text-left flex items-center justify-between transition-all duration-150 active:scale-[0.99] ${
+                    isSelected ? 'border-2 border-emerald-500/60 bg-emerald-500/10' : ''
+                  }`}
+                >
+                  <div>
+                    <div className="text-[var(--text-primary)] text-base font-semibold">{stock.name}</div>
+                    <div className="text-[var(--text-secondary)] text-sm mt-0.5">{stock.symbol}</div>
+                  </div>
+                  <span className="text-[var(--text-muted)] text-sm">{stock.market}</span>
+                </button>
+              );
+            })}
           </div>
-          <button
-            onClick={handleSearch}
-            disabled={searching || !searchQuery.trim()}
-            className="w-full bg-[#32D583] text-white rounded-2xl py-4 md:py-6 px-5 md:px-6 font-semibold text-base md:text-2xl flex items-center justify-center gap-2 md:gap-3 disabled:opacity-50 active:bg-[#28b870]"
-          >
-            <Search size={32} />
-            {searching ? '搜索中...' : '搜索股票'}
-          </button>
         </div>
+      )}
+
+      {/* Search Card - unified for mobile and desktop */}
+      <div className="card-surface p-4 md:p-7">
+        <div className="relative mb-3 md:mb-6">
+          <Search className="absolute left-4 md:left-6 top-1/2 -translate-y-1/2 text-[var(--text-muted)]" size={22} />
+          <input
+            type="text"
+            placeholder="输入股票代码或公司名称，如 600519、苹果、AAPL"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
+            className="w-full bg-[var(--bg-elevated)] text-[var(--text-primary)] rounded-[var(--radius-lg)] md:rounded-[var(--radius-xl)] py-4 md:py-5 pl-12 md:pl-16 pr-4 md:pr-6 text-base md:text-lg border-2 border-[var(--border-color)] focus:border-[var(--accent-primary)] focus:outline-none placeholder:text-[var(--text-muted)] transition-colors"
+          />
+        </div>
+        <button
+          onClick={handleSearch}
+          disabled={searching || !searchQuery.trim()}
+          className="w-full btn-primary rounded-[var(--radius-lg)] py-4 md:py-5 px-5 md:px-6 text-base md:text-lg flex items-center justify-center gap-2 md:gap-3 disabled:opacity-50"
+        >
+          <Search size={22} />
+          {searching ? '搜索中...' : '搜索股票'}
+        </button>
       </div>
 
-      <div className="md:hidden fixed left-0 right-0 bottom-16 z-50 px-4 pb-[calc(env(safe-area-inset-bottom,0px)+12px)]">
-        <div className="bg-[#16161A] rounded-3xl p-4 border border-[#2A2A2E] shadow-lg shadow-black/40">
-          <div className="relative mb-3">
-            <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-[#6B6B70]" size={22} />
-            <input
-              type="text"
-              placeholder="输入股票代码，如 600519"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
-              className="w-full bg-[#0B0B0E] text-[#FAFAF9] rounded-2xl py-4 pl-12 pr-4 text-2xl border-2 border-[#2A2A2E] focus:border-[#32D583] focus:outline-none placeholder:text-[#6B6B70]"
-            />
-          </div>
-          <button
-            onClick={handleSearch}
-            disabled={searching || !searchQuery.trim()}
-            className="w-full bg-[#32D583] text-white rounded-2xl py-4 font-bold text-xl flex items-center justify-center gap-2 disabled:opacity-50 active:bg-[#28b870]"
-          >
-            <Search size={22} />
-            {searching ? '搜索中...' : '搜索股票'}
-          </button>
-        </div>
-      </div>
-
-      <div className="md:hidden h-[200px]" />
-
-      {/* Selected Stock Detail - 更突出的卡片样式 */}
+      {/* Selected Stock Detail */}
       {selectedStock && (
-        <div className="bg-gradient-to-br from-[#1a2a1a] to-[#16161A] rounded-3xl p-6 border-2 border-[#32D583] shadow-lg shadow-[#32D583]/20">
+        <div className="bg-gradient-to-br from-emerald-950/40 to-[var(--bg-surface)] rounded-[var(--radius-xl)] p-6 border-2 border-emerald-500/40 shadow-lg shadow-emerald-500/10">
           {/* 股票名称和代码 */}
           <div className="text-center mb-4">
-            <div className="text-[#32D583] text-2xl font-bold mb-1">{selectedStock.name}</div>
-            <div className="text-[#FAFAF9] text-lg md:text-xl">{selectedStock.symbol}</div>
-            <div className="text-[#6B6B70] text-base mt-2">{selectedStock.market} 市场</div>
+            <div className="text-emerald-400 text-2xl font-bold mb-1">{selectedStock.name}</div>
+            <div className="text-[var(--text-primary)] text-lg md:text-xl">{selectedStock.symbol}</div>
+            <div className="text-[var(--text-secondary)] text-base mt-2">{selectedStock.market} 市场</div>
           </div>
 
           {/* Real-time price */}
-          <div className="bg-[#0B0B0E]/70 rounded-2xl p-4 border border-[#2A2A2E] mb-4">
+          <div className="bg-[var(--bg-page)]/70 rounded-[var(--radius-lg)] p-4 border border-[var(--border-color)] mb-4">
             <div className="flex items-center justify-between">
-              <div className="text-[#6B6B70] text-sm">实时价格</div>
-              <div className="text-[#6B6B70] text-sm">{loadingPrice ? '更新中...' : '已更新'}</div>
+              <div className="text-[var(--text-secondary)] text-sm">实时价格</div>
+              <div className="text-[var(--text-muted)] text-sm">{loadingPrice ? '更新中...' : '已更新'}</div>
             </div>
             <div className="mt-2 flex items-end justify-between gap-4">
               <div className="min-w-0">
-                <div className="text-[#FAFAF9] text-3xl md:text-4xl font-bold truncate">
+                <div className="text-[var(--text-primary)] text-3xl md:text-4xl font-bold truncate tracking-tight">
                   {currencyPrefix(selectedStock.market)}{fmt(stockPrice?.price)}
                 </div>
                 <div className={`mt-2 text-base md:text-lg font-semibold ${
                   (stockPrice?.change ?? 0) > 0
-                    ? 'text-[#32D583]'
+                    ? 'text-emerald-400'
                     : (stockPrice?.change ?? 0) < 0
-                      ? 'text-[#E85A4F]'
-                      : 'text-[#FAFAF9]'
+                      ? 'text-red-400'
+                      : 'text-[var(--text-primary)]'
                 }`}>
                   {fmtSigned(stockPrice?.change)} ({fmtSigned(stockPrice?.change_pct)}%)
                 </div>
               </div>
               <button
                 onClick={refreshQuote}
-                className="bg-[#16161A] text-[#FAFAF9] rounded-xl px-4 py-3 text-base border border-[#2A2A2E] active:bg-[#1A1A1E]"
+                className="btn-secondary h-10 px-3.5 text-sm !min-h-0 !py-0"
               >
                 刷新
               </button>
@@ -286,7 +291,7 @@ function StockPageInner() {
 
           <button
             onClick={() => setShowDetail(true)}
-            className="w-full bg-[#0B0B0E] text-[#FAFAF9] rounded-2xl py-5 px-6 font-bold text-lg border border-[#2A2A2E] mb-4"
+            className="w-full btn-secondary rounded-[var(--radius-lg)] py-4 px-6 font-bold text-base mb-3"
           >
             查看关键指标
           </button>
@@ -295,164 +300,228 @@ function StockPageInner() {
           <button 
             onClick={handleFetchReport}
             disabled={fetching}
-            className="w-full bg-[#6366F1] text-white rounded-2xl py-5 px-6 font-bold text-xl flex items-center justify-center gap-2 disabled:opacity-50 active:bg-[#5558DD]"
+            className="w-full bg-[var(--accent-secondary)] text-white rounded-[var(--radius-lg)] py-4 px-6 font-bold text-lg flex items-center justify-center gap-2 disabled:opacity-50 active:scale-[0.99] transition-transform"
           >
-            <Download size={24} />
+            <Download size={22} />
             {fetching ? '获取中...' : '获取财报数据'}
           </button>
         </div>
       )}
 
       {selectedStock && showDetail && (
-        <div className="fixed inset-0 z-[100] bg-black/60 flex items-center justify-center p-4">
-          <div className="w-full md:max-w-xl bg-[#0B0B0E] rounded-3xl border border-[#2A2A2E] p-6 max-h-[calc(100dvh-32px)] overflow-y-auto overscroll-contain pb-[calc(env(safe-area-inset-bottom,0px)+160px)]">
-            <div className="flex items-center justify-between mb-4">
-              <div className="min-w-0">
-                <div className="text-[#FAFAF9] text-xl font-semibold truncate">{selectedStock.name}</div>
-                <div className="text-[#6B6B70] text-base">{selectedStock.symbol} · {selectedStock.market} 市场</div>
-              </div>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={refreshQuote}
-                  className="h-11 rounded-xl bg-[#16161A] border border-[#2A2A2E] px-4 text-base text-[#FAFAF9]"
-                >
-                  刷新
-                </button>
-                <button
-                  onClick={() => setShowDetail(false)}
-                  className="w-10 h-10 rounded-xl bg-[#16161A] border border-[#2A2A2E] flex items-center justify-center"
-                >
-                  <X size={18} className="text-[#FAFAF9]" />
-                </button>
+        <div className="fixed inset-0 z-[100] bg-black/80 flex items-center justify-center p-3 animate-fade-in" onClick={() => setShowDetail(false)}>
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full md:max-w-xl bg-[var(--bg-page)] rounded-[var(--radius-xl)] border border-[var(--border-color)] max-h-[calc(100dvh-24px)] overflow-y-auto overscroll-contain pb-[calc(env(safe-area-inset-bottom,0px)+80px)] animate-slide-up"
+          >
+            {/* Header with gradient */}
+            <div className="sticky top-0 z-10 bg-gradient-to-b from-[var(--bg-page)] via-[var(--bg-page)] to-transparent px-5 pt-5 pb-3">
+              <div className="flex items-center justify-between">
+                <div className="min-w-0 flex-1">
+                  <div className="text-[var(--text-primary)] text-lg font-bold tracking-tight truncate">{selectedStock.name}</div>
+                  <div className="text-[var(--text-muted)] text-xs">{selectedStock.symbol} · {selectedStock.market}</div>
+                </div>
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  <button onClick={refreshQuote} className="text-[var(--accent-primary)] text-xs font-semibold px-3 py-1.5 rounded-full bg-[var(--accent-primary)]/10">
+                    {loadingPrice ? '刷新中' : '刷新'}
+                  </button>
+                  <button onClick={() => setShowDetail(false)} className="w-8 h-8 rounded-full bg-[var(--bg-elevated)] flex items-center justify-center">
+                    <X size={16} className="text-[var(--text-muted)]" />
+                  </button>
+                </div>
               </div>
             </div>
 
-            <div className="bg-[#16161A] rounded-2xl p-4 border border-[#2A2A2E] mb-3">
-              <div className="flex items-center justify-between">
-                <div className="text-[#6B6B70] text-sm">实时价格</div>
-                <div className="text-[#6B6B70] text-sm">{loadingPrice ? '更新中...' : '已更新'}</div>
-              </div>
-              <div className="mt-2 flex items-end justify-between gap-4">
-                <div className="min-w-0">
-                  <div className="text-[#FAFAF9] text-3xl font-bold truncate">
+            <div className="px-5 flex flex-col gap-3">
+              {/* Section 1: Price */}
+              <div className="flex items-end justify-between">
+                <div>
+                  <div className="text-[var(--text-primary)] text-3xl font-extrabold tracking-tight">
                     {currencyPrefix(selectedStock.market)}{fmt(stockPrice?.price)}
                   </div>
-                  <div className={`mt-2 text-base font-semibold ${
-                    (stockPrice?.change ?? 0) > 0
-                      ? 'text-[#32D583]'
-                      : (stockPrice?.change ?? 0) < 0
-                        ? 'text-[#E85A4F]'
-                        : 'text-[#FAFAF9]'
-                  }`}>
+                  <div className={`text-sm font-bold mt-0.5 ${(stockPrice?.change ?? 0) > 0 ? 'text-emerald-400' : (stockPrice?.change ?? 0) < 0 ? 'text-red-400' : 'text-[var(--text-secondary)]'}`}>
                     {fmtSigned(stockPrice?.change)} ({fmtSigned(stockPrice?.change_pct)}%)
                   </div>
                 </div>
+                <div className="text-right">
+                  <div className={`text-2xl font-extrabold ${trendColorClass(stockIndicators?.trend)}`}>{trendLabel(stockIndicators?.trend)}</div>
+                  <div className="text-[var(--text-muted)] text-[10px] mt-0.5">MA60趋势</div>
+                </div>
               </div>
-            </div>
 
-            <div className="bg-[#16161A] rounded-2xl p-4 border border-[#2A2A2E] mb-3">
-              <div className="text-[#6B6B70] text-sm mb-3">关键指标</div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="bg-[#0B0B0E] rounded-xl p-3">
-                  <div className="text-[#6B6B70] text-sm">市值</div>
-                  <div className="text-[#FAFAF9] text-lg font-bold mt-1">{fmtBigByMarket(stockIndicators?.market_cap ?? stockPrice?.market_cap, selectedStock.market)}</div>
-                </div>
-                <div className="bg-[#0B0B0E] rounded-xl p-3">
-                  <div className="text-[#6B6B70] text-sm">成交金额</div>
-                  <div className="text-[#FAFAF9] text-lg font-bold mt-1">{fmtBigByMarket(stockIndicators?.amount ?? stockPrice?.amount, selectedStock.market)}</div>
-                </div>
-                <div className="bg-[#0B0B0E] rounded-xl p-3">
-                  <div className="text-[#6B6B70] text-sm">52周最高</div>
-                  <div className="text-[#E85A4F] text-lg font-bold mt-1">{fmt(stockIndicators?.high_52w)}</div>
-                </div>
-                <div className="bg-[#0B0B0E] rounded-xl p-3">
-                  <div className="text-[#6B6B70] text-sm">52周最低</div>
-                  <div className="text-[#32D583] text-lg font-bold mt-1">{fmt(stockIndicators?.low_52w)}</div>
-                </div>
-                <div className="bg-[#0B0B0E] rounded-xl p-3">
-                  <div className="text-[#6B6B70] text-sm">趋势</div>
-                  <div className={`${trendColorClass(stockIndicators?.trend)} text-lg font-bold mt-1`}>{trendLabel(stockIndicators?.trend)}</div>
-                </div>
-                <div className="bg-[#0B0B0E] rounded-xl p-3">
-                  <div className="text-[#6B6B70] text-sm">Slope 率</div>
-                  <div className="text-[#FAFAF9] text-lg font-bold mt-1">{stockIndicators?.slope_pct == null ? '-' : `${fmt(stockIndicators?.slope_pct, 3)}%/天`}</div>
-                  <div className="text-[#6B6B70] text-xs mt-1">{stockIndicators?.slope_advice || '-'}</div>
-                </div>
-                <div className="bg-[#0B0B0E] rounded-xl p-3">
-                  <div className="text-[#6B6B70] text-sm">MA5</div>
-                  <div className="text-[#FAFAF9] text-lg font-bold mt-1">{currencyPrefix(selectedStock.market)}{fmt(stockIndicators?.ma5)}</div>
-                </div>
-                <div className="bg-[#0B0B0E] rounded-xl p-3">
-                  <div className="text-[#6B6B70] text-sm">MA20</div>
-                  <div className="text-[#FAFAF9] text-lg font-bold mt-1">{currencyPrefix(selectedStock.market)}{fmt(stockIndicators?.ma20)}</div>
-                </div>
-                <div className="bg-[#0B0B0E] rounded-xl p-3">
-                  <div className="text-[#6B6B70] text-sm">MA60</div>
-                  <div className="text-[#FAFAF9] text-lg font-bold mt-1">{currencyPrefix(selectedStock.market)}{fmt(stockIndicators?.ma60)}</div>
-                </div>
-                <div className="bg-[#0B0B0E] rounded-xl p-3">
-                  <div className="text-[#6B6B70] text-sm">RSI(14)</div>
-                  <div className="text-[#FAFAF9] text-lg font-bold mt-1">{fmt(stockIndicators?.rsi14)}</div>
-                </div>
-                <div className="bg-[#0B0B0E] rounded-xl p-3">
-                  <div className="text-[#6B6B70] text-sm">市盈率</div>
-                  <div className="text-[#FAFAF9] text-lg font-bold mt-1">{fmt(stockIndicators?.pe_ratio, 2)}</div>
-                </div>
-                <div className="bg-[#0B0B0E] rounded-xl p-3">
-                  <div className="text-[#6B6B70] text-sm">ATR(14)</div>
-                  <div className="text-[#FAFAF9] text-lg font-bold mt-1">{fmt(stockIndicators?.atr14, 3)}</div>
-                </div>
-                <div className="bg-[#0B0B0E] rounded-xl p-3">
-                  <div className="text-[#6B6B70] text-sm">卖出价</div>
-                  <div className="text-[#FAFAF9] text-lg font-bold mt-1">
-                    {(stockIndicators?.sell_price_ok === true && stockIndicators?.sell_price != null)
-                      ? (currencyPrefix(selectedStock.market) + fmtNA(stockIndicators?.sell_price))
-                      : 'N/A'}
+              {/* Section 2: Core Metrics - compact row */}
+              <div className="grid grid-cols-4 gap-1.5">
+                {[
+                  { label: '市值', value: fmtBigByMarket(stockIndicators?.market_cap ?? stockPrice?.market_cap, selectedStock.market) },
+                  { label: 'PE', value: fmt(stockIndicators?.pe_ratio, 1) },
+                  { label: '52W高', value: fmt(stockIndicators?.high_52w), color: 'text-red-400' },
+                  { label: '52W低', value: fmt(stockIndicators?.low_52w), color: 'text-emerald-400' },
+                ].map((item) => (
+                  <div key={item.label} className="bg-[var(--bg-surface)] rounded-lg p-2 text-center">
+                    <div className="text-[var(--text-muted)] text-[9px] font-medium">{item.label}</div>
+                    <div className={`${item.color || 'text-[var(--text-primary)]'} text-xs font-bold mt-0.5 truncate`}>{item.value}</div>
                   </div>
-                  <div className="text-[#6B6B70] text-xs mt-1">
-                    {(stockIndicators?.sell_price_ok === true) ? '确认' : (stockIndicators?.sell_price_ok === false ? '等待' : '-')}
-                  </div>
-                  <div className="text-[#6B6B70] text-xs mt-1">
-                    {stockIndicators?.sell_reason || '-'}
-                  </div>
+                ))}
+              </div>
+
+              {/* Section 3: Technical Indicators */}
+              <div className="bg-[var(--bg-surface)] rounded-xl p-4">
+                <div className="text-[var(--text-primary)] text-xs font-bold mb-3 flex items-center gap-1.5">
+                  <span className="w-1 h-3.5 bg-[var(--accent-primary)] rounded-full"></span>
+                  技术指标
                 </div>
-                <div className="col-span-2 bg-[#0B0B0E] rounded-xl p-3">
-                  <div className="text-[#6B6B70] text-sm">买入价位（满足：买入{'>'}MA60、MA60趋势向上、买入≈MA20、RSI Rebound）</div>
-                  <div className="mt-2">
-                    <div className="text-[#FAFAF9] text-lg font-bold">
-                      {(stockIndicators?.buy_price_aggressive_ok === true && stockIndicators?.buy_price_aggressive != null)
-                        ? (currencyPrefix(selectedStock.market) + fmtNA(stockIndicators?.buy_price_aggressive))
-                        : 'N/A'}
+                <div className="grid grid-cols-3 gap-x-4 gap-y-2.5">
+                  {/* MA */}
+                  <div>
+                    <div className="text-[var(--text-muted)] text-[9px]">MA5</div>
+                    <div className="text-[var(--text-primary)] text-sm font-bold">{fmt(stockIndicators?.ma5)}</div>
+                  </div>
+                  <div>
+                    <div className="text-[var(--text-muted)] text-[9px]">MA20</div>
+                    <div className="text-[var(--text-primary)] text-sm font-bold">{fmt(stockIndicators?.ma20)}</div>
+                  </div>
+                  <div>
+                    <div className="text-[var(--text-muted)] text-[9px]">MA60</div>
+                    <div className="text-[var(--text-primary)] text-sm font-bold">{fmt(stockIndicators?.ma60)}</div>
+                  </div>
+                  {/* Slope */}
+                  <div>
+                    <div className="text-[var(--text-muted)] text-[9px]">Slope率</div>
+                    <div className="text-[var(--text-primary)] text-sm font-bold">{stockIndicators?.slope_pct == null ? '-' : `${fmt(stockIndicators?.slope_pct, 3)}%`}</div>
+                  </div>
+                  <div>
+                    <div className="text-[var(--text-muted)] text-[9px]">Slope建议</div>
+                    <div className={`text-sm font-bold ${stockIndicators?.slope_advice === '放心买' ? 'text-emerald-400' : stockIndicators?.slope_advice === '有危险' ? 'text-red-400' : stockIndicators?.slope_advice === '不要买' ? 'text-red-400' : 'text-amber-400'}`}>
+                      {stockIndicators?.slope_advice || '-'}
                     </div>
-                    <div className="text-[#6B6B70] text-xs mt-1">
-                      {(stockIndicators?.buy_price_aggressive_ok === true) ? '确认' : (stockIndicators?.buy_price_aggressive_ok === false ? '等待' : '-')}
+                  </div>
+                  <div>
+                    <div className="text-[var(--text-muted)] text-[9px]">ATR(14)</div>
+                    <div className="text-[var(--text-primary)] text-sm font-bold">{fmt(stockIndicators?.atr14, 3)}</div>
+                  </div>
+                  {/* RSI & MACD */}
+                  <div>
+                    <div className="text-[var(--text-muted)] text-[9px]">RSI(14)</div>
+                    <div className={`text-sm font-bold ${(stockIndicators?.rsi14 ?? 50) > 70 ? 'text-red-400' : (stockIndicators?.rsi14 ?? 50) < 30 ? 'text-emerald-400' : 'text-[var(--text-primary)]'}`}>
+                      {fmt(stockIndicators?.rsi14, 1)}
                     </div>
-                    <div className="text-[#6B6B70] text-xs mt-1">
-                      {stockIndicators?.buy_reason || '-'}
+                  </div>
+                  <div>
+                    <div className="text-[var(--text-muted)] text-[9px]">RSI拐头</div>
+                    <div className={`text-sm font-bold ${stockIndicators?.rsi_rebound ? 'text-emerald-400' : 'text-[var(--text-muted)]'}`}>
+                      {stockIndicators?.rsi_rebound ? '✓ 是' : '✗ 否'}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[var(--text-muted)] text-[9px]">MACD</div>
+                    <div className={`text-sm font-bold ${stockIndicators?.signal_macd_bullish ? 'text-emerald-400' : 'text-red-400'}`}>
+                      {stockIndicators?.signal_macd_bullish ? '多头' : '空头'}
                     </div>
                   </div>
                 </div>
               </div>
-            </div>
 
-            <button
-              onClick={() => {
-                setShowDetail(false);
-                handleFetchReport();
-              }}
-              disabled={fetching}
-              className="w-full bg-[#6366F1] text-white rounded-2xl py-5 px-6 font-bold text-lg disabled:opacity-50"
-            >
-              {fetching ? '获取中...' : '获取财报数据'}
-            </button>
+              {/* Section 4: Buy Signal */}
+              <div className={`rounded-xl p-4 border-2 ${stockIndicators?.buy_price_aggressive_ok ? 'bg-emerald-500/8 border-emerald-500/30' : 'bg-[var(--bg-surface)] border-[var(--border-color)]'}`}>
+                <div className="flex items-center justify-between mb-2">
+                  <div className="text-xs font-bold flex items-center gap-1.5">
+                    <span className="w-1 h-3.5 bg-emerald-500 rounded-full"></span>
+                    <span className="text-emerald-400">买入信号</span>
+                  </div>
+                  <div className={`text-xs font-extrabold px-3 py-1 rounded-full ${stockIndicators?.buy_price_aggressive_ok ? 'bg-emerald-500 text-white' : 'bg-[var(--bg-elevated)] text-[var(--text-muted)]'}`}>
+                    {stockIndicators?.buy_price_aggressive_ok ? '✓ 满足' : '等待中'}
+                  </div>
+                </div>
+                <div className="flex items-center gap-3 mb-2">
+                  <div className="text-[var(--text-primary)] text-xs">参考买入价</div>
+                  <div className="text-emerald-400 text-lg font-extrabold">{currencyPrefix(selectedStock.market)}{fmt(stockIndicators?.buy_price_aggressive)}</div>
+                  <div className="text-[var(--text-muted)] text-[10px]">≈MA20</div>
+                </div>
+                <div className="text-[var(--text-secondary)] text-[11px] leading-relaxed">
+                  {stockIndicators?.buy_condition_desc || '数据加载中...'}
+                </div>
+              </div>
+
+              {/* Section 5: Sell Signal */}
+              <div className={`rounded-xl p-4 border-2 ${stockIndicators?.sell_price_ok ? 'bg-red-500/8 border-red-500/30' : 'bg-[var(--bg-surface)] border-[var(--border-color)]'}`}>
+                <div className="flex items-center justify-between mb-2">
+                  <div className="text-xs font-bold flex items-center gap-1.5">
+                    <span className="w-1 h-3.5 bg-red-500 rounded-full"></span>
+                    <span className="text-red-400">卖出信号</span>
+                  </div>
+                  <div className={`text-xs font-extrabold px-3 py-1 rounded-full ${stockIndicators?.sell_price_ok ? 'bg-red-500 text-white' : 'bg-[var(--bg-elevated)] text-[var(--text-muted)]'}`}>
+                    {stockIndicators?.sell_price_ok ? '⚠ 触发' : '安全'}
+                  </div>
+                </div>
+                <div className="flex items-center gap-3 mb-2">
+                  <div className="text-[var(--text-primary)] text-xs">止损参考价</div>
+                  <div className="text-red-400 text-lg font-extrabold">{currencyPrefix(selectedStock.market)}{fmt(stockIndicators?.sell_price)}</div>
+                  <div className="text-[var(--text-muted)] text-[10px]">价-2×ATR</div>
+                </div>
+                <div className="text-[var(--text-secondary)] text-[11px] leading-relaxed">
+                  {stockIndicators?.sell_condition_desc || '数据加载中...'}
+                </div>
+                {stockIndicators?.sell_reason && (
+                  <div className="mt-1.5 text-red-400 text-[11px] font-semibold">{stockIndicators.sell_reason}</div>
+                )}
+              </div>
+
+              {/* Section 6: Signal Summary */}
+              <div className="flex gap-1.5 flex-wrap">
+                {[
+                  { label: '金叉', active: stockIndicators?.signal_golden_cross, color: 'emerald' },
+                  { label: '死叉', active: stockIndicators?.signal_death_cross, color: 'red' },
+                  { label: 'MACD多', active: stockIndicators?.signal_macd_bullish, color: 'emerald' },
+                  { label: 'RSI超买', active: stockIndicators?.signal_rsi_overbought, color: 'red' },
+                  { label: '放量', active: stockIndicators?.signal_vol_gt_ma5, color: 'amber' },
+                ].map((s) => (
+                  <span key={s.label} className={`text-[10px] font-semibold px-2 py-1 rounded-full ${s.active ? `bg-${s.color}-500/15 text-${s.color}-400` : 'bg-[var(--bg-elevated)] text-[var(--text-muted)]'}`}>
+                    {s.active ? '●' : '○'} {s.label}
+                  </span>
+                ))}
+              </div>
+
+              {/* Section 7: Announcements */}
+              {announcements.length > 0 && (
+                <div className="bg-[var(--bg-surface)] rounded-xl p-4">
+                  <div className="text-[var(--text-primary)] text-xs font-bold mb-3 flex items-center gap-1.5">
+                    <span className="w-1 h-3.5 bg-amber-500 rounded-full"></span>
+                    最新公告
+                  </div>
+                  <div className="flex flex-col gap-2">
+                    {announcements.map((a, i) => (
+                      <div key={i} className="flex items-start gap-2">
+                        <span className="text-[var(--text-muted)] text-[10px] mt-0.5 flex-shrink-0 w-[68px]">{a.date || ''}</span>
+                        {a.url ? (
+                          <a href={a.url} target="_blank" rel="noopener noreferrer" className="text-[var(--accent-primary)] text-xs leading-relaxed hover:underline line-clamp-2">
+                            {a.title}
+                          </a>
+                        ) : (
+                          <span className="text-[var(--text-secondary)] text-xs leading-relaxed line-clamp-2">{a.title}</span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Action */}
+              <button
+                onClick={() => { setShowDetail(false); handleFetchReport(); }}
+                disabled={fetching}
+                className="w-full bg-[var(--accent-secondary)] text-white rounded-xl py-3.5 font-bold text-sm disabled:opacity-50 active:scale-[0.99] transition-transform mb-4"
+              >
+                {fetching ? '获取中...' : '获取财报数据'}
+              </button>
+            </div>
           </div>
         </div>
       )}
 
       {/* Message */}
       {message && (
-        <div className={`rounded-xl p-4 text-center ${
-          message.includes('失败') ? 'bg-[#E85A4F]/20 text-[#E85A4F]' : 'bg-[#32D583]/20 text-[#32D583]'
+        <div className={`rounded-[var(--radius-md)] p-4 text-center text-sm font-medium ${
+          message.includes('失败') ? 'bg-red-500/15 text-red-400' : 'bg-emerald-500/15 text-emerald-400'
         }`}>
           {message}
         </div>
@@ -460,8 +529,8 @@ function StockPageInner() {
 
       {/* Quick Search Suggestions */}
       <div>
-        <h2 className="text-[#FAFAF9] text-xl font-semibold mb-4">热门股票</h2>
-        <div className="flex flex-col gap-3">
+        <h2 className="section-title mb-3">热门股票</h2>
+        <div className="flex flex-col gap-2.5">
           {[
             { name: '腾讯控股', symbol: '00700.HK', market: 'HK' },
             { name: '阿里巴巴', symbol: 'BABA', market: 'US' },
@@ -472,15 +541,14 @@ function StockPageInner() {
               key={stock.symbol}
               onClick={() => {
                 setSelectedStock(stock);
-                setSearchResults([]);
               }}
-              className="bg-[#16161A] rounded-2xl p-6 border border-[#2A2A2E] flex items-center justify-between active:bg-[#1A1A1E] cursor-pointer"
+              className="card-surface p-5 flex items-center justify-between cursor-pointer active:scale-[0.99] transition-all duration-150"
             >
               <div>
-                <span className="text-[#FAFAF9] text-lg">{stock.name}</span>
-                <span className="text-[#6B6B70] text-base ml-2">{stock.symbol}</span>
+                <span className="text-[var(--text-primary)] text-base font-semibold">{stock.name}</span>
+                <span className="text-[var(--text-secondary)] text-sm ml-2">{stock.symbol}</span>
               </div>
-              <span className="text-[#6B6B70] text-base">{stock.market}</span>
+              <span className="text-[var(--text-muted)] text-sm">{stock.market}</span>
             </div>
           ))}
         </div>
@@ -494,8 +562,8 @@ export default function StockPage() {
     <Suspense
       fallback={
         <div className="p-5 md:p-8 flex flex-col gap-6 max-w-2xl mx-auto">
-          <div className="bg-[#16161A] rounded-2xl p-10 border border-[#2A2A2E] text-center">
-            <p className="text-[#6B6B70] text-base">加载中...</p>
+          <div className="card-surface p-10 text-center">
+            <p className="text-[var(--text-secondary)] text-base">加载中...</p>
           </div>
         </div>
       }

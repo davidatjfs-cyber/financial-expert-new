@@ -88,9 +88,9 @@ def extract_financials_from_pdf(pdf_path: str, use_ai: bool = True, force_ai: bo
         "december": 12,
     }
 
-    date_candidates: list[tuple[int, int, int]] = []
+    date_candidates: list[tuple[int, int, int, int, int]] = []
 
-    def _add_date(y: str, m: str | int, d: str) -> None:
+    def _add_date(y: str, m: str | int, d: str, prio: int, pos: int) -> None:
         try:
             yi = int(y)
             di = int(d)
@@ -100,66 +100,96 @@ def extract_financials_from_pdf(pdf_path: str, use_ai: bool = True, force_ai: bo
                 mi = month_map.get(str(m).lower().strip(), 0)
             if yi <= 1900 or mi <= 0 or mi > 12 or di <= 0 or di > 31:
                 return
-            date_candidates.append((yi, mi, di))
+            date_candidates.append((int(prio), yi, mi, di, -int(pos)))
         except Exception:
             return
 
-    for mm, dd, yy in re.findall(
+    for m in re.finditer(
         r"fiscal\s+year\s+ended\s+(\w+)\s+(\d{1,2}),?\s+(\d{4})",
         text,
         re.IGNORECASE,
     ):
-        _add_date(yy, mm, dd)
+        mm, dd, yy = m.group(1), m.group(2), m.group(3)
+        _add_date(yy, mm, dd, 90, m.start())
 
-    for mm, dd, yy in re.findall(
-        r"(?:Year|year)\s+[Ee]nded\s+(\w+)\s+(\d{1,2}),?\s+(\d{4})",
+    for m in re.finditer(
+        r"(?:Years?)\s+ended\s+(\w+)\s+(\d{1,2}),?\s+(\d{4})",
         text,
         re.IGNORECASE,
     ):
-        _add_date(yy, mm, dd)
+        mm, dd, yy = m.group(1), m.group(2), m.group(3)
+        _add_date(yy, mm, dd, 90, m.start())
 
-    for mm, dd, yy in re.findall(r"as\s+of\s+(\w+)\s+(\d{1,2}),?\s+(\d{4})", text, re.IGNORECASE):
-        _add_date(yy, mm, dd)
+    for m in re.finditer(r"as\s+of\s+(\w+)\s+(\d{1,2}),?\s+(\d{4})", text, re.IGNORECASE):
+        mm, dd, yy = m.group(1), m.group(2), m.group(3)
+        _add_date(yy, mm, dd, 80, m.start())
 
     cn_quarterly = re.search(r"(\d{4})年第?[三3]季度报告", text)
     if cn_quarterly:
-        _add_date(cn_quarterly.group(1), 9, "30")
+        _add_date(cn_quarterly.group(1), 9, "30", 50, cn_quarterly.start())
 
-    for yy, mm, dd in re.findall(r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日", text):
-        _add_date(yy, int(mm), dd)
+    for m in re.finditer(r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日", text):
+        yy, mm, dd = m.group(1), m.group(2), m.group(3)
+        _add_date(yy, int(mm), dd, 40, m.start())
 
     cn_annual = re.search(r"(\d{4})\s*(?:度|年度)", text)
     if cn_annual:
-        _add_date(cn_annual.group(1), 12, "31")
+        _add_date(cn_annual.group(1), 12, "31", 35, cn_annual.start())
 
     quarterly_match = re.search(r"(?:Third|3rd|Q3)\s*(?:Quarterly\s*Report)?\s*(\d{4})", text, re.IGNORECASE)
     if quarterly_match:
-        _add_date(quarterly_match.group(1), 9, "30")
+        _add_date(quarterly_match.group(1), 9, "30", 60, quarterly_match.start())
 
     annual_match = re.search(r"(\d{4})\s*(?:Annual\s+Report|年度报告|年报)", text, re.IGNORECASE)
     if annual_match:
-        _add_date(annual_match.group(1), 12, "31")
+        _add_date(annual_match.group(1), 12, "31", 70, annual_match.start())
 
     if date_candidates:
-        yy, mm, dd = max(date_candidates)
+        _, yy, mm, dd, _ = max(date_candidates)
         result.report_year = str(yy)
         result.report_period = f"{yy:04d}-{mm:02d}-{dd:02d}"
 
-    def find_first_number(patterns: list[str], txt: str, min_value: float = 0) -> float | None:
-        """提取第一个匹配的数字"""
+    def find_first_number(patterns: list[str], txt: str, min_value: float = 0, pick: str = "first") -> float | None:
+        """提取匹配的数字"""
+        picked: float | None = None
+        picked_abs: float = -1.0
+        token_re = re.compile(r"-?\d+(?:,\d{3})*(?:\.\d+)?")
         for pattern in patterns:
             matches = re.findall(pattern, txt, re.IGNORECASE)
             for match in matches:
                 try:
-                    num_str = match.replace(",", "").replace(" ", "").replace("$", "").strip()
-                    if num_str.startswith("(") and num_str.endswith(")"):
-                        num_str = "-" + num_str[1:-1]
-                    val = float(num_str)
-                    if abs(val) >= min_value:
-                        return val
+                    raw = (match or "").strip()
+                    is_paren = raw.startswith("(") and raw.endswith(")")
+                    if is_paren:
+                        raw = raw[1:-1]
+                    raw = raw.replace("$", " ")
+                    tokens = token_re.findall(raw)
+                    if not tokens:
+                        continue
+                    vals: list[float] = []
+                    for t in tokens:
+                        try:
+                            v = float(t.replace(",", ""))
+                            if is_paren:
+                                v = -abs(v)
+                            vals.append(v)
+                        except Exception:
+                            continue
+                    if not vals:
+                        continue
+                    val0 = vals[0]
+                    if abs(val0) < min_value:
+                        continue
+                    if pick == "first":
+                        return val0
+
+                    av0 = abs(val0)
+                    if av0 > picked_abs:
+                        picked_abs = av0
+                        picked = val0
                 except (ValueError, TypeError):
                     continue
-        return None
+        return picked
 
     def find_percentage(patterns: list[str], txt: str) -> float | None:
         """提取百分比"""
@@ -209,95 +239,103 @@ def extract_financials_from_pdf(pdf_path: str, use_ai: bool = True, force_ai: bo
 
     # Total revenues - 支持多种格式
     result.revenue = find_first_number([
-        r"Total\s+net\s+sales\s*\$?\s*([0-9,\s]+)",  # Apple 格式优先
-        r"Total\s+net\s+revenues\s*\$?\s*([0-9,\s]+)",
-        r"Total\s+revenues?\s*\$?\s*([0-9,\s]+)",
-        r"Net\s+sales\s*\$?\s*([0-9,\s]+)",
-        r"Net\s+revenues\s*\$?\s*([0-9,\s]+)",
+        r"Total\s+net\s+sales\s*\$?\s*([0-9,\.\s]+)",  # Apple 格式优先
+        r"Total\s+net\s+revenues\s*\$?\s*([0-9,\.\s]+)",
+        r"Total\s+revenues?\s*\$?\s*([0-9,\.\s]+)",
+        r"Net\s*sales\s*\$?\s*([0-9,\.\s]+)",
+        r"Net\s*revenues\s*\$?\s*([0-9,\.\s]+)",
+        r"Netrevenues\s*\$?\s*([0-9,\.\s]+)",
         r"Operatingrevenue\s*\(RMB\)\s*([0-9,\s]+(?:\.[0-9]+)?)",  # 五粮液格式
         r"Operating\s+revenue\s*\(RMB\)\s*([0-9,\s]+(?:\.[0-9]+)?)",
         r"营业收入[：:\s]*([0-9,\s]+)",
         r"实现营业收入([0-9,\s]+(?:\.[0-9]+)?)",  # 银行财报格式
-    ], text_no_newline, min_value=1000)
+    ], text_no_newline, min_value=1000, pick="max")
 
     # Cost of revenues / Cost of sales
     result.cost = find_first_number([
-        r"Total\s+cost\s+of\s+(?:revenues?|sales)\s*\$?\s*([0-9,\s]+)",
-        r"Cost\s+of\s+(?:revenues?|sales)\s*\$?\s*([0-9,\s]+)",
-        r"Cost\s+of\s+sales:\s*\n?\s*Products?\s*\$?\s*([0-9,\s]+)",  # Apple 格式
+        r"Total\s+cost\s+of\s+(?:revenues?|sales)\s*\$?\s*([0-9,\.\s]+)",
+        r"Cost\s+of\s+(?:revenues?|sales)\s*\$?\s*([0-9,\.\s]+)",
+        r"Cost\s+of\s+sales:\s*\n?\s*Products?\s*\$?\s*([0-9,\.\s]+)",  # Apple 格式
         r"营业成本[：:\s]*([0-9,\s]+)",
-    ], text_no_newline, min_value=1000)
+    ], text_no_newline, min_value=1000, pick="max")
 
     # Gross profit / Gross margin
     result.gross_profit = find_first_number([
-        r"Gross\s+(?:profit|margin)\s*\$?\s*([0-9,\s]+)",
+        r"Gross\s+(?:profit|margin)\s*\$?\s*([0-9,\.\s]+)",
         r"毛利[润]?[：:\s]*([0-9,\s]+)",
-    ], text_no_newline, min_value=100)
+    ], text_no_newline, min_value=100, pick="max")
 
     # Net income - 支持多种格式
     result.net_profit = find_first_number([
-        r"Net\s+income\s+attributable\s+to\s+common\s+stockholders?\s*\$?\s*([0-9,\s]+)",
-        r"Net\s+income\s*\$?\s*([0-9,\s]+)",
-        r"Net\s+earnings\s*\$?\s*([0-9,\s]+)",
+        r"Net\s+earnings\s+attributable\s+to\s+[^$]{0,60}\$\s*([0-9,\.\s\(\)\-]+)",
+        r"Net\s+earnings\s+including\s+noncontrolling\s+interests\s*\$\s*([0-9,\.\s\(\)\-]+)",
+        r"Net\s+income\s+attributable\s+to\s+common\s+stockholders?\s*\$?\s*([0-9,\.\s]+)",
+        r"Net\s+income\s*\$?\s*([0-9,\.\s\(\)\-]+)",
+        r"Net\s+earnings\s*\$?\s*([0-9,\.\s\(\)\-]+)",
         r"thelistedcompany.s\s+([0-9,\s]+(?:\.[0-9]+)?)",  # 五粮液格式 - 用.匹配任意引号
         r"Net\s+profit\s+attributable\s+to.*shareholders\s*\(RMB\)\s*([0-9,\s]+(?:\.[0-9]+)?)",
         r"归属于上市公司股东的净利润[（(]元[)）]\s*([0-9,\s]+(?:\.[0-9]+)?)",  # A股季报格式
         r"净利润[：:\s]*([0-9,\s]+)",
         r"归属于.*股东的净利润\s*([0-9,\s]+)",  # 银行财报格式
-    ], text_no_newline, min_value=100)
+    ], text_no_newline, min_value=100, pick="max")
 
     # ========== 资产负债表 ==========
 
     result.total_assets = find_first_number([
-        r"Total\s+assets\s*\$?\s*([0-9,\s]+)",
+        r"Total\s+assets\s*\$?\s*([0-9,\.\s]+)",
         r"Totalassets\s*\(RMB\)\s*([0-9,\s]+(?:\.[0-9]+)?)",  # 五粮液格式
         r"资产总计\s+([0-9,\s]+(?:\.[0-9]+)?)",  # A股季报格式
         r"资产总[计额][：:\s]*([0-9,\s]+)",
         r"资产总额\s*([0-9,\s]+)",  # 银行财报格式
-    ], text, min_value=1000)
+    ], text, min_value=1000, pick="max")
 
     result.total_equity = find_first_number([
-        r"Total\s+stockholders['']?\s*equity\s*\$?\s*\(?([0-9,\s]+)\)?",
-        r"Total\s+equity\s*\$?\s*\(?([0-9,\s]+)\)?",
+        r"Total\s+stockholders['']?\s*equity\s*\$?\s*\(?([0-9,\.\s]+)\)?",
+        r"Total\s+equity\s*\$?\s*\(?([0-9,\.\s]+)\)?",
         r"所有者权益合计[：:\s]*([0-9,\s]+)",
         r"股东权益\s*([0-9,\s]+)",  # 银行财报格式
         r"归属于.*股东的股东权益\s*([0-9,\s]+)",
-    ], text, min_value=100)
+    ], text, min_value=100, pick="max")
 
     result.total_liabilities = find_first_number([
-        r"Total\s+liabilities\s*\$?\s*([0-9,\s]+)",
+        r"Total\s+liabilities\s*\$?\s*([0-9,\.\s]+)",
         r"负债总[计额][：:\s]*([0-9,\s]+)",
         r"负债合计[：:\s]*([0-9,\s]+)",
-    ], text, min_value=1000)
+    ], text, min_value=1000, pick="max")
     
     # 银行特殊：如果没有直接的负债数据，用资产-权益计算
     if not result.total_liabilities and result.total_assets and result.total_equity:
         result.total_liabilities = result.total_assets - result.total_equity
 
     result.current_assets = find_first_number([
-        r"Total\s+current\s+assets\s*\$?\s*([0-9,\s]+)",
+        r"Total\s+current\s+assets\s*\$?\s*([0-9,\.\s]+)",
         r"流动资产合计[：:\s]*([0-9,\s]+)",
-    ], text, min_value=100)
+    ], text, min_value=100, pick="max")
 
     result.current_liabilities = find_first_number([
-        r"Total\s+current\s+liabilities\s*\$?\s*([0-9,\s]+)",
+        r"Total\s+current\s+liabilities\s*\$?\s*([0-9,\.\s]+)",
         r"流动负债合计[：:\s]*([0-9,\s]+)",
-    ], text, min_value=100)
+    ], text, min_value=100, pick="max")
 
     result.cash = find_first_number([
-        r"Cash\s+and\s+cash\s+equivalents\s*\$?\s*([0-9,\s]+)",
+        r"Cash\s+and\s+cash\s+equivalents\s*\$?\s*([0-9,\.\s]+)",
         r"货币资金[：:\s]*([0-9,\s]+)",
-    ], text, min_value=10)
+    ], text, min_value=10, pick="max")
 
     result.inventory = find_first_number([
-        r"Inventor(?:y|ies)\s*\$?\s*([0-9,\s]+)",
+        r"Inventor(?:y|ies)\s*\$?\s*([0-9,\.\s]+)",
         r"存货[：:\s]*([0-9,\s]+)",
-    ], text, min_value=10)
+    ], text, min_value=10, pick="max")
 
     result.receivables = find_first_number([
-        r"Accounts\s+receivable[^$]*\$?\s*([0-9,\s]+)",
+        r"Accounts\s+receivable[^\d]{0,60}\$?\s*([0-9,\.\s]+)",
         r"应收账款[：:\s]*([0-9,\s]+)",
-    ], text, min_value=10)
+    ], text, min_value=10, pick="max")
+
+    result.fixed_assets = find_first_number([
+        r"Property,?\s+plant\s+and\s+equipment,?\s*(?:net)?\s*\$?\s*([0-9,\.\s]+)",
+        r"固定资产[：:\s]*([0-9,\s]+)",
+    ], text, min_value=10, pick="max")
 
     # 如果没有权益但有资产和负债，计算权益
     if not result.total_equity and result.total_assets and result.total_liabilities:

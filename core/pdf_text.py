@@ -49,7 +49,7 @@ def _is_garbled_text(text: str) -> bool:
     return False
 
 
-def _extract_with_ocr(path: str, max_pages: int = 10) -> str:
+def _extract_with_ocr(path: str, max_pages: int = 10, pages_hint_0: list[int] | None = None) -> str:
     """使用 OCR 提取 PDF 文本"""
     # OCR 非常消耗 CPU/内存（pdf2image + tesseract），线上默认关闭，避免拖垮服务器。
     # 如需强制开启：设置环境变量 ENABLE_OCR=1
@@ -87,6 +87,18 @@ def _extract_with_ocr(path: str, max_pages: int = 10) -> str:
         ocr_pages = min(max_pages, max(1, ocr_max_pages))
 
         first_page = max(1, ocr_start_page)
+        if pages_hint_0:
+            try:
+                pages_hint_0 = [int(x) for x in pages_hint_0]
+            except Exception:
+                pages_hint_0 = None
+            if pages_hint_0:
+                ocr_auto_find = False
+                try:
+                    p0min = min(x for x in pages_hint_0 if x >= 0)
+                    first_page = int(p0min) + 1
+                except Exception:
+                    pass
 
         def _ocr_image(img) -> str:
             page_text = ""
@@ -122,6 +134,23 @@ def _extract_with_ocr(path: str, max_pages: int = 10) -> str:
                     pass
 
         pages_to_ocr_0: list[int] | None = None
+        if pages_hint_0:
+            pages_to_ocr_0 = []
+            seen0: set[int] = set()
+            for p0 in pages_hint_0:
+                try:
+                    p0i = int(p0)
+                except Exception:
+                    continue
+                for nb in (p0i, p0i + 1):
+                    if nb < 0:
+                        continue
+                    if nb in seen0:
+                        continue
+                    seen0.add(nb)
+                    pages_to_ocr_0.append(nb)
+                if len(pages_to_ocr_0) >= max(1, ocr_pages):
+                    break
 
         if ocr_auto_find and first_page == 1:
             try:
@@ -143,13 +172,20 @@ def _extract_with_ocr(path: str, max_pages: int = 10) -> str:
                         auto_max_page_count = 300
                     if (not enable_ocr) and page_count > auto_max_page_count:
                         return ""
-                    # Sample across the document; adapt step to the number of probe pages requested.
-                    # Using a fixed //10 can miss statement pages for some PDFs.
+                    # Sample across the document with denser coverage in the 20-40% range
+                    # where financial statements typically appear in 10-K/annual reports.
                     step = max(1, page_count // max(10, (ocr_probe_pages + 2)))
-                    candidates = [1]
+                    candidates_set: set[int] = {1}
                     for i in range(1, 1 + ocr_probe_pages):
-                        candidates.append(1 + i * step)
-                    candidates = [c for c in candidates if 1 <= c <= page_count]
+                        candidates_set.add(1 + i * step)
+                    # Add denser probes in the financial statement zone (20%-45% of document)
+                    # Financial statements in 10-K filings are typically in this range.
+                    fs_start = max(1, int(page_count * 0.20))
+                    fs_end = min(page_count, int(page_count * 0.45))
+                    fs_step = max(1, (fs_end - fs_start) // 8)
+                    for i in range(fs_start, fs_end + 1, fs_step):
+                        candidates_set.add(i)
+                    candidates = sorted(c for c in candidates_set if 1 <= c <= page_count)
 
                     scored: list[tuple[int, float]] = []
                     for c in candidates:
@@ -184,13 +220,19 @@ def _extract_with_ocr(path: str, max_pages: int = 10) -> str:
                                 or "BALANCE SHEETS" in up
                                 or "STATEMENTS OF OPERATIONS" in up
                                 or "STATEMENTS OF CASH FLOWS" in up
+                                or "INCOME STATEMENT" in up
                             )
                             if strong:
                                 kw += 10
 
-                            for k in ("CONSOLIDATED", "STATEMENTS", "REVENUE", "IN MILLIONS", "FORM 10-K"):
+                            for k in ("CONSOLIDATED", "STATEMENTS", "REVENUE", "IN MILLIONS", "FORM 10-K",
+                                       "TOTAL ASSETS", "TOTAL LIABILITIES", "NET INCOME", "GROSS PROFIT"):
                                 if k in up:
                                     kw += 1
+                            # Chinese financial keywords
+                            for k in ("利润表", "资产负债表", "现金流量表", "营业收入", "净利润", "资产总计"):
+                                if k in head:
+                                    kw += 5
                             ascii_ratio = sum(1 for ch in head if (" " <= ch <= "~")) / max(1, len(head))
                             score = kw * 10.0 + ascii_ratio
                             scored.append((c, score))
@@ -200,7 +242,7 @@ def _extract_with_ocr(path: str, max_pages: int = 10) -> str:
                     # Pick several best pages (1-indexed) and OCR them (and their next page) to cover
                     # statements of operations / balance sheets / cash flows which may be separated.
                     scored = sorted(scored, key=lambda kv: kv[1], reverse=True)
-                    picked_1 = [p for p, sc in scored if sc >= 1.0][: max(1, min(4, ocr_pages))]
+                    picked_1 = [p for p, sc in scored if sc >= 1.0][: max(1, min(6, ocr_pages))]
                     if picked_1:
                         # Convert to 0-index and include adjacent continuation pages.
                         picked_0: list[int] = []
@@ -208,9 +250,12 @@ def _extract_with_ocr(path: str, max_pages: int = 10) -> str:
                             p0 = max(0, int(p1) - 1)
                             if p0 not in picked_0:
                                 picked_0.append(p0)
-                            if (p0 + 1) < page_count and (p0 + 1) not in picked_0:
-                                picked_0.append(p0 + 1)
-                        pages_to_ocr_0 = picked_0[: max(1, ocr_pages)]
+                            # Include next 2 pages for multi-page statements
+                            for offset in (1, 2):
+                                nb = p0 + offset
+                                if nb < page_count and nb not in picked_0:
+                                    picked_0.append(nb)
+                        pages_to_ocr_0 = sorted(picked_0)[: max(1, ocr_pages)]
 
                         # Keep first_page for backwards compatible contiguous OCR if needed.
                         first_page = min(picked_1)
@@ -289,18 +334,20 @@ def extract_pdf_text(
         if page_count <= k:
             return list(range(page_count))
 
-        # Candidates: first/last, plus sampled pages across document
-        candidates: set[int] = set()
-        for i in range(min(3, page_count)):
-            candidates.add(i)
-        for i in range(max(0, page_count - 3), page_count):
-            candidates.add(i)
+        if page_count <= 200:
+            cands = list(range(page_count))
+        else:
+            candidates: set[int] = set()
+            for i in range(min(3, page_count)):
+                candidates.add(i)
+            for i in range(max(0, page_count - 3), page_count):
+                candidates.add(i)
 
-        step = max(1, page_count // max(12, k * 2))
-        for i in range(0, page_count, step):
-            candidates.add(i)
+            step = max(1, page_count // max(12, k * 2))
+            for i in range(0, page_count, step):
+                candidates.add(i)
 
-        cands = sorted(candidates)
+            cands = sorted(candidates)
 
         # Score pages by presence of keywords in a lightweight preview
         def _score_preview(txt: str) -> float:
@@ -311,19 +358,52 @@ def extract_pdf_text(
             up = head.upper()
             score = 0.0
 
+            if "ON OUR CONSOLIDATED STATEMENTS OF" in up:
+                score -= 30
+            if "RECORDED ON THE CONSOLIDATED BALANCE SHEETS" in up:
+                score -= 40
+            if "ON THE CONSOLIDATED BALANCE SHEETS" in up and "ASSETS" not in up and "LIABIL" not in up:
+                score -= 25
+
             strong_en = (
                 "CONSOLIDATED STATEMENTS" in up
+                or "CONSOLIDATED FINANCIAL STATEMENTS" in up
+                or "STATEMENTS OF EARNINGS" in up
                 or "STATEMENTS OF OPERATIONS" in up
                 or "STATEMENTS OF CASH FLOWS" in up
                 or "BALANCE SHEETS" in up
                 or "INCOME STATEMENT" in up
-                or "FORM 10-K" in up
             )
             if strong_en:
                 score += 50
+
+            if "CONSOLIDATED BALANCE SHEETS" in up:
+                score += 80
+                if "ASSETS" not in up and "LIABIL" not in up and "TOTAL" not in up:
+                    score -= 60
+            if "CONSOLIDATED STATEMENTS OF EARNINGS" in up:
+                score += 80
+            if "CONSOLIDATED STATEMENTS OF OPERATIONS" in up:
+                score += 80
+            if "FISCAL YEAR ENDED" in up:
+                score += 25
+            if "IN MILLIONS" in up:
+                score += 25
+
+            if "TABLE OF CONTENTS" in up:
+                score -= 30
+            if ("INDEX" in up) and ("NOTES TO" in up or "FINANCIAL STATEMENTS" in up):
+                score -= 15
+
+            if "FORM 10-K" in up:
+                score += 2
+            if "ASSETS" in up and ("LIABIL" in up or "EQUITY" in up):
+                score += 25
             for k2 in (
                 "REVENUE",
+                "NET REVENUES",
                 "NET INCOME",
+                "NET EARNINGS",
                 "NET SALES",
                 "GROSS PROFIT",
                 "TOTAL ASSETS",
@@ -354,9 +434,15 @@ def extract_pdf_text(
 
             ascii_ratio = sum(1 for ch in head if (" " <= ch <= "~")) / max(1, len(head))
             score += ascii_ratio
+
+            digit_cnt = sum(1 for ch in head if ch.isdigit())
+            score += min(20.0, float(digit_cnt) / 50.0)
+            if digit_cnt < 25:
+                score -= 5
             return score
 
         previews: dict[int, float] = {}
+        best_tag_page: dict[str, tuple[int, float]] = {}
 
         # Use PyMuPDF for preview scoring (fast and resilient); fall back to empty scores.
         try:
@@ -367,7 +453,27 @@ def extract_pdf_text(
                 try:
                     page = doc.load_page(idx)
                     txt = page.get_text("text") or ""
-                    previews[idx] = _score_preview(txt)
+                    sc = _score_preview(txt)
+                    previews[idx] = sc
+                    head = (txt or "")[:3000]
+                    up = head.upper()
+                    if "CONSOLIDATED BALANCE SHEETS" in up:
+                        cur = best_tag_page.get("balance")
+                        if (cur is None) or (sc > cur[1]):
+                            best_tag_page["balance"] = (idx, sc)
+                    if (
+                        "CONSOLIDATED STATEMENTS OF EARNINGS" in up
+                        or "STATEMENTS OF EARNINGS" in up
+                        or "CONSOLIDATED STATEMENTS OF OPERATIONS" in up
+                        or "STATEMENTS OF OPERATIONS" in up
+                    ):
+                        cur = best_tag_page.get("earnings")
+                        if (cur is None) or (sc > cur[1]):
+                            best_tag_page["earnings"] = (idx, sc)
+                    if "CONSOLIDATED STATEMENTS OF CASH FLOWS" in up or "STATEMENTS OF CASH FLOWS" in up:
+                        cur = best_tag_page.get("cashflows")
+                        if (cur is None) or (sc > cur[1]):
+                            best_tag_page["cashflows"] = (idx, sc)
                 except Exception:
                     previews[idx] = -1.0
             try:
@@ -379,7 +485,38 @@ def extract_pdf_text(
                 previews[idx] = 0.0
 
         ranked = sorted(previews.items(), key=lambda kv: kv[1], reverse=True)
-        picked = [idx for idx, sc in ranked if sc >= 0][:k]
+        picked_ranked = [idx for idx, sc in ranked if sc >= 0]
+
+        must_pages: list[int] = []
+        for tag in ("earnings", "balance", "cashflows"):
+            try:
+                if tag in best_tag_page:
+                    must_pages.append(int(best_tag_page[tag][0]))
+            except Exception:
+                continue
+
+        picked: list[int] = []
+        seen: set[int] = set()
+
+        if 0 not in seen:
+            seen.add(0)
+            picked.append(0)
+
+        for idx in (must_pages + picked_ranked):
+            if len(picked) >= k:
+                break
+            if idx not in seen:
+                seen.add(idx)
+                picked.append(idx)
+
+            if len(picked) >= k:
+                break
+            for nb in (idx + 1, idx - 1):
+                if 0 <= nb < page_count and nb not in seen:
+                    seen.add(nb)
+                    picked.append(nb)
+                if len(picked) >= k:
+                    break
 
         # Guarantee deterministic fill if scores are all bad
         if len(picked) < k:
@@ -389,7 +526,7 @@ def extract_pdf_text(
                 if len(picked) >= k:
                     break
 
-        return sorted(set(picked))
+        return picked
 
     def _truncate(s: str) -> str:
         if len(s) > max_chars:
@@ -430,6 +567,7 @@ def extract_pdf_text(
             pass
 
     out = ""
+    need_more = False
 
     # Decide which pages to read. For long documents, pick pages smartly instead of only the first N.
     page_indices: list[int] = []
@@ -537,9 +675,79 @@ def extract_pdf_text(
     except Exception:
         out = ""
 
+    try:
+        if out and not _is_garbled_text(out):
+            head = out[:120000]
+            up = head.upper()
+            digit_cnt0 = sum(1 for ch in head if ch.isdigit())
+            hits = 0
+            has_balance = False
+            has_cashflows = False
+            has_earnings = False
+            for k0 in (
+                "CONSOLIDATED BALANCE SHEETS",
+                "CONSOLIDATED STATEMENTS OF CASH FLOWS",
+                "CONSOLIDATED STATEMENTS OF EARNINGS",
+                "STATEMENTS OF CASH FLOWS",
+                "BALANCE SHEETS",
+                "TOTAL ASSETS",
+                "TOTAL LIABILITIES",
+                "NET REVENUES",
+                "NET EARNINGS",
+                "NET INCOME",
+                "资产负债表",
+                "现金流量表",
+                "利润表",
+                "资产总",
+                "负债合计",
+                "营业收入",
+                "净利润",
+            ):
+                if k0 in up or k0 in head:
+                    hits += 1
+
+            if (
+                ("CONSOLIDATED BALANCE SHEETS" in up)
+                or ("BALANCE SHEETS" in up)
+                or ("TOTAL ASSETS" in up)
+                or ("TOTAL LIABILITIES" in up)
+                or ("资产负债表" in head)
+                or ("资产总" in head)
+            ):
+                has_balance = True
+            if (
+                ("CONSOLIDATED STATEMENTS OF CASH FLOWS" in up)
+                or ("STATEMENTS OF CASH FLOWS" in up)
+                or ("CASH FLOWS" in up)
+                or ("现金流量表" in head)
+            ):
+                has_cashflows = True
+            if (
+                ("CONSOLIDATED STATEMENTS OF EARNINGS" in up)
+                or ("STATEMENTS OF EARNINGS" in up)
+                or ("CONSOLIDATED STATEMENTS OF OPERATIONS" in up)
+                or ("STATEMENTS OF OPERATIONS" in up)
+                or ("NET REVENUES" in up)
+                or ("NET SALES" in up)
+                or ("NET EARNINGS" in up)
+                or ("NET INCOME" in up)
+                or ("利润表" in head)
+                or ("营业收入" in head)
+                or ("净利润" in head)
+            ):
+                has_earnings = True
+
+            stmt_types = sum(1 for v in (has_earnings, has_balance, has_cashflows) if v)
+            if digit_cnt0 < 200 or hits < 2:
+                need_more = True
+            elif stmt_types < 2:
+                need_more = True
+    except Exception:
+        need_more = False
+
     # 首先尝试 pdfplumber
     texts: list[str] = []
-    if not out or _is_garbled_text(out):
+    if (not out) or _is_garbled_text(out) or need_more:
         try:
             import pdfplumber
             with pdfplumber.open(str(p)) as pdf:
@@ -559,7 +767,7 @@ def extract_pdf_text(
             out = _strip_ctrl(out)
 
     # 如果是乱码/空文本，fallback 到 pdfminer.six（对英文年报常更稳）
-    if not out or _is_garbled_text(out):
+    if (not out) or _is_garbled_text(out) or need_more:
         try:
             from pdfminer.high_level import extract_text as _pdfminer_extract_text
 
@@ -573,7 +781,7 @@ def extract_pdf_text(
             pass
 
     # 再 fallback 到 PyMuPDF（fitz）— 对 CID 字体编码的英文年报通常更稳
-    if not out or _is_garbled_text(out):
+    if (not out) or _is_garbled_text(out) or need_more:
         try:
             import fitz  # PyMuPDF
 
@@ -598,7 +806,7 @@ def extract_pdf_text(
             pass
 
     # 再 fallback 到 pypdf（有时能拿到更干净的文本）
-    if not out or _is_garbled_text(out):
+    if (not out) or _is_garbled_text(out):
         try:
             from pypdf import PdfReader
 
@@ -631,12 +839,56 @@ def extract_pdf_text(
     except Exception:
         too_short2 = False
 
-    if _is_garbled_text(out) or too_short2:
-        _maybe_debug(f"pdf_text: triggering final ocr; len={len((out or '').strip())} too_short={too_short2}")
-        ocr_text = _extract_with_ocr(str(p), max_pages)
+    missing_table_keys = False
+    no_financial_content = False
+    try:
+        s2 = (out or "").strip()
+        up2 = s2.upper()
+        compact2 = "".join(up2.split())
+        has_balance_hdr = ("CONSOLIDATED BALANCE SHEETS" in up2) or ("BALANCE SHEETS" in up2)
+        has_assets_row = ("TOTAL ASSETS" in up2) or ("TOTALASSETS" in compact2)
+        has_liab_row = ("TOTAL LIABILITIES" in up2) or ("TOTALLIABILITIES" in compact2)
+        if has_balance_hdr and (not has_assets_row) and (not has_liab_row):
+            missing_table_keys = True
+
+        # Detect cipher-encoded PDFs: text is long but contains ZERO financial keywords.
+        # This catches CID font encoding where text looks readable by character ratio
+        # but is semantically garbled (e.g., "3]]YR" instead of "Apple").
+        if len(s2) > 2000:
+            financial_keywords_en = [
+                "NET SALES", "NET REVENUES", "REVENUE", "NET INCOME", "NET EARNINGS",
+                "TOTAL ASSETS", "TOTAL LIABILITIES", "BALANCE SHEET", "INCOME STATEMENT",
+                "STATEMENTS OF OPERATIONS", "STATEMENTS OF EARNINGS", "CASH FLOWS",
+                "GROSS PROFIT", "GROSS MARGIN", "STOCKHOLDERS", "SHAREHOLDERS",
+                "IN MILLIONS", "IN BILLIONS", "IN THOUSANDS",
+            ]
+            financial_keywords_cn = [
+                "营业收入", "营业总收入", "净利润", "资产总", "负债合计",
+                "利润表", "资产负债表", "现金流量表", "所有者权益",
+                "毛利率", "基本每股收益", "归属于",
+            ]
+            en_hits = sum(1 for k in financial_keywords_en if k in up2)
+            cn_hits = sum(1 for k in financial_keywords_cn if k in s2)
+            if en_hits == 0 and cn_hits == 0:
+                no_financial_content = True
+                _maybe_debug(f"pdf_text: no financial keywords found in {len(s2)} chars of text, likely cipher-encoded PDF")
+    except Exception:
+        missing_table_keys = False
+
+    if _is_garbled_text(out) or too_short2 or missing_table_keys or no_financial_content:
+        _maybe_debug(
+            f"pdf_text: triggering final ocr; len={len((out or '').strip())} too_short={too_short2} missing_table_keys={missing_table_keys} no_financial_content={no_financial_content}"
+        )
+        # When no_financial_content is True, page_indices were selected from garbled text
+        # and are unreliable. Let OCR auto-find the right pages via its own probing logic.
+        ocr_hint_pages = None if no_financial_content else page_indices
+        ocr_text = _extract_with_ocr(str(p), max_pages, pages_hint_0=ocr_hint_pages)
         if ocr_text:
             ocr_text = _strip_ctrl(ocr_text)
             if (not _is_garbled_text(ocr_text)) or _looks_like_useful_english(ocr_text):
-                out = ocr_text
+                if missing_table_keys and out:
+                    out = (out.rstrip() + "\n\n" + ocr_text.lstrip()).strip()
+                else:
+                    out = ocr_text
 
     return _truncate(out)

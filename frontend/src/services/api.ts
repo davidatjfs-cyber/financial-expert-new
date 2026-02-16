@@ -37,6 +37,7 @@ export interface Report {
   status: 'done' | 'running' | 'failed' | 'pending';
   created_at: number;
   updated_at: number;
+  company_id?: string;
 }
 
 export interface ReportDetail extends Report {
@@ -45,6 +46,13 @@ export interface ReportDetail extends Report {
   company_id?: string;
   market?: string;
   industry_code?: string;
+}
+
+export interface CompanyHistory {
+  company_name: string;
+  website?: string | null;
+  source_url?: string | null;
+  history_text: string;
 }
 
 export interface PortfolioPosition {
@@ -63,9 +71,11 @@ export interface PortfolioPosition {
   strategy_buy_price?: number | null;
   strategy_buy_ok?: boolean | null;
   strategy_buy_reason?: string | null;
+  strategy_buy_desc?: string | null;
   strategy_sell_price?: number | null;
   strategy_sell_ok?: boolean | null;
   strategy_sell_reason?: string | null;
+  strategy_sell_desc?: string | null;
   updated_at: number;
 }
 
@@ -191,6 +201,9 @@ export interface StockIndicators {
   buy_price_stable?: number | null;
   sell_price?: number | null;
 
+  buy_condition_desc?: string | null;
+  sell_condition_desc?: string | null;
+
   buy_reason?: string | null;
   sell_reason?: string | null;
 
@@ -247,6 +260,10 @@ export async function getReportDetail(reportId: string): Promise<ReportDetail> {
   return fetchAPI<ReportDetail>(`/api/reports/${reportId}`);
 }
 
+export async function getReportCompanyHistory(reportId: string): Promise<CompanyHistory> {
+  return fetchAPI<CompanyHistory>(`/api/reports/${reportId}/company-history`);
+}
+
 /**
  * Get computed metrics for a report
  */
@@ -286,7 +303,7 @@ export async function getAlertsSummary(): Promise<AlertsSummary> {
 /**
  * Search for stocks
  */
-export async function searchStocks(query: string, market = 'CN'): Promise<StockSearchResult[]> {
+export async function searchStocks(query: string, market = 'ALL'): Promise<StockSearchResult[]> {
   const params = new URLSearchParams({ q: query, market });
   return fetchAPI<StockSearchResult[]>(`/api/stock/search?${params}`);
 }
@@ -303,6 +320,16 @@ export async function getStockPrice(symbol: string, market: string = 'CN') {
  */
 export async function getStockIndicators(symbol: string, market: string = 'CN') {
   return fetchAPI<StockIndicators | null>(`/api/stock/indicators?symbol=${encodeURIComponent(symbol)}&market=${market}`);
+}
+
+export interface StockAnnouncement {
+  title: string;
+  date?: string | null;
+  url?: string | null;
+}
+
+export async function getStockAnnouncements(symbol: string, market: string = 'CN', limit: number = 5) {
+  return fetchAPI<StockAnnouncement[]>(`/api/stock/announcements?symbol=${encodeURIComponent(symbol)}&market=${market}&limit=${limit}`);
 }
 
 /**
@@ -361,6 +388,46 @@ export async function getPortfolioAlerts() {
   return fetchAPI<PortfolioAlert[]>(`/api/portfolio/alerts`);
 }
 
+export interface PortfolioAutoTrade {
+  id: string;
+  position_id: string;
+  side: 'BUY' | 'SELL';
+  trigger_price: number;
+  quantity: number;
+  status: 'PENDING' | 'EXECUTED' | 'CANCELLED';
+  created_at: number;
+  executed_at?: number | null;
+  executed_price?: number | null;
+  symbol?: string | null;
+  name?: string | null;
+  market?: string | null;
+}
+
+export interface PortfolioAutoTradeRequest {
+  position_id: string;
+  side: 'BUY' | 'SELL';
+  trigger_price: number;
+  quantity: number;
+}
+
+export async function getPortfolioAutoTrades() {
+  return fetchAPI<PortfolioAutoTrade[]>(`/api/portfolio/auto-trades`);
+}
+
+export async function createPortfolioAutoTrade(req: PortfolioAutoTradeRequest) {
+  return fetchAPI<PortfolioAutoTrade>(`/api/portfolio/auto-trades`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  });
+}
+
+export async function cancelPortfolioAutoTrade(autoTradeId: string) {
+  return fetchAPI<{ ok: boolean }>(`/api/portfolio/auto-trades/${encodeURIComponent(autoTradeId)}`, {
+    method: 'DELETE',
+  });
+}
+
 /**
  * Upload a financial report file
  */
@@ -399,15 +466,18 @@ export async function fetchMarketReport(
   symbol: string,
   market = 'CN',
   periodType = 'annual',
-  periodEnd = '2024-12-31',
+  periodEnd?: string,
   companyName?: string
 ): Promise<{ report_id: string; message: string }> {
   const params = new URLSearchParams({
     symbol,
     market,
     period_type: periodType,
-    period_end: periodEnd,
   });
+
+  if (periodEnd && periodEnd.trim()) {
+    params.set('period_end', periodEnd.trim());
+  }
 
   if (companyName && companyName.trim()) {
     params.set('company_name', companyName.trim());

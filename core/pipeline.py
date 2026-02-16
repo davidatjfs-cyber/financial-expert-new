@@ -61,6 +61,58 @@ def _safe_float(v) -> float | None:
         return None
 
 
+def _to_iso_period_end(v) -> str | None:
+    try:
+        dt = pd.to_datetime(v, errors="coerce")
+        if dt is None or pd.isna(dt):
+            return None
+        return dt.date().isoformat()
+    except Exception:
+        return None
+
+
+def _collect_periods_from_df(df: pd.DataFrame | None) -> list[str]:
+    out: list[str] = []
+    try:
+        if df is None or df.empty:
+            return out
+        date_col = None
+        for c in ("STD_REPORT_DATE", "REPORT_DATE", "报告期"):
+            if c in df.columns:
+                date_col = c
+                break
+        if not date_col:
+            return out
+        for v in df[date_col].tolist():
+            pe = _to_iso_period_end(v)
+            if pe:
+                out.append(pe)
+    except Exception:
+        return out
+    return out
+
+
+def _pick_effective_period(target_period: str | None, periods: list[str]) -> str | None:
+    if not periods:
+        return target_period
+    parsed: list[pd.Timestamp] = []
+    for p in periods:
+        dt = pd.to_datetime(p, errors="coerce")
+        if dt is not None and not pd.isna(dt):
+            parsed.append(dt)
+    if not parsed:
+        return target_period
+    parsed = sorted(set(parsed))
+    target_dt = pd.to_datetime(target_period, errors="coerce") if target_period else None
+    if target_dt is not None and not pd.isna(target_dt):
+        le = [d for d in parsed if d <= target_dt]
+        if le:
+            return le[-1].date().isoformat()
+        parsed.sort(key=lambda d: abs((d - target_dt).days))
+        return parsed[0].date().isoformat()
+    return parsed[-1].date().isoformat()
+
+
 def delete_report_children_full(report_id: str) -> None:
     with session_scope() as s:
         s.execute(delete(Alert).where(Alert.report_id == report_id))
@@ -175,7 +227,14 @@ def _ingest_and_analyze_non_cn_akshare(report_id: str) -> None:
         except Exception:
             return None
 
-    def _pick_from_df(df: pd.DataFrame | None, keywords: list[str], *, value_col_candidates: list[str] | None = None) -> float | None:
+    def _pick_from_df(
+        df: pd.DataFrame | None,
+        keywords: list[str],
+        *,
+        value_col_candidates: list[str] | None = None,
+        target_period: str | None = None,
+        prefer_nearest: bool = False,
+    ) -> float | None:
         try:
             if df is None or df.empty:
                 return None
@@ -200,9 +259,26 @@ def _ingest_and_analyze_non_cn_akshare(report_id: str) -> None:
             if date_col:
                 try:
                     dt_series = pd.to_datetime(df2[date_col], errors="coerce")
-                    latest_date = dt_series.max()
-                    if latest_date is not None and not pd.isna(latest_date):
-                        df2 = df2[dt_series == latest_date]
+                    chosen_date = None
+                    target_dt = pd.to_datetime(target_period, errors="coerce") if target_period else None
+                    if target_dt is not None and not pd.isna(target_dt):
+                        if prefer_nearest:
+                            valid = dt_series.dropna()
+                            if not valid.empty:
+                                deltas = (valid - target_dt).abs()
+                                chosen_date = valid.loc[deltas.idxmin()]
+                        else:
+                            same_year = dt_series[dt_series.dt.year == target_dt.year]
+                            if not same_year.empty:
+                                chosen_date = same_year.max()
+                            else:
+                                le = dt_series[dt_series <= target_dt]
+                                if not le.empty:
+                                    chosen_date = le.max()
+                    if chosen_date is None or pd.isna(chosen_date):
+                        chosen_date = dt_series.max()
+                    if chosen_date is not None and not pd.isna(chosen_date):
+                        df2 = df2[dt_series == chosen_date]
                 except Exception:
                     pass
 
@@ -269,6 +345,150 @@ def _ingest_and_analyze_non_cn_akshare(report_id: str) -> None:
                         mapping_confidence=None,
                     )
                 )
+
+    def _row_values_by_period(df: pd.DataFrame | None, row_labels: list[str]) -> dict[str, float]:
+        out: dict[str, float] = {}
+        try:
+            if df is None or df.empty:
+                return out
+            idx_map = {str(i).strip().lower(): i for i in df.index}
+            row_key = None
+            for n in row_labels:
+                key = n.lower()
+                if key in idx_map:
+                    row_key = idx_map[key]
+                    break
+            if row_key is None:
+                # fuzzy contains fallback (Yahoo labels can vary)
+                for raw in df.index:
+                    low = str(raw).strip().lower()
+                    for n in row_labels:
+                        if n.lower() in low:
+                            row_key = raw
+                            break
+                    if row_key is not None:
+                        break
+            if row_key is None:
+                return out
+
+            ser = df.loc[row_key]
+            for col, v in ser.items():
+                fv = _to_num(v)
+                if fv is None:
+                    continue
+                try:
+                    pe = pd.to_datetime(col).date().isoformat()
+                except Exception:
+                    pe = str(col)[:10]
+                out[pe] = float(fv)
+            return out
+        except Exception:
+            return out
+
+    def _pick_period_value_for_report_period(
+        period_values: dict[str, float],
+        target_period: str | None,
+        *,
+        prefer_nearest: bool = False,
+    ) -> tuple[str | None, float | None]:
+        try:
+            if not period_values:
+                return (None, None)
+            if target_period and target_period in period_values:
+                return (target_period, period_values[target_period])
+
+            parsed: list[tuple[pd.Timestamp, str, float]] = []
+            for k, v in period_values.items():
+                try:
+                    dt = pd.to_datetime(k, errors="coerce")
+                    if dt is None or pd.isna(dt):
+                        continue
+                    parsed.append((dt, k, float(v)))
+                except Exception:
+                    continue
+
+            if not parsed:
+                k0 = next(iter(period_values.keys()))
+                return (k0, period_values[k0])
+
+            parsed.sort(key=lambda x: x[0])
+            target_dt = pd.to_datetime(target_period, errors="coerce") if target_period else None
+            if target_dt is not None and not pd.isna(target_dt):
+                if prefer_nearest:
+                    parsed.sort(key=lambda x: abs((x[0] - target_dt).days))
+                    return (parsed[0][1], parsed[0][2])
+                same_year = [(d, v) for d, _, v in parsed if d.year == target_dt.year]
+                if same_year:
+                    same_year.sort(key=lambda x: x[0])
+                    best = same_year[-1]
+                    for d, raw, v in parsed:
+                        if d == best[0] and v == best[1]:
+                            return (raw, v)
+                le = [(d, raw, v) for d, raw, v in parsed if d <= target_dt]
+                if le:
+                    le.sort(key=lambda x: x[0])
+                    return (le[-1][1], le[-1][2])
+
+            return (parsed[-1][1], parsed[-1][2])
+        except Exception:
+            return (None, None)
+
+    def _pick_for_report_period(
+        period_values: dict[str, float],
+        target_period: str | None,
+        *,
+        prefer_nearest: bool = False,
+    ) -> float | None:
+        _, value = _pick_period_value_for_report_period(
+            period_values,
+            target_period,
+            prefer_nearest=prefer_nearest,
+        )
+        return value
+
+    yf_revenue = None
+    yf_cfo = None
+    yf_revenue_map: dict[str, float] = {}
+    yf_cfo_map: dict[str, float] = {}
+    resolved_period_end = period_end
+    if market in ("HK", "US"):
+        try:
+            import yfinance as yf
+
+            symbol_up = symbol.upper()
+            if market == "HK":
+                base = symbol_up.split(".", 1)[0].zfill(5)
+                yf_symbol = f"{base}.HK"
+            else:
+                yf_symbol = symbol_up.split(".", 1)[0]
+
+            tk = yf.Ticker(yf_symbol)
+            income_df = None
+            cashflow_df = None
+            try:
+                income_df = tk.financials
+            except Exception:
+                income_df = None
+            try:
+                cashflow_df = tk.cashflow
+            except Exception:
+                cashflow_df = None
+
+            yf_revenue_map = _row_values_by_period(income_df, ["Total Revenue", "Revenue", "Operating Revenue"])
+            yf_cfo_map = _row_values_by_period(cashflow_df, ["Operating Cash Flow", "Cash Flow From Continuing Operating Activities"])
+            yf_revenue = _pick_for_report_period(
+                yf_revenue_map,
+                period_end,
+                prefer_nearest=True,
+            )
+            yf_cfo = _pick_for_report_period(
+                yf_cfo_map,
+                period_end,
+                prefer_nearest=True,
+            )
+        except Exception:
+            yf_revenue = None
+            yf_cfo = None
 
     if market == "HK":
         code = symbol.replace(".HK", "")
@@ -342,6 +562,16 @@ def _ingest_and_analyze_non_cn_akshare(report_id: str) -> None:
         except Exception:
             cash_df = None
 
+        pe = _pick_effective_period(
+            period_end,
+            _collect_periods_from_df(profit_df)
+            + _collect_periods_from_df(balance_df)
+            + _collect_periods_from_df(cash_df)
+            + list(yf_revenue_map.keys())
+            + list(yf_cfo_map.keys()),
+        ) or period_end
+        resolved_period_end = pe
+
         revenue_stmt = _pick_from_df(
             profit_df,
             [
@@ -359,36 +589,35 @@ def _ingest_and_analyze_non_cn_akshare(report_id: str) -> None:
                 "Total income",
                 "Net revenue",
             ],
+            target_period=pe,
+            prefer_nearest=True,
         )
-        if revenue is None:
+        if revenue_stmt is not None:
+            # Prefer statement revenue for HK: indicator table can lag or use mixed-caliber values.
             revenue = revenue_stmt
-        elif revenue_stmt is not None:
-            # Indicator table "营业总收入" may use a different definition than income statement "营业额".
-            # Prefer statement revenue when the gap is material, to keep revenue/cogs/gross profit consistent.
-            try:
-                rv = float(revenue)
-                rs = float(revenue_stmt)
-                if rs > 0 and abs(rv - rs) / rs >= 0.2:
-                    revenue = revenue_stmt
-            except Exception:
-                revenue = revenue_stmt
-        if net_profit is None:
-            net_profit = _pick_from_df(
-                profit_df,
-                [
-                    "净利润",
-                    "净利",
-                    "本年溢利",
-                    "股东应占溢利",
-                    "本公司拥有人应占",
-                    # English variants
-                    "Net profit",
-                    "Profit for the year",
-                    "Profit attributable",
-                ],
-            )
+        yf_revenue = _pick_for_report_period(yf_revenue_map, pe, prefer_nearest=True)
+        if yf_revenue is not None:
+            revenue = float(yf_revenue)
+        net_profit_stmt = _pick_from_df(
+            profit_df,
+            [
+                "股东应占溢利",
+                "本公司拥有人应占",
+                "净利润",
+                "净利",
+                "本年溢利",
+                # English variants
+                "Net profit",
+                "Profit for the year",
+                "Profit attributable",
+            ],
+            target_period=pe,
+            prefer_nearest=True,
+        )
+        if net_profit_stmt is not None:
+            net_profit = net_profit_stmt
 
-        gross_profit = _pick_from_df(profit_df, ["毛利", "毛利润", "Gross profit"])
+        gross_profit = _pick_from_df(profit_df, ["毛利", "毛利润", "Gross profit"], target_period=pe, prefer_nearest=True)
 
         # COGS selection for HK is tricky: generic keyword "成本" often matches non-COGS items
         # (e.g., finance cost), resulting in unrealistically high gross margin (97%+).
@@ -537,9 +766,54 @@ def _ingest_and_analyze_non_cn_akshare(report_id: str) -> None:
             except Exception:
                 pass
 
-        total_assets = _pick_from_df(balance_df, ["资产总值", "资产总计", "总资产", "资产合计"])
-        total_liab = _pick_from_df(balance_df, ["负债总额", "负债合计", "总负债"])
-        total_equity = _pick_from_df(balance_df, ["权益总额", "权益总计", "股东权益合计", "股东应占权益", "权益"])
+        def _hk_amount_map(
+            df: pd.DataFrame | None,
+            keywords: list[str],
+            *,
+            excludes: list[str] | None = None,
+        ) -> dict[str, float]:
+            out: dict[str, float] = {}
+            if df is None or df.empty:
+                return out
+            date_col = "REPORT_DATE" if "REPORT_DATE" in df.columns else ("STD_REPORT_DATE" if "STD_REPORT_DATE" in df.columns else None)
+            item_col = "STD_ITEM_NAME" if "STD_ITEM_NAME" in df.columns else ("ITEM_NAME" if "ITEM_NAME" in df.columns else None)
+            val_col = "AMOUNT" if "AMOUNT" in df.columns else ("金额" if "金额" in df.columns else None)
+            if not item_col or not val_col:
+                return out
+            excludes = excludes or []
+            for _, rr in df.iterrows():
+                nm = str(rr.get(item_col) or "")
+                low = nm.lower()
+                if not any((k in nm) or (k.lower() in low) for k in keywords):
+                    continue
+                if any((x in nm) or (x.lower() in low) for x in excludes):
+                    continue
+                v = rr.get(val_col)
+                if v is None or str(v) in ("", "--", "nan", "None"):
+                    continue
+                try:
+                    p = pe
+                    if date_col:
+                        p = pd.to_datetime(rr.get(date_col)).date().isoformat()
+                    fv = float(v)
+                    old = out.get(p)
+                    if old is None or abs(fv) > abs(float(old)):
+                        out[p] = fv
+                except Exception:
+                    continue
+            return out
+
+        ta_map = _hk_amount_map(balance_df, ["总资产", "资产总计", "资产总值", "资产合计", "Total Assets"], excludes=["总资产减流动负债"])
+        tl_map = _hk_amount_map(balance_df, ["总负债", "负债总额", "负债合计", "Total Liabilities"], excludes=["流动负债", "非流动负债", "总权益及总负债"])
+        te_map = _hk_amount_map(
+            balance_df,
+            ["总权益", "净资产", "股东权益", "权益总额", "权益总计", "股东权益合计", "股东应占权益", "Total Equity"],
+            excludes=["少数", "总权益及", "总权益及总负债", "总权益及非流动负债"],
+        )
+
+        total_assets = ta_map.get(pe)
+        total_liab = tl_map.get(pe)
+        total_equity = te_map.get(pe)
 
         try:
             if total_assets is not None and total_liab is not None:
@@ -555,15 +829,47 @@ def _ingest_and_analyze_non_cn_akshare(report_id: str) -> None:
                                 total_equity = derived_equity
         except Exception:
             pass
-        ca_total = _pick_from_df(balance_df, ["流动资产总值", "流动资产合计", "流动资产"])
-        cl_total = _pick_from_df(balance_df, ["流动负债总额", "流动负债合计", "流动负债"])
-        inventory = _pick_from_df(balance_df, ["存货"])
-        ar = _pick_from_df(balance_df, ["应收账款", "应收账项"])
-        cash = _pick_from_df(balance_df, ["现金", "货币资金", "现金及现金等价物", "银行结余"])
 
-        cfo = _pick_from_df(cash_df, ["经营活动现金流量净额", "经营活动现金流净额", "经营活动现金净额"])
+        try:
+            if revenue not in (None, 0) and net_profit is not None:
+                net_profit_margin = float(net_profit) / float(revenue) * 100.0
 
-        pe = period_end
+            prev_asset_candidates = sorted([k for k in ta_map.keys() if k < pe])
+            prev_equity_candidates = sorted([k for k in te_map.keys() if k < pe])
+            avg_assets = float(total_assets) if total_assets is not None else None
+            avg_equity = float(total_equity) if total_equity is not None else None
+
+            if avg_assets is not None and prev_asset_candidates:
+                prev_assets = ta_map.get(prev_asset_candidates[-1])
+                if prev_assets not in (None, 0):
+                    avg_assets = (avg_assets + float(prev_assets)) / 2.0
+            if avg_equity is not None and prev_equity_candidates:
+                prev_equity = te_map.get(prev_equity_candidates[-1])
+                if prev_equity not in (None, 0):
+                    avg_equity = (avg_equity + float(prev_equity)) / 2.0
+
+            if net_profit is not None and avg_equity not in (None, 0):
+                roe_pct = float(net_profit) / float(avg_equity) * 100.0
+            if net_profit is not None and avg_assets not in (None, 0):
+                roa_pct = float(net_profit) / float(avg_assets) * 100.0
+        except Exception:
+            pass
+        ca_total = _pick_from_df(balance_df, ["流动资产总值", "流动资产合计", "流动资产"], target_period=pe)
+        cl_total = _pick_from_df(balance_df, ["流动负债总额", "流动负债合计", "流动负债"], target_period=pe)
+        inventory = _pick_from_df(balance_df, ["存货"], target_period=pe)
+        ar = _pick_from_df(balance_df, ["应收账款", "应收账项"], target_period=pe)
+        cash = _pick_from_df(balance_df, ["现金", "货币资金", "现金及现金等价物", "银行结余"], target_period=pe)
+
+        cfo = _pick_from_df(
+            cash_df,
+            ["经营活动现金流量净额", "经营活动现金流净额", "经营活动现金净额", "经营业务现金净额"],
+            target_period=pe,
+            prefer_nearest=True,
+        )
+        yf_cfo = _pick_for_report_period(yf_cfo_map, pe, prefer_nearest=True)
+        if yf_cfo is not None:
+            cfo = float(yf_cfo)
+
         _ingest_items(statement_type="is", period_end=pe, items={
             "IS.REVENUE": revenue,
             "IS.COGS": cogs,
@@ -701,7 +1007,97 @@ def _ingest_and_analyze_non_cn_akshare(report_id: str) -> None:
         except Exception:
             pass
 
-        pe = period_end
+        income_df = None
+        balance_df = None
+        cash_df = None
+        try:
+            income_df = ak.stock_financial_us_report_em(stock=base, symbol="综合损益表", indicator="年报")
+        except Exception:
+            income_df = None
+        try:
+            balance_df = ak.stock_financial_us_report_em(stock=base, symbol="资产负债表", indicator="年报")
+        except Exception:
+            balance_df = None
+        try:
+            cash_df = ak.stock_financial_us_report_em(stock=base, symbol="现金流量表", indicator="年报")
+        except Exception:
+            cash_df = None
+
+        pe = _pick_effective_period(
+            period_end,
+            _collect_periods_from_df(ind_df)
+            + _collect_periods_from_df(income_df)
+            + _collect_periods_from_df(balance_df)
+            + _collect_periods_from_df(cash_df)
+            + list(yf_revenue_map.keys())
+            + list(yf_cfo_map.keys()),
+        ) or period_end
+        resolved_period_end = pe
+
+        try:
+            if ind_df is not None and not ind_df.empty:
+                date_col = "REPORT_DATE" if "REPORT_DATE" in ind_df.columns else ("STD_REPORT_DATE" if "STD_REPORT_DATE" in ind_df.columns else None)
+                row = ind_df.iloc[0]
+                if date_col:
+                    try:
+                        ts = pd.to_datetime(ind_df[date_col], errors="coerce")
+                        if pe:
+                            pe_ts = pd.to_datetime(pe, errors="coerce")
+                            le = ts[ts <= pe_ts]
+                            if not le.empty:
+                                row = ind_df.loc[le.idxmax()]
+                        elif not ts.dropna().empty:
+                            row = ind_df.loc[ts.idxmax()]
+                    except Exception:
+                        row = ind_df.iloc[0]
+                revenue = _to_num(row.get("OPERATE_INCOME") or row.get("REVENUE"))
+                net_profit = _to_num(row.get("NET_PROFIT") or row.get("NET_PROFIT") or row.get("NET_PROFIT"))
+                total_assets = _to_num(row.get("TOTAL_ASSETS"))
+                total_liab = _to_num(row.get("TOTAL_LIABILITIES"))
+
+                gross_margin_pct = _to_num(row.get("GROSS_PROFIT_RATIO"))
+                net_margin_pct = _to_num(row.get("NET_PROFIT_RATIO"))
+                roe_pct = _to_num(row.get("ROE_AVG"))
+                roa_pct = _to_num(row.get("ROA"))
+                debt_asset_pct = _to_num(row.get("DEBT_ASSET_RATIO"))
+                current_ratio = _to_num(row.get("CURRENT_RATIO"))
+                quick_ratio = _to_num(row.get("SPEED_RATIO"))
+        except Exception:
+            pass
+
+        revenue_stmt = _pick_from_df(income_df, ["营业收入", "营业总收入", "主营收入", "收入", "总收入", "Revenue", "Total revenue"], target_period=pe, prefer_nearest=True)
+        cfo_stmt = _pick_from_df(cash_df, ["经营活动产生的现金流量净额", "经营活动现金流量净额", "经营现金流量净额", "Operating Cash Flow", "Cash Flow From Continuing Operating Activities"], target_period=pe, prefer_nearest=True)
+        assets_stmt = _pick_from_df(balance_df, ["总资产", "资产总计", "Total Assets"], target_period=pe, prefer_nearest=True)
+        liab_stmt = _pick_from_df(balance_df, ["负债合计", "总负债", "Total Liabilities"], target_period=pe, prefer_nearest=True)
+        equity_stmt = _pick_from_df(balance_df, ["股东权益", "权益合计", "净资产", "Total Equity", "Stockholders Equity"], target_period=pe, prefer_nearest=True)
+        ca_stmt = _pick_from_df(balance_df, ["流动资产合计", "Current Assets"], target_period=pe, prefer_nearest=True)
+        cl_stmt = _pick_from_df(balance_df, ["流动负债合计", "Current Liabilities"], target_period=pe, prefer_nearest=True)
+        cash_stmt = _pick_from_df(balance_df, ["货币资金", "现金及现金等价物", "Cash And Cash Equivalents", "Cash"], target_period=pe, prefer_nearest=True)
+
+        if revenue_stmt is not None:
+            revenue = revenue_stmt
+        if cfo_stmt is not None:
+            cfo = cfo_stmt
+        if total_assets is None and assets_stmt is not None:
+            total_assets = assets_stmt
+        if total_liab is None and liab_stmt is not None:
+            total_liab = liab_stmt
+        if total_equity is None and equity_stmt is not None:
+            total_equity = equity_stmt
+        if ca_total is None and ca_stmt is not None:
+            ca_total = ca_stmt
+        if cl_total is None and cl_stmt is not None:
+            cl_total = cl_stmt
+        if cash is None and cash_stmt is not None:
+            cash = cash_stmt
+
+        yf_revenue = _pick_for_report_period(yf_revenue_map, pe, prefer_nearest=True)
+        if yf_revenue is not None:
+            revenue = float(yf_revenue)
+        yf_cfo = _pick_for_report_period(yf_cfo_map, pe, prefer_nearest=True)
+        if yf_cfo is not None:
+            cfo = float(yf_cfo)
+
         _ingest_items(statement_type="is", period_end=pe, items={
             "IS.REVENUE": revenue,
             "IS.COGS": cogs,
@@ -788,6 +1184,11 @@ def _ingest_and_analyze_non_cn_akshare(report_id: str) -> None:
         if has_metrics:
             rr.status = "done"
             rr.error_message = None
+            if resolved_period_end:
+                old_pe = rr.period_end
+                rr.period_end = resolved_period_end
+                if rr.report_name and old_pe and rr.report_name.endswith(old_pe):
+                    rr.report_name = f"{rr.report_name[:-len(old_pe)]}{resolved_period_end}"
         else:
             rr.status = "failed"
             rr.error_message = "未能从市场数据获取到可用的财务指标（HK/US）"
@@ -861,12 +1262,19 @@ def ingest_and_analyze_a_share(report_id: str) -> None:
     _ingest_statement(report_id, company_id, "bs", period_type, fin.balance, BALANCE_MAP, source="akshare_em")
     _ingest_statement(report_id, company_id, "cf", period_type, fin.cash, CASH_MAP, source="akshare_em")
 
-    _compute_metrics_and_alerts(report_id, company_id, focus_period_end=period_end, period_type=period_type)
+    available_periods = _sorted_periods(report_id)
+    focus_period_end = _pick_effective_period(period_end, available_periods) or period_end
+    _compute_metrics_and_alerts(report_id, company_id, focus_period_end=focus_period_end, period_type=period_type)
 
     with session_scope() as s:
         r2 = s.get(Report, report_id)
         if r2:
             r2.status = "done"
+            if focus_period_end:
+                old_pe = r2.period_end
+                r2.period_end = focus_period_end
+                if r2.report_name and old_pe and r2.report_name.endswith(old_pe):
+                    r2.report_name = f"{r2.report_name[:-len(old_pe)]}{focus_period_end}"
             r2.updated_at = int(time.time())
 
 
@@ -960,6 +1368,34 @@ def _compute_metrics_and_alerts(report_id: str, company_id: str, focus_period_en
                         value=m.value,
                         unit=m.unit,
                         calc_trace=dumps(m.calc_trace),
+                        created_at=int(time.time()),
+                    )
+                )
+
+            # Persist key raw amounts for UI display and year-over-year comparison.
+            raw_metrics = [
+                ("TOTAL_REVENUE", "营业总收入", cur_items.get("IS.REVENUE"), ""),
+                ("OPERATING_CASH_FLOW", "经营现金流量净额", cur_items.get("CF.CFO"), ""),
+            ]
+            for code, name, value, unit in raw_metrics:
+                if value is None:
+                    continue
+                try:
+                    fv = float(value)
+                except Exception:
+                    continue
+                s.add(
+                    ComputedMetric(
+                        id=str(uuid.uuid4()),
+                        report_id=report_id,
+                        company_id=company_id,
+                        period_end=pe,
+                        period_type=period_type,
+                        metric_code=code,
+                        metric_name=name,
+                        value=fv,
+                        unit=unit,
+                        calc_trace=dumps({"from": "statement_items", "source_code": "IS.REVENUE" if code == "TOTAL_REVENUE" else "CF.CFO"}),
                         created_at=int(time.time()),
                     )
                 )

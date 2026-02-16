@@ -406,30 +406,16 @@ def fetch_hk_financials(symbol: str, _v: int = 2) -> Optional[FinancialData]:
         except Exception:
             pass
         
-        # 从 info 获取比率（港股此字段经常异常，做合理性校验）
-        data.gross_margin = info.get("grossMargins") * 100 if info.get("grossMargins") else None
-        data.net_margin = info.get("profitMargins") * 100 if info.get("profitMargins") else None
-        data.roe = info.get("returnOnEquity") * 100 if info.get("returnOnEquity") else None
-        data.current_ratio = info.get("currentRatio")
+        # 港股：yfinance info 中的比率（ROE/ROA/margins）经常不准确，
+        # 仅暂存作为 AkShare 失败时的兜底值
+        _yf_gross_margin = info.get("grossMargins") * 100 if info.get("grossMargins") else None
+        _yf_net_margin = info.get("profitMargins") * 100 if info.get("profitMargins") else None
+        _yf_roe = info.get("returnOnEquity") * 100 if info.get("returnOnEquity") else None
+        _yf_roa = info.get("returnOnAssets") * 100 if info.get("returnOnAssets") else None
+        _yf_current_ratio = info.get("currentRatio")
 
-        try:
-            if data.gross_margin is not None:
-                gm = float(data.gross_margin)
-                if gm <= 0 or gm >= 80:
-                    data.gross_margin = None
-        except Exception:
-            pass
-
-        # 如果 yfinance 被限流或在当前环境拿不到关键数据，使用 AkShare 兜底
-        no_statements = (
-            data.revenue is None
-            and data.net_profit is None
-            and data.total_assets is None
-            and data.total_equity is None
-        )
-        no_ratios = (data.gross_margin is None and data.net_margin is None and data.roe is None and data.roa is None)
-
-        if yfinance_rate_limited or (no_statements and no_ratios) or (data.gross_margin is None):
+        # 港股始终优先使用 AkShare 获取财务指标（东方财富数据更准确）
+        if True:
             try:
                 import akshare as ak
 
@@ -557,7 +543,19 @@ def fetch_hk_financials(symbol: str, _v: int = 2) -> Optional[FinancialData]:
                     setattr(data, "error_detail", f"akshare_fallback_exception:{e}")
                 except Exception:
                     pass
-        
+
+        # AkShare 未能提供的比率，用 yfinance 兜底
+        if data.gross_margin is None and _yf_gross_margin is not None:
+            data.gross_margin = _yf_gross_margin
+        if data.net_margin is None and _yf_net_margin is not None:
+            data.net_margin = _yf_net_margin
+        if data.roe is None and _yf_roe is not None:
+            data.roe = _yf_roe
+        if data.roa is None and _yf_roa is not None:
+            data.roa = _yf_roa
+        if data.current_ratio is None and _yf_current_ratio is not None:
+            data.current_ratio = _yf_current_ratio
+
         return data
         
     except Exception as e:
