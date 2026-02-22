@@ -6553,6 +6553,7 @@
                         <div><label style="color:#666;font-size:12px;">大众点评差评数量</label><input id="dr-bad-dianping" type="number" placeholder="请输入差评数量" style="width:100%; padding:12px;"></div>
                         <div><label style="color:#666;font-size:12px;">美团外卖差评数量</label><input id="dr-bad-meituan" type="number" placeholder="请输入差评数量" style="width:100%; padding:12px;"></div>
                         <div><label style="color:#666;font-size:12px;">饿了么外卖差评数量</label><input id="dr-bad-eleme" type="number" placeholder="请输入差评数量" style="width:100%; padding:12px;"></div>
+                        <div><label style="color:#666;font-size:12px;">今日企微会员新增数量</label><input id="dr-new-wechat-members" type="number" placeholder="请输入企微会员新增数量" style="width:100%; padding:12px;"></div>
                     </div>
                 </div>
 
@@ -9294,21 +9295,13 @@
                     </div>
                 </div>
 
-                <!-- 入职信息 + 统计 -->
+                <!-- 档案信息 + 统计 -->
                 <div class="card" style="margin-bottom: 14px; padding: 20px;">
                     <div style="display:flex; align-items:center; gap: 10px; margin-bottom: 14px;">
                         <div style="width: 32px; height: 32px; border-radius: 8px; background: linear-gradient(135deg, rgba(249,115,22,0.2), rgba(249,115,22,0.1)); display:flex; align-items:center; justify-content:center; font-size: 16px;">📅</div>
-                        <span style="font-weight: 700; font-size: 15px;">入职信息</span>
+                        <span style="font-weight: 700; font-size: 15px;">档案信息</span>
                     </div>
                     <div style="display:grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 12px;">
-                        <div style="padding: 10px; border-radius: 10px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); text-align:center;">
-                            <div style="font-size: 11px; color: rgba(200,215,230,0.65);">入职日期</div>
-                            <div style="font-weight: 700; font-size: 13px; margin-top: 4px;" id="profile-join-date">--</div>
-                        </div>
-                        <div style="padding: 10px; border-radius: 10px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); text-align:center;">
-                            <div style="font-size: 11px; color: rgba(200,215,230,0.65);">工作年限</div>
-                            <div style="font-weight: 700; font-size: 13px; margin-top: 4px;" id="profile-work-years">--</div>
-                        </div>
                         <div style="padding: 10px; border-radius: 10px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); text-align:center;">
                             <div style="font-size: 11px; color: rgba(200,215,230,0.65);">级别</div>
                             <div style="font-weight: 700; font-size: 13px; margin-top: 4px;" id="profile-level">--</div>
@@ -9316,6 +9309,22 @@
                         <div style="padding: 10px; border-radius: 10px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); text-align:center;">
                             <div style="font-size: 11px; color: rgba(200,215,230,0.65);">直属上级</div>
                             <div style="font-weight: 700; font-size: 13px; margin-top: 4px;" id="profile-manager">--</div>
+                        </div>
+                        <div style="padding: 10px; border-radius: 10px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); text-align:center;">
+                            <div style="font-size: 11px; color: rgba(200,215,230,0.65);">绩效得分</div>
+                            <div style="font-weight: 700; font-size: 13px; margin-top: 4px;" id="profile-total-score">--</div>
+                        </div>
+                        <div style="padding: 10px; border-radius: 10px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); text-align:center;">
+                            <div style="font-size: 11px; color: rgba(200,215,230,0.65);">执行力等级</div>
+                            <div style="font-weight: 700; font-size: 13px; margin-top: 4px;" id="profile-execution-rating">--</div>
+                        </div>
+                        <div style="padding: 10px; border-radius: 10px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); text-align:center;">
+                            <div style="font-size: 11px; color: rgba(200,215,230,0.65);">工作态度等级</div>
+                            <div style="font-weight: 700; font-size: 13px; margin-top: 4px;" id="profile-attitude-rating">--</div>
+                        </div>
+                        <div style="padding: 10px; border-radius: 10px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); text-align:center;">
+                            <div style="font-size: 11px; color: rgba(200,215,230,0.65);">工作能力等级</div>
+                            <div style="font-weight: 700; font-size: 13px; margin-top: 4px;" id="profile-ability-rating">--</div>
                         </div>
                     </div>
                     <div style="display:grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom:10px;">
@@ -16856,16 +16865,16 @@ ${knowledgeContent.slice(0, 30000)}`;
                 modal.addEventListener('click', (e) => { if (e.target === modal) closeAgentConfigModal(); });
                 modal.dataset.boundClose = '1';
             }
-            modal.style.display = '';
-            modal.classList.add('show');
+            modal.style.display = 'flex';
+            modal.classList.add('open');
             switchAgentConfigTab('configs');
         }
 
         function closeAgentConfigModal() {
             const modal = document.getElementById('agent-config-modal');
             if (!modal) return;
-            modal.classList.remove('show');
-            modal.style.display = '';
+            modal.classList.remove('open');
+            modal.style.display = 'none';
         }
 
         function switchAgentConfigTab(tab) {
@@ -26350,18 +26359,6 @@ ${knowledgeContent.slice(0, 30000)}`;
                 }
             }
 
-            document.getElementById('profile-join-date').textContent = currentUser.joinDate || '--';
-            
-            // 计算工作年限
-            if (currentUser.joinDate) {
-                const joinDate = new Date(currentUser.joinDate);
-                const now = new Date();
-                const years = Math.floor((now - joinDate) / (365.25 * 24 * 60 * 60 * 1000));
-                document.getElementById('profile-work-years').textContent = years + '年';
-            } else {
-                document.getElementById('profile-work-years').textContent = '--';
-            }
-
             const username = String(currentUser.username || currentUser.id || '').trim();
             const usernameLower = username.toLowerCase();
             const data = HRMS_STORE.ensure();
@@ -26432,63 +26429,72 @@ ${knowledgeContent.slice(0, 30000)}`;
             try { loadProfileStoreRating(); } catch (e) {}
         }
 
-        // 加载本月门店级别
+        // 加载绩效分与门店级别（来自 HR 评分模型）
         async function loadProfileStoreRating() {
-            if (!currentUser) return;
-            const store = String(currentUser.store || '').trim();
-            if (!store) return;
-            
-            const now = new Date();
-            const period = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-            
+            const totalScoreEl = document.getElementById('profile-total-score');
+            const executionEl = document.getElementById('profile-execution-rating');
+            const attitudeEl = document.getElementById('profile-attitude-rating');
+            const abilityEl = document.getElementById('profile-ability-rating');
+            const badge = document.getElementById('profile-store-rating-badge');
+            const ratingEl = document.getElementById('profile-store-rating');
+
+            if (totalScoreEl) totalScoreEl.textContent = '--';
+            if (executionEl) executionEl.textContent = '--';
+            if (attitudeEl) attitudeEl.textContent = '--';
+            if (abilityEl) abilityEl.textContent = '--';
+
             try {
-                const resp = await fetch(`/api/agents/scores?limit=10`, {
+                const resp = await fetch('/api/agent-scores/me', {
                     headers: { 'Authorization': 'Bearer ' + (localStorage.getItem('hrms_token') || '') }
                 });
                 if (!resp.ok) return;
                 const data = await resp.json();
-                const items = Array.isArray(data?.items) ? data.items : [];
-                // 按门店和当前月份筛选
-                const filtered = items.filter(item => {
-                    const itemStore = String(item?.store || '').trim();
-                    const itemPeriod = String(item?.period || '').trim();
-                    return itemStore === store && itemPeriod === period;
-                });
-                if (filtered.length > 0) {
-                    const score = filtered[0];
-                    const storeRating = score?.breakdown?.store_rating || score?.store_rating;
-                    // 显示门店级别（null时显示待评估）
-                    const badge = document.getElementById('profile-store-rating-badge');
-                    const ratingEl = document.getElementById('profile-store-rating');
-                    if (badge && ratingEl) {
-                        const ratingText = storeRating ? storeRating + '级' : '待评估';
-                        ratingEl.textContent = ratingText;
-                        // 根据评级设置颜色
-                        const colors = {
-                            'A': 'rgba(34,197,94,0.95)',   // 绿色
-                            'B': 'rgba(59,130,246,0.95)', // 蓝色
-                            'C': 'rgba(245,158,11,0.95)', // 橙色
-                            'null': 'rgba(156,163,175,0.95)' // 灰色（待评估）
-                        };
-                        const bgColors = {
-                            'A': 'rgba(34,197,94,0.2)',
-                            'B': 'rgba(59,130,246,0.2)',
-                            'C': 'rgba(245,158,11,0.2)',
-                            'null': 'rgba(156,163,175,0.2)'
-                        };
-                        const borderColors = {
-                            'A': 'rgba(34,197,94,0.3)',
-                            'B': 'rgba(59,130,246,0.3)',
-                            'C': 'rgba(245,158,11,0.3)',
-                            'null': 'rgba(156,163,175,0.3)'
-                        };
-                        const ratingKey = storeRating || 'null';
-                        ratingEl.style.color = colors[ratingKey] || colors['null'];
-                        badge.style.background = `linear-gradient(135deg, ${bgColors[ratingKey] || bgColors['null']}, ${(bgColors[ratingKey] || bgColors['null']).replace('0.2', '0.1')})`;
-                        badge.style.borderColor = borderColors[ratingKey] || borderColors['null'];
-                        badge.style.display = 'block';
-                        }
-                    }
+
+                const totalScore = Number(data?.total_score);
+                const execution = String(data?.execution_rating || '').trim();
+                const attitude = String(data?.attitude_rating || '').trim();
+                const ability = String(data?.ability_rating || '').trim();
+                const storeRating = String(data?.store_rating || data?.breakdown?.store_rating || '').trim();
+
+                if (totalScoreEl) {
+                    totalScoreEl.textContent = Number.isFinite(totalScore)
+                        ? String(Number(totalScore.toFixed(1))).replace('.0', '')
+                        : '--';
+                }
+                if (executionEl) executionEl.textContent = execution || '--';
+                if (attitudeEl) attitudeEl.textContent = attitude || '--';
+                if (abilityEl) abilityEl.textContent = ability || '--';
+
+                if (badge && ratingEl) {
+                    const ratingText = storeRating ? `${storeRating}级` : '待评估';
+                    ratingEl.textContent = ratingText;
+                    const colors = {
+                        A: 'rgba(34,197,94,0.95)',
+                        B: 'rgba(59,130,246,0.95)',
+                        C: 'rgba(245,158,11,0.95)',
+                        D: 'rgba(239,68,68,0.95)',
+                        null: 'rgba(156,163,175,0.95)'
+                    };
+                    const bgColors = {
+                        A: 'rgba(34,197,94,0.2)',
+                        B: 'rgba(59,130,246,0.2)',
+                        C: 'rgba(245,158,11,0.2)',
+                        D: 'rgba(239,68,68,0.2)',
+                        null: 'rgba(156,163,175,0.2)'
+                    };
+                    const borderColors = {
+                        A: 'rgba(34,197,94,0.3)',
+                        B: 'rgba(59,130,246,0.3)',
+                        C: 'rgba(245,158,11,0.3)',
+                        D: 'rgba(239,68,68,0.3)',
+                        null: 'rgba(156,163,175,0.3)'
+                    };
+                    const ratingKey = storeRating || 'null';
+                    ratingEl.style.color = colors[ratingKey] || colors.null;
+                    badge.style.background = `linear-gradient(135deg, ${bgColors[ratingKey] || bgColors.null}, ${(bgColors[ratingKey] || bgColors.null).replace('0.2', '0.1')})`;
+                    badge.style.borderColor = borderColors[ratingKey] || borderColors.null;
+                    badge.style.display = 'block';
+                }
             } catch (e) {
                 console.warn('loadProfileStoreRating error:', e);
             }
@@ -28225,6 +28231,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                     meituan: drGetNum('dr-bad-meituan'),
                     eleme: drGetNum('dr-bad-eleme')
                 },
+                new_wechat_members: drGetNum('dr-new-wechat-members'),
                 recharge: {
                     count: drGetNum('dr-recharge-count'),
                     amount: drGetNum('dr-recharge-amt')
@@ -28492,6 +28499,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                 drSetValue('dr-bad-dianping', data?.badReviews?.dianping);
                 drSetValue('dr-bad-meituan', data?.badReviews?.meituan);
                 drSetValue('dr-bad-eleme', data?.badReviews?.eleme);
+                drSetValue('dr-new-wechat-members', data?.new_wechat_members);
                 drSetValue('dr-recharge-count', data?.recharge?.count);
                 drSetValue('dr-recharge-amt', data?.recharge?.amount);
                 // 目标字段：从系统设置读取，只读显示（只有毛利率目标）
@@ -30192,6 +30200,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                                 ${kv('大众点评', fmtInt(s.badDianping) + '条', null)}
                                 ${kv('美团外卖', fmtInt(s.badMeituan) + '条', null)}
                                 ${kv('饿了么外卖', fmtInt(s.badEleme) + '条', null)}
+                                ${kv('今日企微会员新增', fmtInt(s.newWechatMembers) + '人', null)}
                             `)}
 
                             ${section('充值统计', `
@@ -31170,8 +31179,8 @@ ${knowledgeContent.slice(0, 30000)}`;
                     const pctV = (n) => (Number(n||0)*100).toFixed(2)+'%';
                     const pctRV = (a,b) => b > 0 ? pctV(a/b) : '0.00%';
                     const fmtN = (n) => Number(n||0).toFixed(2);
-                    const header = ['门店','天数','目标','折前','实收','折扣','平均折扣率','堂食营收','堂食订单','堂食客流','桌均','人均','午市','下午茶','晚市','水吧金额','水吧人数','汤档金额','汤档人数','烧味金额','烧味人数','炒锅金额','炒锅人数','饿了么订单','饿了么折收','饿了么实收','饿了么目标','美团订单','美团折收','美团实收','美团目标','差评-大众点评','差评-美团','差评-饿了么','充值笔数','充值金额','用工','达成率','人效'];
-                    const mapRow = (r) => [r?.store||'', r?.days||0, r?.budget||0, r?.gross||0, r?.actual||0, r?.discount||0, pctRV(r?.discount,r?.gross), r?.dineRevenue||0, r?.dineOrders||0, r?.dineTraffic||0, (r?.dineAvgTable||0).toFixed(2), (r?.dineAvgPerson||0).toFixed(2), r?.segNoon||0, r?.segAfternoon||0, r?.segNight||0, r?.catWaterAmt||0, r?.catWaterQty||0, r?.catSoupAmt||0, r?.catSoupQty||0, r?.catRoastAmt||0, r?.catRoastQty||0, r?.catWokAmt||0, r?.catWokQty||0, r?.elemeOrders||0, r?.elemeRevenue||0, r?.elemeActual||0, r?.elemeTarget||0, r?.meituanOrders||0, r?.meituanRevenue||0, r?.meituanActual||0, r?.meituanTarget||0, r?.badDianping||0, r?.badMeituan||0, r?.badEleme||0, r?.rechargeCount||0, r?.rechargeAmount||0, r?.laborTotal||0, pctV(r?.budgetRate), r?.efficiency||0];
+                    const header = ['门店','天数','目标','折前','实收','折扣','平均折扣率','堂食营收','堂食订单','堂食客流','桌均','人均','午市','下午茶','晚市','水吧金额','水吧人数','汤档金额','汤档人数','烧味金额','烧味人数','炒锅金额','炒锅人数','饿了么订单','饿了么折收','饿了么实收','饿了么目标','美团订单','美团折收','美团实收','美团目标','差评-大众点评','差评-美团','差评-饿了么','企微新增会员','充值笔数','充值金额','用工','达成率','人效'];
+                    const mapRow = (r) => [r?.store||'', r?.days||0, r?.budget||0, r?.gross||0, r?.actual||0, r?.discount||0, pctRV(r?.discount,r?.gross), r?.dineRevenue||0, r?.dineOrders||0, r?.dineTraffic||0, (r?.dineAvgTable||0).toFixed(2), (r?.dineAvgPerson||0).toFixed(2), r?.segNoon||0, r?.segAfternoon||0, r?.segNight||0, r?.catWaterAmt||0, r?.catWaterQty||0, r?.catSoupAmt||0, r?.catSoupQty||0, r?.catRoastAmt||0, r?.catRoastQty||0, r?.catWokAmt||0, r?.catWokQty||0, r?.elemeOrders||0, r?.elemeRevenue||0, r?.elemeActual||0, r?.elemeTarget||0, r?.meituanOrders||0, r?.meituanRevenue||0, r?.meituanActual||0, r?.meituanTarget||0, r?.badDianping||0, r?.badMeituan||0, r?.badEleme||0, r?.newWechatMembers||0, r?.rechargeCount||0, r?.rechargeAmount||0, r?.laborTotal||0, pctV(r?.budgetRate), r?.efficiency||0];
                     const body = rows.map(mapRow);
                     if (total) body.push(mapRow(total));
                     const allRows = [header].concat(body);
@@ -31385,6 +31394,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                             ${kvRow('大众点评',fmtI(s?.badDianping)+'条')}
                             ${kvRow('美团外卖',fmtI(s?.badMeituan)+'条')}
                             ${kvRow('饿了么外卖',fmtI(s?.badEleme)+'条')}
+                            ${kvRow('今日企微会员新增',fmtI(s?.newWechatMembers)+'人')}
                         </div>
 
                         <div class="sec">

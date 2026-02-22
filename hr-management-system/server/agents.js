@@ -32,6 +32,7 @@ import { pool as agentPool, setPool as setUnifiedAgentPool } from './utils/datab
 import { safeExecute, safeErrorLog } from './utils/error-handler.js';
 import { handleMarginMessage } from './margin-message-handler.js';
 import { deduplicateMessage } from './message-deduplication.js';
+import { getOpsAgentConfig } from './agent-config-manager.js';
 
 // ─────────────────────────────────────────────
 // 0. Config
@@ -116,6 +117,24 @@ const BITABLE_CONFIGS = {
     pollingInterval: 300000
   }
 };
+
+async function refreshOpsAgentRuntimeConfig() {
+  try {
+    const remote = await getOpsAgentConfig();
+    if (remote && typeof remote === 'object') {
+      OPS_AGENT_CONFIG = {
+        ...OPS_AGENT_CONFIG,
+        ...remote,
+        scheduledTasks: {
+          ...(OPS_AGENT_CONFIG?.scheduledTasks || {}),
+          ...(remote?.scheduledTasks || {})
+        }
+      };
+    }
+  } catch (e) {
+    console.error('[ops] refresh runtime config failed:', e?.message || e);
+  }
+}
 
 // 向后兼容的默认配置
 const BITABLE_APP_ID = process.env.BITABLE_APP_ID || BITABLE_CONFIGS.ops_checklist.appId;
@@ -1141,6 +1160,10 @@ function normProductKey(v) {
   return String(v || '').trim().toLowerCase().replace(/\s+/g, '');
 }
 
+function normalizeStoreKey(v) {
+  return String(v || '').trim().toLowerCase().replace(/\s+/g, '');
+}
+
 function getMonthlyTarget(state, ym, store) {
   const settings = state?.settings && typeof state.settings === 'object' ? state.settings : {};
   const monthlyTargets = Array.isArray(settings?.monthlyTargets)
@@ -1269,14 +1292,18 @@ async function loadTableVisitMetricsByStore(store, startDate, endDate) {
   const out = {
     countByDate: new Map(),
     dissatisfiedProducts: new Map(),
-    dissatisfiedByDate: new Map()
+    dissatisfiedByDate: new Map(),
+    productLabelByKey: new Map()
   };
   try {
+    const normalizedStore = normalizeStoreKey(store);
     const r = await pool().query(
-      `SELECT date::text AS date, dissatisfaction_dish
+      `SELECT date::text AS date, dissatisfaction_dish, unsatisfied_items
        FROM table_visit_records
-       WHERE store = $1 AND date >= $2::date AND date <= $3::date`,
-      [store, startDate, endDate]
+       WHERE lower(regexp_replace(store, '\\s+', '', 'g')) = $1
+         AND date >= $2::date
+         AND date <= $3::date`,
+      [normalizedStore, startDate, endDate]
     );
 
     for (const row of (r.rows || [])) {
@@ -1284,17 +1311,20 @@ async function loadTableVisitMetricsByStore(store, startDate, endDate) {
       if (!d) continue;
       out.countByDate.set(d, (out.countByDate.get(d) || 0) + 1);
 
-      const rawDish = String(row?.dissatisfaction_dish || '').trim();
+      const rawDish = `${String(row?.dissatisfaction_dish || '').trim()} ${String(row?.unsatisfied_items || '').trim()}`.trim();
       if (!rawDish) continue;
       rawDish
-        .split(/[，,、\/\s]+/)
+        .split(/[，,、\/;；|\n\r\t\s]+/)
         .map((x) => String(x || '').trim())
         .filter(Boolean)
         .forEach((product) => {
-          const key = `${store}||${product}`;
+          const productKey = normProductKey(product);
+          if (!productKey) return;
+          const key = `${normalizedStore}||${productKey}`;
           out.dissatisfiedProducts.set(key, (out.dissatisfiedProducts.get(key) || 0) + 1);
+          if (!out.productLabelByKey.has(productKey)) out.productLabelByKey.set(productKey, product);
           const dateSet = out.dissatisfiedByDate.get(d) || new Set();
-          dateSet.add(product);
+          dateSet.add(productKey);
           out.dissatisfiedByDate.set(d, dateSet);
         });
     }
@@ -2068,25 +2098,71 @@ export { startScheduledTasks };
 // 定时任务调度器
 // ─────────────────────────────────────────────
 
-const SCHEDULED_TASKS = {
+const DEFAULT_SCHEDULED_TASKS = {
   '洪潮_开市': { time: '10:30', action: 'send_checklist', brand: '洪潮', checkType: 'opening' },
   '马己仙_收档': { time: '22:30', action: 'send_checklist', brand: '马己仙', checkType: 'closing' },
   '食安抽检': { random: true, interval: [2, 4], action: 'safety_check' }
 };
 
 let _scheduledTaskIntervals = new Map();
+const _scheduledTaskRuntimeStatus = new Map();
 
-function startScheduledTasks() {
+function buildScheduledTasksFromConfig() {
+  const runtime = { ...DEFAULT_SCHEDULED_TASKS };
+  const inspections = Array.isArray(OPS_AGENT_CONFIG?.scheduledTasks?.dailyInspections)
+    ? OPS_AGENT_CONFIG.scheduledTasks.dailyInspections
+    : [];
+
+  for (const inspection of inspections) {
+    const brand = String(inspection?.brand || '').trim();
+    const type = String(inspection?.type || '').trim();
+    const time = String(inspection?.time || '').trim();
+    if (!brand || !type || !time) continue;
+    const key = `${brand}_${type === 'opening' ? '开市' : type === 'closing' ? '收档' : type}`;
+    runtime[key] = {
+      time,
+      action: 'send_checklist',
+      brand,
+      checkType: type
+    };
+  }
+  return runtime;
+}
+
+export function getScheduledTaskStatus() {
+  const tasks = Array.from(_scheduledTaskRuntimeStatus.entries()).map(([taskKey, status]) => ({
+    taskKey,
+    ...status
+  }));
+  return {
+    started: _scheduledTaskIntervals.size > 0,
+    activeTimers: _scheduledTaskIntervals.size,
+    tasks
+  };
+}
+
+async function startScheduledTasks() {
   console.log('[ops] starting scheduled tasks...');
+  await refreshOpsAgentRuntimeConfig();
+  const runtimeTasks = buildScheduledTasksFromConfig();
   
   // 清除现有定时器
-  for (const [key, interval] of _scheduledTaskIntervals) {
-    clearInterval(interval);
+  for (const [, timer] of _scheduledTaskIntervals) {
+    clearTimeout(timer);
   }
   _scheduledTaskIntervals.clear();
+  _scheduledTaskRuntimeStatus.clear();
   
   // 设置定时任务
-  for (const [taskKey, config] of Object.entries(SCHEDULED_TASKS)) {
+  for (const [taskKey, config] of Object.entries(runtimeTasks)) {
+    _scheduledTaskRuntimeStatus.set(taskKey, {
+      taskKey,
+      action: config.action,
+      nextExecutionAt: null,
+      lastRunAt: null,
+      runCount: 0,
+      lastError: null
+    });
     if (config.random) {
       // 随机任务
       scheduleRandomTask(taskKey, config);
@@ -2112,11 +2188,17 @@ function scheduleFixedTask(taskKey, config) {
     }
     
     const msUntilExecution = nextExecution.getTime() - now.getTime();
+    const status = _scheduledTaskRuntimeStatus.get(taskKey);
+    if (status) {
+      status.nextExecutionAt = nextExecution.toISOString();
+      _scheduledTaskRuntimeStatus.set(taskKey, status);
+    }
     
-    setTimeout(() => {
+    const timer = setTimeout(() => {
       executeScheduledTask(taskKey, config);
-      scheduleNextTask(); // 递归调度下一次
+      scheduleNext(); // 递归调度下一次
     }, msUntilExecution);
+    _scheduledTaskIntervals.set(taskKey, timer);
     
     console.log(`[ops] scheduled ${taskKey} for: ${nextExecution.toISOString()}`);
   };
@@ -2131,13 +2213,19 @@ function scheduleRandomTask(taskKey, config) {
     // 随机间隔：2-4小时
     const intervalHours = Math.floor(Math.random() * (maxHours - minHours + 1)) + minHours;
     const intervalMs = intervalHours * 60 * 60 * 1000;
-    
-    setTimeout(() => {
-      executeScheduledTask(taskKey, config);
-      scheduleNextTask(); // 递归调度下一次
-    }, intervalMs);
-    
     const nextExecution = new Date(Date.now() + intervalMs);
+    const status = _scheduledTaskRuntimeStatus.get(taskKey);
+    if (status) {
+      status.nextExecutionAt = nextExecution.toISOString();
+      _scheduledTaskRuntimeStatus.set(taskKey, status);
+    }
+    
+    const timer = setTimeout(() => {
+      executeScheduledTask(taskKey, config);
+      scheduleNext(); // 递归调度下一次
+    }, intervalMs);
+    _scheduledTaskIntervals.set(taskKey, timer);
+    
     console.log(`[ops] scheduled random ${taskKey} for: ${nextExecution.toISOString()} (interval: ${intervalHours}h)`);
   };
   
@@ -2146,6 +2234,17 @@ function scheduleRandomTask(taskKey, config) {
 
 async function executeScheduledTask(taskKey, config) {
   console.log(`[ops] executing scheduled task: ${taskKey}`);
+  const status = _scheduledTaskRuntimeStatus.get(taskKey) || {
+    taskKey,
+    action: config?.action || '',
+    nextExecutionAt: null,
+    lastRunAt: null,
+    runCount: 0,
+    lastError: null
+  };
+  status.lastRunAt = new Date().toISOString();
+  status.runCount = Number(status.runCount || 0) + 1;
+  status.lastError = null;
   
   try {
     switch (config.action) {
@@ -2159,7 +2258,10 @@ async function executeScheduledTask(taskKey, config) {
         console.log(`[ops] unknown task action: ${config.action}`);
     }
   } catch (e) {
+    status.lastError = String(e?.message || e);
     console.error(`[ops] scheduled task ${taskKey} failed:`, e?.message);
+  } finally {
+    _scheduledTaskRuntimeStatus.set(taskKey, status);
   }
 }
 
@@ -2811,7 +2913,8 @@ export async function runDataAuditor() {
     const productComplaints = tableVisitMetrics.dissatisfiedProducts;
     for (const [key, count] of productComplaints) {
       if (count >= 2) {
-        const [, product] = key.split('||');
+        const [, productKey] = key.split('||');
+        const product = tableVisitMetrics.productLabelByKey.get(productKey) || productKey || '未知产品';
         issues.push({
           agent: 'data_auditor', brand, store: storeName, category: '桌访产品异常',
           severity: count >= 4 ? 'high' : 'medium',
@@ -2981,7 +3084,7 @@ export async function runDataAuditor() {
 // ─────────────────────────────────────────────
 
 // 营运督导员工作职责配置
-const OPS_AGENT_CONFIG = {
+let OPS_AGENT_CONFIG = {
   // 任务调度与主动触发
   scheduledTasks: {
     // 开/收市巡检
@@ -4769,9 +4872,20 @@ export function registerAgentRoutes(app, authRequired) {
     const role = String(req.user?.role || '').trim();
     if (!['admin', 'hq_manager'].includes(role)) return res.status(403).json({ error: 'forbidden' });
     try {
-      return res.json(getAgentPerformanceMetrics());
+      const metrics = getAgentPerformanceMetrics();
+      res.json({ metrics });
     } catch (e) {
-      return res.status(500).json({ error: String(e?.message || e) });
+      res.status(500).json({ error: String(e?.message || e) });
+    }
+  });
+
+  app.get('/api/agents/scheduler-status', authRequired, async (req, res) => {
+    const role = String(req.user?.role || '').trim();
+    if (!['admin', 'hq_manager', 'hr_manager'].includes(role)) return res.status(403).json({ error: 'forbidden' });
+    try {
+      res.json({ scheduler: getScheduledTaskStatus() });
+    } catch (e) {
+      res.status(500).json({ error: String(e?.message || e) });
     }
   });
 
@@ -4823,9 +4937,21 @@ export function registerAgentRoutes(app, authRequired) {
         `SELECT total_score, breakdown, summary, period, brand, store FROM agent_scores WHERE username = $1 ORDER BY created_at DESC LIMIT 1`,
         [username]
       );
-      if (!r.rows?.length) return res.json({ total_score: null, breakdown: {} });
+      if (!r.rows?.length) return res.json({ total_score: null, breakdown: {}, execution_rating: null, attitude_rating: null, ability_rating: null, store_rating: null });
       const row = r.rows[0];
-      return res.json({ total_score: row.total_score, breakdown: row.breakdown || {}, summary: row.summary, period: row.period, brand: row.brand, store: row.store });
+      const breakdown = row.breakdown || {};
+      return res.json({
+        total_score: row.total_score,
+        breakdown,
+        summary: row.summary,
+        period: row.period,
+        brand: row.brand,
+        store: row.store,
+        execution_rating: breakdown.execution_rating || null,
+        attitude_rating: breakdown.attitude_rating || null,
+        ability_rating: breakdown.ability_rating || null,
+        store_rating: breakdown.store_rating || null
+      });
     } catch (e) { return res.status(500).json({ error: String(e?.message || e) }); }
   });
 

@@ -4575,19 +4575,21 @@ app.post('/api/daily-reports', authRequired, async (req, res) => {
       // 同时更新到daily_reports表（只保存实际数据，目标从系统设置读取）
       await safeExecute('daily_report_update', async () => {
         await pool.query(`
-          INSERT INTO daily_reports (store, brand, date, actual_revenue, actual_margin, dianping_rating, submitted, submitted_at)
-          VALUES ($1, $2, $3, $4, $5, $6, true, NOW())
+          INSERT INTO daily_reports (store, brand, date, actual_revenue, actual_margin, dianping_rating, new_wechat_members, submitted, submitted_at)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, true, NOW())
           ON CONFLICT (store, date)
           DO UPDATE SET 
             actual_revenue = EXCLUDED.actual_revenue,
             actual_margin = EXCLUDED.actual_margin,
             dianping_rating = EXCLUDED.dianping_rating,
+            new_wechat_members = EXCLUDED.new_wechat_members,
             updated_at = NOW()
         `, [
           store, brand, date, 
           payload?.actual || 0,
           payload?.margin || null, 
-          payload?.dianping_rating || null
+          payload?.dianping_rating || null,
+          payload?.new_wechat_members || 0
         ]);
       });
 
@@ -4613,6 +4615,30 @@ app.post('/api/daily-reports', authRequired, async (req, res) => {
         item.submittedAt = now;
         item.submittedBy = username;
       }
+
+      // 新建日报时也必须同步到 daily_reports（否则评分模型/Agent 数据源会缺失）
+      await safeExecute('daily_report_insert', async () => {
+        await pool.query(`
+          INSERT INTO daily_reports (store, brand, date, actual_revenue, actual_margin, dianping_rating, new_wechat_members, submitted, submitted_at)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, true, NOW())
+          ON CONFLICT (store, date)
+          DO UPDATE SET
+            actual_revenue = EXCLUDED.actual_revenue,
+            actual_margin = EXCLUDED.actual_margin,
+            dianping_rating = EXCLUDED.dianping_rating,
+            new_wechat_members = EXCLUDED.new_wechat_members,
+            updated_at = NOW()
+        `, [
+          store,
+          String(payload?.brand || '').trim(),
+          date,
+          payload?.actual || 0,
+          payload?.margin || null,
+          payload?.dianping_rating || null,
+          payload?.new_wechat_members || 0
+        ]);
+      });
+
       shouldNotifySchedule = !!wantSubmit;
       list.unshift(item);
     }
@@ -5927,6 +5953,7 @@ app.get('/api/reports/business', authRequired, async (req, res) => {
       store: st, days: 0, budget: 0, gross: 0, actual: 0,
       discount: 0, discountDine: 0, discountDelivery: 0,
       rechargeCount: 0, rechargeAmount: 0,
+      newWechatMembers: 0,
       dineRevenue: 0, dineOrders: 0, dineTraffic: 0,
       segNoon: 0, segAfternoon: 0, segNight: 0,
       catWaterAmt: 0, catWaterQty: 0, catSoupAmt: 0, catSoupQty: 0,
@@ -5952,6 +5979,7 @@ app.get('/api/reports/business', authRequired, async (req, res) => {
       prev.discountDelivery += clampNum(data?.discount?.delivery, 0);
       prev.rechargeCount += clampNum(data?.recharge?.count, 0);
       prev.rechargeAmount += clampNum(data?.recharge?.amount, 0);
+      prev.newWechatMembers += clampNum(data?.new_wechat_members, 0);
       prev.dineRevenue += clampNum(data?.dine?.revenue, 0);
       prev.dineOrders += clampNum(data?.dine?.orders, 0);
       prev.dineTraffic += clampNum(data?.dine?.traffic, 0);
@@ -5991,7 +6019,7 @@ app.get('/api/reports/business', authRequired, async (req, res) => {
     };
     rows.forEach(computeDerived);
 
-    const sumKeys = ['days','budget','gross','actual','discount','discountDine','discountDelivery','rechargeCount','rechargeAmount','dineRevenue','dineOrders','dineTraffic','segNoon','segAfternoon','segNight','catWaterAmt','catWaterQty','catSoupAmt','catSoupQty','catRoastAmt','catRoastQty','catWokAmt','catWokQty','elemeOrders','elemeRevenue','elemeActual','elemeTarget','meituanOrders','meituanRevenue','meituanActual','meituanTarget','badDianping','badMeituan','badEleme','laborTotal'];
+    const sumKeys = ['days','budget','gross','actual','discount','discountDine','discountDelivery','rechargeCount','rechargeAmount','newWechatMembers','dineRevenue','dineOrders','dineTraffic','segNoon','segAfternoon','segNight','catWaterAmt','catWaterQty','catSoupAmt','catSoupQty','catRoastAmt','catRoastQty','catWokAmt','catWokQty','elemeOrders','elemeRevenue','elemeActual','elemeTarget','meituanOrders','meituanRevenue','meituanActual','meituanTarget','badDianping','badMeituan','badEleme','laborTotal'];
     const total = emptyAgg('合计');
     rows.forEach(x => { sumKeys.forEach(k => { total[k] += (x[k] || 0); }); });
     computeDerived(total);
@@ -10373,6 +10401,9 @@ app.get('/api/agent/table-visit-data', authRequired, async (req, res) => {
     }
     
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const baseCond = conditions.length > 0 ? conditions.join(' AND ') : 'TRUE';
+    const whereWithSatisfaction = `WHERE ${baseCond} AND satisfaction_level IS NOT NULL AND satisfaction_level != ''`;
+    const whereWithWeather = `WHERE ${baseCond} AND weather IS NOT NULL AND weather != ''`;
     const limitClause = `LIMIT ${Math.min(parseInt(limit, 10) || 100, 1000)} OFFSET ${Math.max(parseInt(offset, 10) || 0, 0)}`;
     
     const query = `
@@ -10501,7 +10532,7 @@ app.get('/api/agent/table-visit-summary', authRequired, async (req, res) => {
     const satisfactionQuery = `
       SELECT satisfaction_level, COUNT(*) as count
       FROM table_visit_records 
-      ${whereClause} AND satisfaction_level IS NOT NULL AND satisfaction_level != ''
+      ${whereWithSatisfaction}
       GROUP BY satisfaction_level
       ORDER BY count DESC
     `;
@@ -10515,7 +10546,7 @@ app.get('/api/agent/table-visit-summary', authRequired, async (req, res) => {
              AVG(amount) as avg_amount,
              AVG(service_rating) as avg_service_rating
       FROM table_visit_records 
-      ${whereClause} AND weather IS NOT NULL AND weather != ''
+      ${whereWithWeather}
       GROUP BY weather
       ORDER BY visits DESC
     `;
@@ -10617,6 +10648,8 @@ app.listen(PORT, HOST, async () => {
 
   // Initialize multi-agent system
   try {
+    // Runtime migration: 企微会员新增字段（避免旧库缺字段导致评分数据源为空）
+    await pool.query(`ALTER TABLE daily_reports ADD COLUMN IF NOT EXISTS new_wechat_members INTEGER DEFAULT 0`);
     await ensureAgentTables();
     startAgentScheduler();
     console.log('[agents] Multi-agent system initialized');
