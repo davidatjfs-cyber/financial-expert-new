@@ -10545,7 +10545,7 @@ app.get('/api/agent/table-visit-summary', authRequired, async (req, res) => {
 app.post('/api/training/tasks/batch', authRequired, async (req, res) => {
   const role = String(req.user?.role || '').trim();
   // 仅限管理员或HR执行批量下发
-  if (!['admin', 'hr_manager'].includes(role)) {
+  if (!['admin', 'hr_manager', 'hq_manager'].includes(role)) {
     return res.status(403).json({ error: 'forbidden', message: '只有管理员或HR可以批量下发培训任务' });
   }
 

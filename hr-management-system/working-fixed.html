@@ -6693,30 +6693,86 @@
                         </div>
                         <button class="am-close" onclick="closeAgentConfigModal()">×</button>
                     </div>
-                    <div class="am-nav">
-                        <button id="agent-config-tab-btn-configs" class="am-nav-btn active" onclick="switchAgentConfigTab('configs')"><span>基础配置</span></button>
-                        <button id="agent-config-tab-btn-rules" class="am-nav-btn btn-secondary" onclick="switchAgentConfigTab('rules')"><span>责任人/扣分规则</span></button>
-                        <button id="agent-config-tab-btn-templates" class="am-nav-btn btn-secondary" onclick="switchAgentConfigTab('templates')"><span>模板库</span></button>
-                        <button id="agent-config-tab-btn-hr-rating" class="am-nav-btn btn-secondary" onclick="switchAgentConfigTab('hr_rating')"><span>HR评级模型</span></button>
+                    <div class="am-nav" style="overflow-x: auto; white-space: nowrap; -webkit-overflow-scrolling: touch; padding: 10px 16px; scrollbar-width: none;">
+                        <style>
+                            .am-nav::-webkit-scrollbar { display: none; }
+                        </style>
+                        <button id="agent-config-tab-btn-configs" class="am-nav-btn active" onclick="switchAgentConfigTab('configs')" style="flex-shrink: 0;"><span>基础配置</span></button>
+                        <button id="agent-config-tab-btn-op_config" class="am-nav-btn btn-secondary" onclick="switchAgentConfigTab('op_config')" style="flex-shrink: 0;"><span>OP巡检配置</span></button>
+                        <button id="agent-config-tab-btn-rules" class="am-nav-btn btn-secondary" onclick="switchAgentConfigTab('rules')" style="flex-shrink: 0;"><span>责任人规则</span></button>
+                        <button id="agent-config-tab-btn-templates" class="am-nav-btn btn-secondary" onclick="switchAgentConfigTab('templates')" style="flex-shrink: 0;"><span>模板库</span></button>
+                        <button id="agent-config-tab-btn-hr-rating" class="am-nav-btn btn-secondary" onclick="switchAgentConfigTab('hr_rating')" style="flex-shrink: 0;"><span>HR评级模型</span></button>
                     </div>
-                    <div class="am-body">
+                    <div class="am-body" style="background: rgba(2, 6, 23, 0.4);">
                         <div id="agent-config-tab-configs" class="am-tab-panel">
-                            <div id="agent-configs-list" class="am-list"></div>
+                            <div id="agent-configs-list" class="am-list" style="gap: 16px;"></div>
                         </div>
-                        <div id="agent-config-tab-rules" class="am-tab-panel" style="display:none;">
-                            <div style="display:flex;justify-content:flex-end;margin-bottom:10px;">
-                                <button class="btn" onclick="openAgentRuleEditor('')">新增规则</button>
+
+                        <div id="agent-config-tab-op_config" class="am-tab-panel" style="display:none; gap: 16px;">
+                            <div class="am-card" style="padding: 20px;">
+                                <div style="font-weight: 600; font-size: 15px; margin-bottom: 16px; display: flex; align-items: center; gap: 8px;">
+                                    <span style="font-size: 18px;">👥</span> 派单人员角色
+                                </div>
+                                <div style="font-size: 12px; color: #94a3b8; margin-bottom: 12px;">选择哪些角色可以接收和处理异常任务</div>
+                                <div style="display:flex; flex-wrap: wrap; gap: 12px;" id="op-config-dispatchers">
+                                    <label style="display:flex; align-items:center; gap:6px; font-size:13px; color:#e2e8f0; cursor:pointer;"><input type="checkbox" value="store_manager" checked style="accent-color:#3b82f6;"> 店长</label>
+                                    <label style="display:flex; align-items:center; gap:6px; font-size:13px; color:#e2e8f0; cursor:pointer;"><input type="checkbox" value="store_production_manager" checked style="accent-color:#3b82f6;"> 出品经理</label>
+                                    <label style="display:flex; align-items:center; gap:6px; font-size:13px; color:#e2e8f0; cursor:pointer;"><input type="checkbox" value="store_staff" style="accent-color:#3b82f6;"> 店员</label>
+                                </div>
                             </div>
-                            <div class="am-card" style="overflow:auto;">
-                                <table style="width:100%; border-collapse:collapse;">
-                                    <thead>
-                                        <tr>
-                                            <th style="text-align:left; padding:8px;">异常类型</th>
-                                            <th style="text-align:left; padding:8px;">责任人角色</th>
-                                            <th style="text-align:left; padding:8px;">中度扣分</th>
-                                            <th style="text-align:left; padding:8px;">重度扣分</th>
-                                            <th style="text-align:left; padding:8px;">状态</th>
-                                            <th style="text-align:left; padding:8px;">操作</th>
+
+                            <div class="am-card" style="padding: 20px;">
+                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                                    <div style="font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 8px;">
+                                        <span style="font-size: 18px;">📋</span> 日常巡检任务 (开/收市)
+                                    </div>
+                                    <button class="btn" onclick="addOpConfigDailyInspection()" style="padding: 6px 12px; font-size: 12px;">+ 添加</button>
+                                </div>
+                                <div id="op-config-daily-list" style="display: flex; flex-direction: column; gap: 12px;"></div>
+                            </div>
+
+                            <div class="am-card" style="padding: 20px;">
+                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                                    <div style="font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 8px;">
+                                        <span style="font-size: 18px;">🎲</span> 随机抽检 (食安等)
+                                    </div>
+                                    <button class="btn" onclick="addOpConfigRandomInspection()" style="padding: 6px 12px; font-size: 12px;">+ 添加</button>
+                                </div>
+                                <div id="op-config-random-list" style="display: flex; flex-direction: column; gap: 12px;"></div>
+                            </div>
+                            
+                            <div style="display:flex;justify-content:flex-end;margin-top:8px;">
+                                <button class="btn" onclick="saveOpAgentConfig()" style="padding: 12px 24px; font-weight: 600; background: linear-gradient(135deg, #3b82f6, #2563eb);">保存OP配置</button>
+                            </div>
+                        </div>
+
+                        <div id="agent-config-tab-rules" class="am-tab-panel" style="display:none;">
+                            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 12px; flex-wrap: wrap; gap: 10px;">
+                                <div style="font-weight: 600; font-size: 15px; color: rgba(255,255,255,0.9);">责任人/扣分规则</div>
+                                <button class="btn" onclick="openAgentRuleEditor('')" style="padding: 8px 16px;">+ 新增规则</button>
+                            </div>
+                            
+                            <!-- 移动端卡片视图 (默认隐藏，通过CSS在移动端显示) -->
+                            <style>
+                                .rules-table-view { display: block; }
+                                .rules-card-view { display: none; }
+                                @media (max-width: 768px) {
+                                    .rules-table-view { display: none; }
+                                    .rules-card-view { display: flex; flex-direction: column; gap: 12px; }
+                                }
+                            </style>
+                            <div id="agent-rules-card-list" class="rules-card-view"></div>
+                            
+                            <!-- 桌面端表格视图 -->
+                            <div class="rules-table-view" style="overflow-x:auto; background: rgba(0,0,0,0.2); border-radius: 12px; border: 1px solid rgba(255,255,255,0.08);">
+                                <table class="am-table" style="width:100%;text-align:left;border-collapse:collapse;font-size:13px;color:#e2e8f0;">
+                                    <thead style="background: rgba(255,255,255,0.04);">
+                                        <tr style="border-bottom:1px solid rgba(255,255,255,0.1);">
+                                            <th style="padding:12px 16px; font-weight: 600; color: #94a3b8;">分类 / 子分类</th>
+                                            <th style="padding:12px 16px; font-weight: 600; color: #94a3b8;">责任人角色</th>
+                                            <th style="padding:12px 16px; font-weight: 600; color: #94a3b8;">扣分</th>
+                                            <th style="padding:12px 16px; font-weight: 600; color: #94a3b8; text-align:center;">高优</th>
+                                            <th style="padding:12px 16px; font-weight: 600; color: #94a3b8; text-align:right;">操作</th>
                                         </tr>
                                     </thead>
                                     <tbody id="agent-rules-tbody"></tbody>
@@ -12840,7 +12896,7 @@
 
             try {
                 const trainingBatchBtn = document.getElementById('btn-training-batch-assign');
-                if (trainingBatchBtn) trainingBatchBtn.style.display = isAdminUser() ? '' : 'none';
+                if (trainingBatchBtn) trainingBatchBtn.style.display = (isAdminUser() || (currentUser && (currentUser.role === ROLES.HR_MANAGER || currentUser.role === ROLES.HQ_MANAGER))) ? '' : 'none';
             } catch (e) {}
 
             updateMobileNavigationVisibility();
@@ -16503,6 +16559,200 @@ ${knowledgeContent.slice(0, 30000)}`;
         let __AGENT_TEMPLATES = [];
         let __AGENT_TEMPLATE_MAP = {};
 
+        async function loadOpAgentConfig() {
+            try {
+                const res = await fetch('/api/admin/agents/ops-config', { headers: { 'Authorization': `Bearer ${localStorage.getItem('hrms_token')}` } });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.error);
+                
+                const cfg = data.config || {};
+                
+                // 1. Dispatchers
+                const dispatchers = cfg.dispatchers || [];
+                document.querySelectorAll('#op-config-dispatchers input[type="checkbox"]').forEach(cb => {
+                    cb.checked = dispatchers.includes(cb.value);
+                });
+
+                // 2. Daily Inspections
+                const dailyList = document.getElementById('op-config-daily-list');
+                const dailyInspections = cfg.scheduledTasks?.dailyInspections || [];
+                dailyList.innerHTML = dailyInspections.map((item, idx) => `
+                    <div class="am-card" style="padding: 12px; margin-bottom: 0; background: rgba(255,255,255,0.02); border: 1px dashed rgba(255,255,255,0.1);">
+                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin-bottom: 8px;">
+                            <div>
+                                <label style="font-size:11px;color:#94a3b8;display:block;margin-bottom:4px;">品牌</label>
+                                <select class="op-daily-brand" style="width:100%; padding: 8px; border-radius: 6px; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.1); color: #fff;">
+                                    <option value="洪潮" ${item.brand === '洪潮' ? 'selected' : ''}>洪潮</option>
+                                    <option value="马己仙" ${item.brand === '马己仙' ? 'selected' : ''}>马己仙</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label style="font-size:11px;color:#94a3b8;display:block;margin-bottom:4px;">类型</label>
+                                <select class="op-daily-type" style="width:100%; padding: 8px; border-radius: 6px; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.1); color: #fff;">
+                                    <option value="opening" ${item.type === 'opening' ? 'selected' : ''}>开市 (Opening)</option>
+                                    <option value="closing" ${item.type === 'closing' ? 'selected' : ''}>收市 (Closing)</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label style="font-size:11px;color:#94a3b8;display:block;margin-bottom:4px;">触发时间</label>
+                                <input type="time" class="op-daily-time" value="${item.time || ''}" style="width:100%; padding: 8px; border-radius: 6px; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.1); color: #fff;">
+                            </div>
+                            <div style="display:flex; align-items:flex-end; justify-content:flex-end;">
+                                <button class="btn btn-secondary" onclick="this.parentElement.parentElement.parentElement.remove()" style="padding: 8px 12px; background: rgba(239, 68, 68, 0.2); color: #fca5a5; border-color: rgba(239, 68, 68, 0.3);">删除</button>
+                            </div>
+                        </div>
+                        <div>
+                            <label style="font-size:11px;color:#94a3b8;display:block;margin-bottom:4px;">检查清单 (英文逗号分隔)</label>
+                            <input class="op-daily-checklist" value="${(item.checklist || []).join(',')}" placeholder="例如：地面清洁无积水,设备正常开启" style="width:100%; padding: 8px; border-radius: 6px; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.1); color: #fff;">
+                        </div>
+                    </div>
+                `).join('');
+
+                // 3. Random Inspections
+                const randomList = document.getElementById('op-config-random-list');
+                const randomInspections = cfg.scheduledTasks?.randomInspections || [];
+                randomList.innerHTML = randomInspections.map((item, idx) => `
+                    <div class="am-card" style="padding: 12px; margin-bottom: 0; background: rgba(255,255,255,0.02); border: 1px dashed rgba(255,255,255,0.1);">
+                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px;">
+                            <div>
+                                <label style="font-size:11px;color:#94a3b8;display:block;margin-bottom:4px;">类型ID</label>
+                                <input class="op-random-type" value="${item.type || ''}" placeholder="例如：seafood_pool" style="width:100%; padding: 8px; border-radius: 6px; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.1); color: #fff;">
+                            </div>
+                            <div style="grid-column: span 2;">
+                                <label style="font-size:11px;color:#94a3b8;display:block;margin-bottom:4px;">任务描述</label>
+                                <input class="op-random-desc" value="${item.description || ''}" placeholder="例如：拍摄海鲜池水温计照片" style="width:100%; padding: 8px; border-radius: 6px; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.1); color: #fff;">
+                            </div>
+                            <div>
+                                <label style="font-size:11px;color:#94a3b8;display:block;margin-bottom:4px;">时间窗口(分钟)</label>
+                                <input type="number" class="op-random-time" value="${item.timeWindow || 15}" min="1" style="width:100%; padding: 8px; border-radius: 6px; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.1); color: #fff;">
+                            </div>
+                            <div style="display:flex; align-items:flex-end; justify-content:flex-end;">
+                                <button class="btn btn-secondary" onclick="this.parentElement.parentElement.parentElement.remove()" style="padding: 8px 12px; background: rgba(239, 68, 68, 0.2); color: #fca5a5; border-color: rgba(239, 68, 68, 0.3);">删除</button>
+                            </div>
+                        </div>
+                    </div>
+                `).join('');
+
+            } catch (e) {
+                console.error('loadOpAgentConfig error:', e);
+                showNotification('加载OP配置失败', 'error');
+            }
+        }
+
+        function addOpConfigDailyInspection() {
+            const list = document.getElementById('op-config-daily-list');
+            const div = document.createElement('div');
+            div.innerHTML = `
+                <div class="am-card" style="padding: 12px; margin-bottom: 0; background: rgba(255,255,255,0.02); border: 1px dashed rgba(255,255,255,0.1);">
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin-bottom: 8px;">
+                        <div>
+                            <label style="font-size:11px;color:#94a3b8;display:block;margin-bottom:4px;">品牌</label>
+                            <select class="op-daily-brand" style="width:100%; padding: 8px; border-radius: 6px; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.1); color: #fff;">
+                                <option value="洪潮">洪潮</option>
+                                <option value="马己仙">马己仙</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label style="font-size:11px;color:#94a3b8;display:block;margin-bottom:4px;">类型</label>
+                            <select class="op-daily-type" style="width:100%; padding: 8px; border-radius: 6px; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.1); color: #fff;">
+                                <option value="opening">开市 (Opening)</option>
+                                <option value="closing">收市 (Closing)</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label style="font-size:11px;color:#94a3b8;display:block;margin-bottom:4px;">触发时间</label>
+                            <input type="time" class="op-daily-time" value="10:00" style="width:100%; padding: 8px; border-radius: 6px; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.1); color: #fff;">
+                        </div>
+                        <div style="display:flex; align-items:flex-end; justify-content:flex-end;">
+                            <button class="btn btn-secondary" onclick="this.parentElement.parentElement.parentElement.remove()" style="padding: 8px 12px; background: rgba(239, 68, 68, 0.2); color: #fca5a5; border-color: rgba(239, 68, 68, 0.3);">删除</button>
+                        </div>
+                    </div>
+                    <div>
+                        <label style="font-size:11px;color:#94a3b8;display:block;margin-bottom:4px;">检查清单 (英文逗号分隔)</label>
+                        <input class="op-daily-checklist" placeholder="例如：地面清洁无积水,设备正常开启" style="width:100%; padding: 8px; border-radius: 6px; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.1); color: #fff;">
+                    </div>
+                </div>
+            `;
+            list.appendChild(div.firstElementChild);
+        }
+
+        function addOpConfigRandomInspection() {
+            const list = document.getElementById('op-config-random-list');
+            const div = document.createElement('div');
+            div.innerHTML = `
+                <div class="am-card" style="padding: 12px; margin-bottom: 0; background: rgba(255,255,255,0.02); border: 1px dashed rgba(255,255,255,0.1);">
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px;">
+                        <div>
+                            <label style="font-size:11px;color:#94a3b8;display:block;margin-bottom:4px;">类型ID</label>
+                            <input class="op-random-type" placeholder="例如：seafood_pool" style="width:100%; padding: 8px; border-radius: 6px; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.1); color: #fff;">
+                        </div>
+                        <div style="grid-column: span 2;">
+                            <label style="font-size:11px;color:#94a3b8;display:block;margin-bottom:4px;">任务描述</label>
+                            <input class="op-random-desc" placeholder="例如：拍摄海鲜池水温计照片" style="width:100%; padding: 8px; border-radius: 6px; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.1); color: #fff;">
+                        </div>
+                        <div>
+                            <label style="font-size:11px;color:#94a3b8;display:block;margin-bottom:4px;">时间窗口(分钟)</label>
+                            <input type="number" class="op-random-time" value="15" min="1" style="width:100%; padding: 8px; border-radius: 6px; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.1); color: #fff;">
+                        </div>
+                        <div style="display:flex; align-items:flex-end; justify-content:flex-end;">
+                            <button class="btn btn-secondary" onclick="this.parentElement.parentElement.parentElement.remove()" style="padding: 8px 12px; background: rgba(239, 68, 68, 0.2); color: #fca5a5; border-color: rgba(239, 68, 68, 0.3);">删除</button>
+                        </div>
+                    </div>
+                </div>
+            `;
+            list.appendChild(div.firstElementChild);
+        }
+
+        async function saveOpAgentConfig() {
+            try {
+                // Fetch current config to merge partial changes if needed, or reconstruct from scratch
+                const res = await fetch('/api/admin/agents/ops-config', { headers: { 'Authorization': `Bearer ${localStorage.getItem('hrms_token')}` } });
+                const currentData = await res.json();
+                const config = currentData.config || {};
+                
+                // 1. Dispatchers
+                const dispatchers = Array.from(document.querySelectorAll('#op-config-dispatchers input[type="checkbox"]:checked')).map(cb => cb.value);
+                config.dispatchers = dispatchers;
+
+                // 2. Daily Inspections
+                const dailyCards = document.querySelectorAll('#op-config-daily-list > div');
+                const dailyInspections = Array.from(dailyCards).map(card => {
+                    return {
+                        brand: card.querySelector('.op-daily-brand').value,
+                        type: card.querySelector('.op-daily-type').value,
+                        time: card.querySelector('.op-daily-time').value,
+                        checklist: card.querySelector('.op-daily-checklist').value.split(',').map(s => s.trim()).filter(Boolean)
+                    };
+                });
+                
+                // 3. Random Inspections
+                const randomCards = document.querySelectorAll('#op-config-random-list > div');
+                const randomInspections = Array.from(randomCards).map(card => {
+                    return {
+                        type: card.querySelector('.op-random-type').value.trim(),
+                        description: card.querySelector('.op-random-desc').value.trim(),
+                        timeWindow: parseInt(card.querySelector('.op-random-time').value) || 15
+                    };
+                }).filter(item => item.type && item.description);
+
+                if (!config.scheduledTasks) config.scheduledTasks = {};
+                config.scheduledTasks.dailyInspections = dailyInspections;
+                config.scheduledTasks.randomInspections = randomInspections;
+
+                const saveRes = await fetch('/api/admin/agents/ops-config', {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('hrms_token')}` },
+                    body: JSON.stringify({ config, enabled: true })
+                });
+                
+                if (!saveRes.ok) throw new Error((await saveRes.json()).error);
+                showNotification('OP配置已保存');
+            } catch (e) {
+                console.error('saveOpAgentConfig error:', e);
+                showNotification('保存失败: ' + e.message, 'error');
+            }
+        }
+
         function openAgentConfigModal() {
             if (!currentUser || !['admin', 'hq_manager'].includes(currentUser.role)) {
                 showNotification('仅管理员可使用 Agent 配置', 'warning');
@@ -16527,23 +16777,32 @@ ${knowledgeContent.slice(0, 30000)}`;
         }
 
         function switchAgentConfigTab(tab) {
-            const cfgPanel = document.getElementById('agent-config-tab-configs');
-            const rulePanel = document.getElementById('agent-config-tab-rules');
-            const tplPanel = document.getElementById('agent-config-tab-templates');
-            const hrPanel = document.getElementById('agent-config-tab-hr-rating');
+            document.getElementById('agent-config-tab-configs').style.display = tab === 'configs' ? 'block' : 'none';
+            document.getElementById('agent-config-tab-op_config').style.display = tab === 'op_config' ? 'flex' : 'none';
+            document.getElementById('agent-config-tab-op_config').style.flexDirection = 'column';
+            document.getElementById('agent-config-tab-rules').style.display = tab === 'rules' ? 'block' : 'none';
+            document.getElementById('agent-config-tab-templates').style.display = tab === 'templates' ? 'block' : 'none';
+            document.getElementById('agent-config-tab-hr-rating').style.display = tab === 'hr_rating' ? 'block' : 'none';
+
             const cfgBtn = document.getElementById('agent-config-tab-btn-configs');
-            const ruleBtn = document.getElementById('agent-config-tab-btn-rules');
+            const opBtn = document.getElementById('agent-config-tab-btn-op_config');
+            const rulesBtn = document.getElementById('agent-config-tab-btn-rules');
             const tplBtn = document.getElementById('agent-config-tab-btn-templates');
             const hrBtn = document.getElementById('agent-config-tab-btn-hr-rating');
-            if (cfgPanel) cfgPanel.style.display = tab === 'configs' ? '' : 'none';
-            if (rulePanel) rulePanel.style.display = tab === 'rules' ? '' : 'none';
-            if (tplPanel) tplPanel.style.display = tab === 'templates' ? '' : 'none';
-            if (hrPanel) hrPanel.style.display = tab === 'hr_rating' ? '' : 'none';
+            
+            if (cfgBtn) cfgBtn.classList.toggle('active', tab === 'configs');
             if (cfgBtn) cfgBtn.classList.toggle('btn-secondary', tab !== 'configs');
-            if (ruleBtn) ruleBtn.classList.toggle('btn-secondary', tab !== 'rules');
+            if (opBtn) opBtn.classList.toggle('active', tab === 'op_config');
+            if (opBtn) opBtn.classList.toggle('btn-secondary', tab !== 'op_config');
+            if (rulesBtn) rulesBtn.classList.toggle('active', tab === 'rules');
+            if (rulesBtn) rulesBtn.classList.toggle('btn-secondary', tab !== 'rules');
+            if (tplBtn) tplBtn.classList.toggle('active', tab === 'templates');
             if (tplBtn) tplBtn.classList.toggle('btn-secondary', tab !== 'templates');
+            if (hrBtn) hrBtn.classList.toggle('active', tab === 'hr_rating');
             if (hrBtn) hrBtn.classList.toggle('btn-secondary', tab !== 'hr_rating');
+
             if (tab === 'configs') loadAgentConfigs();
+            if (tab === 'op_config') loadOpAgentConfig();
             if (tab === 'rules') loadAgentRules();
             if (tab === 'templates') loadAgentTemplates();
             if (tab === 'hr_rating') loadHrEmployeeRatingConfig();
@@ -16679,32 +16938,32 @@ ${knowledgeContent.slice(0, 30000)}`;
                 const data = await resp.json();
                 const c = data?.config || {};
                 const setV = (id, v) => { const el = document.getElementById(id); if (el) el.value = (v ?? ''); };
-                setV('hr-rating-exec-pm-a', c?.execution?.store_production_manager?.A_max_missing);
-                setV('hr-rating-exec-pm-b', c?.execution?.store_production_manager?.B_max_missing);
-                setV('hr-rating-exec-pm-c', c?.execution?.store_production_manager?.C_max_missing);
-                setV('hr-rating-exec-sm-hz-a', c?.execution?.store_manager?.hongchao?.A_min_new_members);
-                setV('hr-rating-exec-sm-hz-b', c?.execution?.store_manager?.hongchao?.B_min_new_members);
-                setV('hr-rating-exec-sm-hz-c', c?.execution?.store_manager?.hongchao?.C_min_new_members);
+                setV('hr-rating-exec-pm-a', c?.execution?.store_production_manager?.threshold_A);
+                setV('hr-rating-exec-pm-b', c?.execution?.store_production_manager?.threshold_B);
+                setV('hr-rating-exec-pm-c', c?.execution?.store_production_manager?.threshold_C);
+                setV('hr-rating-exec-sm-hz-a', c?.execution?.store_manager?.hongchao?.min_A);
+                setV('hr-rating-exec-sm-hz-b', c?.execution?.store_manager?.hongchao?.min_B);
+                setV('hr-rating-exec-sm-hz-c', c?.execution?.store_manager?.hongchao?.min_C);
                 setV('hr-rating-exec-sm-mjx-score', c?.execution?.store_manager?.majixian?.low_score_threshold);
-                setV('hr-rating-exec-sm-mjx-a-miss', c?.execution?.store_manager?.majixian?.A_max_missing);
-                setV('hr-rating-exec-sm-mjx-a-low', c?.execution?.store_manager?.majixian?.A_max_low_score);
-                setV('hr-rating-exec-sm-mjx-b-miss', c?.execution?.store_manager?.majixian?.B_max_missing);
-                setV('hr-rating-exec-sm-mjx-b-low', c?.execution?.store_manager?.majixian?.B_max_low_score);
-                setV('hr-rating-exec-sm-mjx-c-miss', c?.execution?.store_manager?.majixian?.C_max_missing);
-                setV('hr-rating-exec-sm-mjx-c-low', c?.execution?.store_manager?.majixian?.C_max_low_score);
-                setV('hr-rating-att-a', c?.attitude?.A_max_incomplete);
-                setV('hr-rating-att-b', c?.attitude?.B_max_incomplete);
-                setV('hr-rating-abl-pm-a', c?.ability?.store_production_manager?.A_min_diff);
-                setV('hr-rating-abl-pm-b-min', c?.ability?.store_production_manager?.B_min_diff);
-                setV('hr-rating-abl-pm-b-max', c?.ability?.store_production_manager?.B_max_diff);
-                setV('hr-rating-abl-pm-c-min', c?.ability?.store_production_manager?.C_min_diff);
-                setV('hr-rating-abl-pm-c-max', c?.ability?.store_production_manager?.C_max_diff);
-                setV('hr-rating-abl-sm-hz-a', c?.ability?.store_manager?.hongchao?.A_min_rating);
-                setV('hr-rating-abl-sm-hz-b', c?.ability?.store_manager?.hongchao?.B_min_rating);
-                setV('hr-rating-abl-sm-hz-c', c?.ability?.store_manager?.hongchao?.C_min_rating);
-                setV('hr-rating-abl-sm-mjx-a', c?.ability?.store_manager?.majixian?.A_min_rating);
-                setV('hr-rating-abl-sm-mjx-b', c?.ability?.store_manager?.majixian?.B_min_rating);
-                setV('hr-rating-abl-sm-mjx-c', c?.ability?.store_manager?.majixian?.C_min_rating);
+                setV('hr-rating-exec-sm-mjx-a-miss', c?.execution?.store_manager?.majixian?.max_missing_A);
+                setV('hr-rating-exec-sm-mjx-a-low', c?.execution?.store_manager?.majixian?.max_low_A);
+                setV('hr-rating-exec-sm-mjx-b-miss', c?.execution?.store_manager?.majixian?.max_missing_B);
+                setV('hr-rating-exec-sm-mjx-b-low', c?.execution?.store_manager?.majixian?.max_low_B);
+                setV('hr-rating-exec-sm-mjx-c-miss', c?.execution?.store_manager?.majixian?.max_missing_C);
+                setV('hr-rating-exec-sm-mjx-c-low', c?.execution?.store_manager?.majixian?.max_low_C);
+                setV('hr-rating-att-a', c?.attitude?.threshold_A);
+                setV('hr-rating-att-b', c?.attitude?.threshold_B);
+                setV('hr-rating-abl-pm-a', c?.ability?.store_production_manager?.min_A);
+                setV('hr-rating-abl-pm-b-min', c?.ability?.store_production_manager?.min_B);
+                setV('hr-rating-abl-pm-b-max', c?.ability?.store_production_manager?.max_B);
+                setV('hr-rating-abl-pm-c-min', c?.ability?.store_production_manager?.min_C);
+                setV('hr-rating-abl-pm-c-max', c?.ability?.store_production_manager?.max_C);
+                setV('hr-rating-abl-sm-hz-a', c?.ability?.store_manager?.hongchao?.min_A);
+                setV('hr-rating-abl-sm-hz-b', c?.ability?.store_manager?.hongchao?.min_B);
+                setV('hr-rating-abl-sm-hz-c', c?.ability?.store_manager?.hongchao?.min_C);
+                setV('hr-rating-abl-sm-mjx-a', c?.ability?.store_manager?.majixian?.min_A);
+                setV('hr-rating-abl-sm-mjx-b', c?.ability?.store_manager?.majixian?.min_B);
+                setV('hr-rating-abl-sm-mjx-c', c?.ability?.store_manager?.majixian?.min_C);
             } catch (e) {
                 showNotification('HR评级模型加载失败', 'error');
             }
@@ -16715,49 +16974,49 @@ ${knowledgeContent.slice(0, 30000)}`;
             const config = {
                 execution: {
                     store_production_manager: {
-                        A_max_missing: n('hr-rating-exec-pm-a'),
-                        B_max_missing: n('hr-rating-exec-pm-b'),
-                        C_max_missing: n('hr-rating-exec-pm-c')
+                        threshold_A: n('hr-rating-exec-pm-a'),
+                        threshold_B: n('hr-rating-exec-pm-b'),
+                        threshold_C: n('hr-rating-exec-pm-c')
                     },
                     store_manager: {
                         hongchao: {
-                            A_min_new_members: n('hr-rating-exec-sm-hz-a'),
-                            B_min_new_members: n('hr-rating-exec-sm-hz-b'),
-                            C_min_new_members: n('hr-rating-exec-sm-hz-c')
+                            min_A: n('hr-rating-exec-sm-hz-a'),
+                            min_B: n('hr-rating-exec-sm-hz-b'),
+                            min_C: n('hr-rating-exec-sm-hz-c')
                         },
                         majixian: {
                             low_score_threshold: n('hr-rating-exec-sm-mjx-score'),
-                            A_max_missing: n('hr-rating-exec-sm-mjx-a-miss'),
-                            A_max_low_score: n('hr-rating-exec-sm-mjx-a-low'),
-                            B_max_missing: n('hr-rating-exec-sm-mjx-b-miss'),
-                            B_max_low_score: n('hr-rating-exec-sm-mjx-b-low'),
-                            C_max_missing: n('hr-rating-exec-sm-mjx-c-miss'),
-                            C_max_low_score: n('hr-rating-exec-sm-mjx-c-low')
+                            max_missing_A: n('hr-rating-exec-sm-mjx-a-miss'),
+                            max_low_A: n('hr-rating-exec-sm-mjx-a-low'),
+                            max_missing_B: n('hr-rating-exec-sm-mjx-b-miss'),
+                            max_low_B: n('hr-rating-exec-sm-mjx-b-low'),
+                            max_missing_C: n('hr-rating-exec-sm-mjx-c-miss'),
+                            max_low_C: n('hr-rating-exec-sm-mjx-c-low')
                         }
                     }
                 },
                 attitude: {
-                    A_max_incomplete: n('hr-rating-att-a'),
-                    B_max_incomplete: n('hr-rating-att-b')
+                    threshold_A: n('hr-rating-att-a'),
+                    threshold_B: n('hr-rating-att-b')
                 },
                 ability: {
                     store_production_manager: {
-                        A_min_diff: n('hr-rating-abl-pm-a'),
-                        B_min_diff: n('hr-rating-abl-pm-b-min'),
-                        B_max_diff: n('hr-rating-abl-pm-b-max'),
-                        C_min_diff: n('hr-rating-abl-pm-c-min'),
-                        C_max_diff: n('hr-rating-abl-pm-c-max')
+                        min_A: n('hr-rating-abl-pm-a'),
+                        min_B: n('hr-rating-abl-pm-b-min'),
+                        max_B: n('hr-rating-abl-pm-b-max'),
+                        min_C: n('hr-rating-abl-pm-c-min'),
+                        max_C: n('hr-rating-abl-pm-c-max')
                     },
                     store_manager: {
                         hongchao: {
-                            A_min_rating: n('hr-rating-abl-sm-hz-a'),
-                            B_min_rating: n('hr-rating-abl-sm-hz-b'),
-                            C_min_rating: n('hr-rating-abl-sm-hz-c')
+                            min_A: n('hr-rating-abl-sm-hz-a'),
+                            min_B: n('hr-rating-abl-sm-hz-b'),
+                            min_C: n('hr-rating-abl-sm-hz-c')
                         },
                         majixian: {
-                            A_min_rating: n('hr-rating-abl-sm-mjx-a'),
-                            B_min_rating: n('hr-rating-abl-sm-mjx-b'),
-                            C_min_rating: n('hr-rating-abl-sm-mjx-c')
+                            min_A: n('hr-rating-abl-sm-mjx-a'),
+                            min_B: n('hr-rating-abl-sm-mjx-b'),
+                            min_C: n('hr-rating-abl-sm-mjx-c')
                         }
                     }
                 }
@@ -19352,8 +19611,8 @@ ${knowledgeContent.slice(0, 30000)}`;
         }
 
         function publishExamAssignment() {
-            if (!isAdminUser()) {
-                showNotification('仅管理员可安排考试', 'warning');
+            if (!isAdminUser() && !(currentUser && (currentUser.role === ROLES.HR_MANAGER || currentUser.role === ROLES.HQ_MANAGER))) {
+                showNotification('仅管理员或HR可批量安排培训/考试', 'warning');
                 return;
             }
             const modal = document.getElementById('exam-assign-modal');

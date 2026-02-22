@@ -81,24 +81,45 @@ const DEFAULT_PROMPT_TEMPLATES = [
   { template_key: 'data_auditor_default_v1', agent_id: 'data_auditor', name: 'BI 默认模板', content: '你是数据审计 Agent，负责从业务报表和客诉数据中发现异常。', enabled: true, is_builtin: true },
   { template_key: 'ops_supervisor_default_v1', agent_id: 'ops_supervisor', name: 'OP 默认模板', content: '你是营运督导 Agent，负责跟进异常任务的整改并审核照片。', enabled: true, is_builtin: true },
   { template_key: 'sop_advisor_default_v1', agent_id: 'sop_advisor', name: 'SOP 默认模板', content: '你是 SOP 顾问 Agent，负责解答运营标准相关问题。', enabled: true, is_builtin: true },
-  { template_key: 'chief_evaluator_default_v1', agent_id: 'chief_evaluator', name: 'HR 默认模板', content: '你是绩效考核 Agent，负责根据任务解决情况进行扣分和结算。', enabled: true, is_builtin: true },
   { template_key: 'appeal_handler_default_v1', agent_id: 'appeal_handler', name: '申诉 默认模板', content: '你是申诉处理 Agent，负责处理员工对扣分或处罚的异议。', enabled: true, is_builtin: true }
 ];
 
 const DEFAULT_EMPLOYEE_RATING_CONFIG = {
   execution: {
-    store_production_manager: { A_max_missing: 6, B_max_missing: 13, C_max_missing: 20 },
+    store_production_manager: { threshold_A: 1, threshold_B: 3, threshold_C: 9999 },
     store_manager: {
-      hongchao: { A_min_new_members: 300, B_min_new_members: 249, C_min_new_members: 200 },
-      majixian: { low_score_threshold: 7, A_max_missing: 2, A_max_low_score: 2, B_max_missing: 4, B_max_low_score: 4, C_max_missing: 6, C_max_low_score: 6 }
+      hongchao: { min_A: 300, min_B: 200, min_C: 0 },
+      majixian: { low_score_threshold: 85, max_missing_A: 0, max_low_A: 0, max_missing_B: 1, max_low_B: 1, max_missing_C: 999, max_low_C: 999 }
     }
   },
-  attitude: { A_max_incomplete: 2, B_max_incomplete: 4 },
+  attitude: { threshold_A: 0, threshold_B: 2 },
   ability: {
-    store_production_manager: { A_min_diff: 1.01, B_min_diff: -1, B_max_diff: 1, C_min_diff: -2, C_max_diff: -1.01 },
+    store_production_manager: { min_A: -0.01, min_B: -0.02, max_B: -0.01, min_C: -99, max_C: -0.02 },
     store_manager: {
-      hongchao: { A_min_rating: 4.6, B_min_rating: 4.5, C_min_rating: 4.3 },
-      majixian: { A_min_rating: 4.5, B_min_rating: 4.4, C_min_rating: 4.0 }
+      hongchao: { min_A: 4.8, min_B: 4.5, min_C: 0 },
+      majixian: { min_A: 4.5, min_B: 4.0, min_C: 0 }
+    }
+  }
+};
+
+export const DEFAULT_OPS_AGENT_CONFIG = {
+  dispatchers: ['store_manager', 'store_production_manager'], // 派单人员角色
+  scheduledTasks: {
+    dailyInspections: [
+      { brand: '洪潮', type: 'opening', time: '10:30', checklist: ['地面清洁无积水', '所有设备正常开启', '食材新鲜度检查', '餐具消毒完成', '灯光亮度适中', '背景音乐开启', '空调温度设置合适', '员工仪容仪表检查'] },
+      { brand: '马己仙', type: 'opening', time: '10:00', checklist: ['地面清洁', '设备开启', '食材准备', '餐具消毒', '迎宾准备'] },
+      { brand: '洪潮', type: 'closing', time: '22:00', checklist: ['食材封存', '设备关闭', '垃圾清理', '安全检查', '门窗锁好'] },
+      { brand: '马己仙', type: 'closing', time: '22:30', checklist: ['食材封存', '设备关闭', '垃圾清理', '安全检查', '门窗锁好', '电源关闭'] }
+    ],
+    randomInspections: [
+      { type: 'seafood_pool_temperature', description: '拍摄海鲜池水温计照片', timeWindow: 15 },
+      { type: 'fridge_label_check', description: '检查冰箱标签是否过期', timeWindow: 10 },
+      { type: 'hand_washing_duration', description: '录制洗手20秒视频', timeWindow: 5 }
+    ],
+    dataTriggers: {
+      productComplaintThreshold: 2, 
+      marginDeviationThreshold: 0.01,
+      tableVisitRatioThreshold: 0.50  
     }
   }
 };
@@ -247,6 +268,13 @@ export async function ensureAgentConfigTables() {
        values ('employee_rating', $1::jsonb, true)
        on conflict (config_key) do nothing`,
       [JSON.stringify(DEFAULT_EMPLOYEE_RATING_CONFIG)]
+    );
+
+    await pool().query(
+      `insert into hr_rating_configs (config_key, config, enabled)
+       values ('ops_agent', $1::jsonb, true)
+       on conflict (config_key) do nothing`,
+      [JSON.stringify(DEFAULT_OPS_AGENT_CONFIG)]
     );
     
     console.log('[AgentConfig] Tables ensured and default data seeded.');
@@ -442,13 +470,43 @@ export function registerAgentConfigRoutes(app, authRequired) {
     }
   });
 
-  // === Agent Rules ===
-  app.get('/api/admin/agents/rules', authRequired, async (req, res) => {
+  // === OP Agent 配置 ===
+  app.get('/api/admin/agents/ops-config', authRequired, async (req, res) => {
     if (!assertAdmin(req, res)) return;
     try {
-      const r = await pool().query('select * from agent_rules order by category');
-      res.json({ rules: r.rows });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+      const r = await pool().query(`
+        select config, enabled, updated_at
+        from hr_rating_configs
+        where config_key = 'ops_agent'
+        limit 1
+      `);
+      const row = r.rows?.[0];
+      const config = row?.config ? toJson(row.config, DEFAULT_OPS_AGENT_CONFIG) : DEFAULT_OPS_AGENT_CONFIG;
+      return res.json({ config, enabled: row?.enabled !== false, updated_at: row?.updated_at || null });
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.put('/api/admin/agents/ops-config', authRequired, async (req, res) => {
+    if (!assertAdmin(req, res)) return;
+    const config = req.body?.config;
+    const enabled2 = req.body?.enabled !== false;
+    if (!config || typeof config !== 'object') return res.status(400).json({ error: 'invalid_config' });
+    try {
+      const r = await pool().query(
+        `insert into hr_rating_configs (config_key, config, enabled, updated_at)
+         values ('ops_agent', $1::jsonb, $2, now())
+         on conflict (config_key)
+         do update set config = excluded.config, enabled = excluded.enabled, updated_at = now()
+         returning config, enabled, updated_at`,
+        [JSON.stringify(config), enabled2]
+      );
+      clearOpsAgentConfigCache();
+      return res.json({ config: r.rows[0].config, enabled: r.rows[0].enabled, updated_at: r.rows[0].updated_at });
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
   });
 
   app.put('/api/admin/agents/rules/:id', authRequired, async (req, res) => {
@@ -543,6 +601,34 @@ let configsLastFetched = 0;
 export function clearAgentConfigCache() {
   cachedConfigs = null;
   configsLastFetched = 0;
+}
+
+let opsAgentConfigCache = null;
+let opsAgentConfigLastFetch = 0;
+
+export async function getOpsAgentConfig() {
+  const now = Date.now();
+  if (opsAgentConfigCache && (now - opsAgentConfigLastFetch < 60000)) {
+    return opsAgentConfigCache;
+  }
+  try {
+    const r = await pool().query(`select config from hr_rating_configs where config_key = 'ops_agent' and enabled = true limit 1`);
+    if (r.rows?.length > 0 && r.rows[0].config) {
+      opsAgentConfigCache = toJson(r.rows[0].config, DEFAULT_OPS_AGENT_CONFIG);
+    } else {
+      opsAgentConfigCache = DEFAULT_OPS_AGENT_CONFIG;
+    }
+  } catch (e) {
+    console.error('[AgentConfig] getOpsAgentConfig error:', e);
+    opsAgentConfigCache = DEFAULT_OPS_AGENT_CONFIG;
+  }
+  opsAgentConfigLastFetch = now;
+  return opsAgentConfigCache;
+}
+
+export function clearOpsAgentConfigCache() {
+  opsAgentConfigCache = null;
+  opsAgentConfigLastFetch = 0;
 }
 
 export async function getAgentConfigs() {
