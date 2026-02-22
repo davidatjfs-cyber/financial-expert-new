@@ -17,13 +17,23 @@ export const STORE_RATING_CONFIG = {
   rules: {
     'A': { min_rate: 95.01, description: '达成率>95%' },
     'B': { min_rate: 90.01, max_rate: 95.00, description: '达成率>90%' },
-    'C': { max_rate: 90.00, description: '其他情况' }
+    'C': { min_rate: 85.00, max_rate: 90.00, description: '达成率>=85%' },
+    'D': { max_rate: 85.00, description: '达成率<85%' }
   },
   data_sources: {
     actual_revenue: 'daily_reports',
     target_revenue: 'revenue_targets'
   },
   new_store_grace_period: 1 // 第一个月不评级
+};
+
+// 奖金配置
+export const BONUS_CONFIG = {
+  '马己仙': { base: 1500 },
+  '洪潮': { base: 2000 },
+  // 门店A/B级：奖金 = 得分/100 * base
+  // 门店C级：奖金归0
+  // 门店D级：工资8折
 };
 
 // ─────────────────────────────────────────────
@@ -41,24 +51,39 @@ export const EMPLOYEE_SCORE_CONFIG = {
   },
   execution_rules: {
     store_production_manager: {
-      data_sources: ['收档检查', '开档检查', '原料收货日报'],
+      // 马己仙和洪潮出品经理相同：收档报告+开档报告+原料收货日报，每天各提交1次
+      data_sources: ['收档报告DB', '开档报告', '原料收货日报'],
       expected_frequency: 'daily',
       rating_thresholds: {
-        'A': { max_missing: 6 }, // 7次以下 (30天*3项=90次，允许缺84次)
-        'B': { max_missing: 13 }, // 14次以下
-        'C': { max_missing: 20 }, // 21次以下
-        'D': { min_missing: 21 }  // 21次及以上
+        'A': { max_missing: 6 },  // <7次得A
+        'B': { max_missing: 13 }, // <14次得B
+        'C': { max_missing: 20 }, // <21次得C
+        'D': { min_missing: 21 }  // >=21次得D
       }
     },
     store_manager: {
-      data_sources: ['门店例会报告'],
-      expected_frequency: 'daily',
-      score_threshold: 7,
-      rating_thresholds: {
-        'A': { max_missing: 2, max_low_score: 2 },
-        'B': { max_missing: 4, max_low_score: 4 },
-        'C': { max_missing: 6, max_low_score: 6 },
-        'D': { default: true }
+      // 按品牌区分
+      '马己仙': {
+        data_sources: ['例会报告'],
+        expected_frequency: 'daily',
+        score_threshold: 7,
+        // 未提交次数和得分低于7分次数同时满足
+        rating_thresholds: {
+          'A': { max_missing: 2, max_low_score: 2 },
+          'B': { max_missing: 4, max_low_score: 4 },
+          'C': { max_missing: 6, max_low_score: 6 },
+          'D': { default: true }
+        }
+      },
+      '洪潮': {
+        data_sources: ['企微会员'],
+        // 企微会员每月新增数量
+        rating_thresholds: {
+          'A': { min_new_members: 300 },
+          'B': { min_new_members: 249 },
+          'C': { min_new_members: 200 },
+          'D': { default: true }
+        }
       }
     }
   },
@@ -73,27 +98,29 @@ export const EMPLOYEE_SCORE_CONFIG = {
   },
   ability_rules: {
     store_production_manager: {
+      // 不分品牌，基于实际毛利率与目标的差值
       data_source: 'monthly_margins',
       rating_thresholds: {
-        'A': { min_diff: 1.01 },    // 实际>目标+1%
-        'B': { min_diff: 0.99, max_diff: 1.01 }, // 目标±1%
-        'C': { min_diff: -1.00, max_diff: 0.99 }, // 低于目标1%以上
-        'D': { max_diff: -1.00 }    // 低于目标2%及以上
+        'A': { min_diff: 1.01 },    // 实际>目标+1个点
+        'B': { min_diff: -1.00, max_diff: 1.00 }, // 目标±1个点以内
+        'C': { min_diff: -2.00, max_diff: -1.01 }, // 少于1个点以上
+        'D': { max_diff: -2.00 }    // 少于2个点及以上
       }
     },
     store_manager: {
+      // 基于大众点评星级，按品牌区分
       data_source: 'daily_reports',
       rating_thresholds: {
         '洪潮': {
           'A': { min_rating: 4.6 },
-          'B': { min_rating: 4.5, max_rating: 4.6 },
-          'C': { min_rating: 4.3, max_rating: 4.5 },
+          'B': { min_rating: 4.5 },
+          'C': { min_rating: 4.3 },
           'D': { max_rating: 4.3 }
         },
         '马己仙': {
           'A': { min_rating: 4.5 },
-          'B': { min_rating: 4.4, max_rating: 4.5 },
-          'C': { min_rating: 4.0, max_rating: 4.4 },
+          'B': { min_rating: 4.4 },
+          'C': { min_rating: 4.0 },
           'D': { max_rating: 4.0 }
         }
       }
@@ -124,9 +151,10 @@ export async function calculateStoreRating(store, brand, period) {
     const achievementRate = Number((actualRevenue / targetRevenue * 100).toFixed(2));
     
     // 5. 确定评级
-    let rating = 'C';
+    let rating = 'D';
     if (achievementRate > 95) rating = 'A';
     else if (achievementRate > 90) rating = 'B';
+    else if (achievementRate >= 85) rating = 'C';
     
     // 6. 保存结果
     await saveStoreRating(store, brand, period, actualRevenue, targetRevenue, achievementRate, rating);
@@ -224,16 +252,28 @@ export async function calculateExecutionRating(store, username, role, period) {
     }
     
     if (role === 'store_manager') {
-      // 店长：检查门店例会报告的提交情况和得分
-      const meetingReports = await getStoreMeetingReports(store, period);
-      const totalMissing = meetingReports.filter(r => !r.submitted).length;
-      const lowScoreCount = meetingReports.filter(r => r.meeting_score < 7).length;
+      const brand = inferBrandFromStoreName(store);
       
-      // 根据缺失次数和低分次数确定评级
-      if (totalMissing <= 2 && lowScoreCount <= 2) return 'A';
-      else if (totalMissing <= 4 && lowScoreCount <= 4) return 'B';
-      else if (totalMissing <= 6 && lowScoreCount <= 6) return 'C';
-      else return 'D';
+      if (brand === '洪潮') {
+        // 洪潮店长：企微会员每月新增数量
+        const newMembers = await getMonthlyNewWechatMembers(store, period);
+        if (newMembers >= 300) return 'A';
+        else if (newMembers >= 249) return 'B';
+        else if (newMembers >= 200) return 'C';
+        else return 'D';
+      } else {
+        // 马己仙店长：例会报告每天提交1次且得分>=7分
+        const meetingReports = await getStoreMeetingReports(store, period);
+        const expectedDays = getDaysInPeriod(period);
+        const submittedCount = meetingReports.filter(r => r.submitted).length;
+        const totalMissing = expectedDays - submittedCount;
+        const lowScoreCount = meetingReports.filter(r => r.submitted && r.meeting_score < 7).length;
+        
+        if (totalMissing <= 2 && lowScoreCount <= 2) return 'A';
+        else if (totalMissing <= 4 && lowScoreCount <= 4) return 'B';
+        else if (totalMissing <= 6 && lowScoreCount <= 6) return 'C';
+        else return 'D';
+      }
     }
     
     return 'C'; // 默认评级
@@ -488,21 +528,91 @@ async function calculateExceptionBonus(username, period) {
   return exceptionCount === 0 ? 10 : 0; // 零异常加10分
 }
 
+// 异常扣分规则：按类别+严重度+频率计算
+// frequency: daily=每天最多扣1次, weekly=每周最多扣1次, monthly=每月最多扣1次
+const DEDUCTION_RULES = {
+  '实收营收异常':     { high: 40, medium: 20, low: 0, frequency: 'monthly' },
+  '人效值异常':       { high: 20, medium: 10, low: 0, frequency: 'monthly' },
+  '充值异常':         { high: 2,  medium: 1,  low: 0, frequency: 'daily' },
+  '桌访异常':         { high: 10, medium: 5,  low: 0, frequency: 'weekly' },
+  '桌访占比异常':     { high: 20, medium: 10, low: 0, frequency: 'monthly' },
+  '总实收毛利率异常': { high: 40, medium: 20, low: 0, frequency: 'monthly' },
+  '产品差评异常':     { high: 10, medium: 5,  low: 0, frequency: 'weekly' },
+  '服务差评异常':     { high: 10, medium: 5,  low: 0, frequency: 'weekly' },
+};
+
+// 根据频率计算一个月内最多触发次数
+function getMaxTriggers(frequency, period) {
+  const days = getDaysInPeriod(period);
+  if (frequency === 'daily') return days;        // 每天1次
+  if (frequency === 'weekly') return Math.ceil(days / 7); // 每周1次（约4-5次）
+  return 1; // monthly: 每月1次
+}
+
 // 计算异常扣分
 async function calculateExceptionDeduction(username, period) {
-  // 根据异常数量和严重程度计算扣分
+  // 按类别+严重度分组查询
   const result = await pool().query(`
-    SELECT severity, COUNT(*) as count FROM agent_issues 
+    SELECT category, severity, COUNT(*) as count FROM agent_issues 
     WHERE assignee_username = $1 AND created_at >= $2 AND created_at <= $3
-    GROUP BY severity
+    GROUP BY category, severity
   `, [username, `${period}-01`, `${period}-31`]);
   
   let totalDeduction = 0;
   for (const row of result.rows) {
-    if (row.severity === 'high') totalDeduction += row.count * 5;
-    else if (row.severity === 'medium') totalDeduction += row.count * 3;
-    else if (row.severity === 'low') totalDeduction += row.count * 1;
+    const rule = DEDUCTION_RULES[row.category];
+    if (!rule) continue;
+    const sev = String(row.severity || '').toLowerCase();
+    if (sev === 'low') continue; // low不扣分
+    const pointsPerTrigger = rule[sev] || 0;
+    if (pointsPerTrigger === 0) continue;
+    // 按频率限制最多触发次数
+    const maxTriggers = getMaxTriggers(rule.frequency, period);
+    const actualTriggers = Math.min(Number(row.count), maxTriggers);
+    totalDeduction += actualTriggers * pointsPerTrigger;
   }
   
   return totalDeduction;
+}
+
+// 获取企微会员每月新增数量（洪潮店长执行力评级用）
+async function getMonthlyNewWechatMembers(store, period) {
+  const [year, month] = period.split('-');
+  const startDate = `${year}-${month}-01`;
+  const endDate = `${year}-${month}-31`;
+  
+  try {
+    const result = await pool().query(`
+      SELECT COALESCE(SUM(new_wechat_members), 0) as total
+      FROM daily_reports 
+      WHERE store = $1 AND date >= $2 AND date <= $3
+    `, [store, startDate, endDate]);
+    
+    return Number(result.rows[0]?.total || 0);
+  } catch (e) {
+    console.warn('[wechat_members] query error:', e?.message);
+    return 0;
+  }
+}
+
+// ─────────────────────────────────────────────
+// 9. 奖金计算函数
+// ─────────────────────────────────────────────
+export function calculateBonus(brand, storeRating, employeeScore) {
+  const bonusBase = brand === '洪潮' ? 2000 : 1500; // 马己仙1500, 洪潮2000
+  
+  if (!storeRating || storeRating === 'D') {
+    // D级：工资8折（返回特殊标记，由薪资模块处理）
+    return { bonus: 0, salaryMultiplier: 0.8, reason: '门店D级，工资8折' };
+  }
+  
+  if (storeRating === 'C') {
+    // C级：奖金归0
+    return { bonus: 0, salaryMultiplier: 1.0, reason: '门店C级，奖金归0' };
+  }
+  
+  // A/B级：按个人得分比例拿奖金
+  const scoreRatio = (employeeScore || 100) / 100;
+  const bonus = Math.round(scoreRatio * bonusBase);
+  return { bonus, salaryMultiplier: 1.0, reason: `门店${storeRating}级，得分${employeeScore}，系数${scoreRatio.toFixed(2)}` };
 }

@@ -21,15 +21,6 @@ import path from 'path';
 import axios from 'axios';
 import crypto from 'crypto';
 import { 
-  VISUAL_AUDIT_DEDUCTION_RULES, 
-  UNIFIED_DEDUCTION_RULES,
-  UNIFIED_BRAND_SCORING_MODELS,
-  getDeductScore,
-  getVisualAuditDeduct,
-  calculateDimensionScore,
-  calculateBrandScore
-} from './chief-evaluator-config.js';
-import { 
   calculateStoreRating, 
   calculateEmployeeScore 
 } from './new-scoring-model.js';
@@ -3485,8 +3476,9 @@ export async function runChiefEvaluator(period) {
 const AUDIT_KEYWORDS = ['损耗', '盘点', '毛利', '牛肉', '成本', '差评', '折扣', '营收', '对账', '异常'];
 const OPS_KEYWORDS = ['图片', '卫生', '检查', '拍照', '摆盘', '收货', '消毒', '开市', '闭市', '巡检'];
 const EVAL_KEYWORDS = ['分数', '绩效', '考核', '奖金', '得分', '扣分', '排名', '评价', '这周'];
-const APPEAL_KEYWORDS = ['申诉', '取消扣分', '不公平', '误判', '恢复'];
-const SOP_KEYWORDS = ['标准', '流程', 'SOP', '规范', '手册', '赔付', '退款', '怎么办', '怎么处理', '培训', '入职培训', '课件', '带教', '讲师', '考核培训', '技能培训'];
+const HR_KEYWORDS = ['离职', '辞职', '入职', '转正', '晋升', '调岗', '加薪', '薪资', '工资', '请假', '休假', '社保', '人事', '档案', '考勤'];
+const APPEAL_KEYWORDS = ['申诉', '取消扣分', '不公平', '误判', '恢复', '投诉', '举报'];
+const SOP_KEYWORDS = ['SOP', '赔付', '退款', '培训', '入职培训', '课件', '带教', '讲师', '考核培训', '技能培训', '标准作业'];
 
 // Agent name prefix mapping
 const AGENT_PREFIX = {
@@ -3505,15 +3497,99 @@ export function prefixWithAgentName(route, text) {
   return `${prefix}：${text}`;
 }
 
-function routeMessage(text, hasImage) {
+async function routeMessage(text, hasImage, senderUsername) {
   const t = String(text || '').trim();
-  if (hasImage) return 'ops_supervisor';
-  if (APPEAL_KEYWORDS.some(k => t.includes(k))) return 'appeal';
-  if (AUDIT_KEYWORDS.some(k => t.includes(k))) return 'data_auditor';
-  if (OPS_KEYWORDS.some(k => t.includes(k))) return 'ops_supervisor';
-  if (EVAL_KEYWORDS.some(k => t.includes(k))) return 'chief_evaluator';
-  if (SOP_KEYWORDS.some(k => t.includes(k))) return 'train_advisor';
-  return 'general';
+  if (hasImage) return { route: 'ops_supervisor' };
+  
+  // 快速通行：如果是单数字选项回复，直接返回general供后续继承历史路由
+  if (/^\d+$/.test(t) || /^[一二三四五六七八九十]$/.test(t)) return { route: 'general' };
+
+  // 获取最近的对话历史作为上下文（近30分钟内的最后3条非系统消息）
+  let contextStr = '';
+  if (senderUsername) {
+    try {
+      const historyRes = await pool().query(
+        `SELECT content_text, direction FROM agent_messages WHERE sender_username = $1 AND content_type IN ('text', 'image') AND created_at > NOW() - INTERVAL '30 minutes' ORDER BY created_at DESC LIMIT 3`,
+        [senderUsername]
+      );
+      if (historyRes.rows && historyRes.rows.length > 0) {
+        const msgs = historyRes.rows.reverse().map(r => `${r.direction === 'in' ? '用户' : 'Agent'}: ${r.content_text}`);
+        contextStr = `\n【最近对话上下文】\n${msgs.join('\n')}\n`;
+      }
+    } catch (e) {
+      console.error('[route] history fetch error:', e?.message);
+    }
+  }
+
+  const systemPrompt = `你是HRMS系统的主控路由Agent (Master Agent)。
+你的唯一任务是根据用户的输入和对话上下文，决定将其路由给哪个专业的子Agent处理。
+请严格输出JSON格式，必须包含以下三个字段，不要输出任何其他Markdown或散文：
+{
+  "route": "目标Agent标识符",
+  "confidence": 0到1之间的置信度分数,
+  "reason": "路由的简短理由，如果confidence低于0.7，请在这里填入反问用户的澄清话术（例如：您是想咨询财务问题还是技术问题？）"
+}
+
+可用Agent标识符及职责：
+- data_auditor : 负责【数据审计】，如查询门店营收、毛利率、损耗、盘点、成本、差评数据、充值等数据分析。
+- ops_supervisor : 负责【营运督导】，如开市收市检查、卫生巡检、图片审核、日常巡店检查表。
+- chief_evaluator : 负责【HR与绩效】，如查询个人绩效分数、考核扣分、门店评级，以及离职、入职、请假、加薪等HR人事流程与制度咨询。
+- train_advisor : 负责【培训与SOP】，如查阅SOP规范、操作指导、退款赔付流程，以及发起培训、查询课件、员工带教。
+- appeal : 负责【申诉与投诉】，如员工对处罚扣分不服的申诉、对店长或同事的投诉举报。
+- general : 如果无法明确归类到以上5个专业领域，或者只是简单的闲聊打招呼。
+
+【Few-Shot 示例】
+示例1:
+用户输入: "我登不上系统了"
+输出: {"route": "general", "confidence": 0.9, "reason": "系统登录问题不属于当前5个专业Agent，交由general处理"}
+示例2:
+用户输入: "我要投诉"
+输出: {"route": "appeal", "confidence": 0.95, "reason": "明确包含投诉意图"}
+示例3:
+【最近对话上下文】
+用户: 我要投诉
+Agent: 请问你要投诉谁？
+用户输入: "店长"
+输出: {"route": "appeal", "confidence": 0.95, "reason": "结合上下文，用户在回复投诉对象，继续申诉流程"}
+示例4:
+用户输入: "帮我查一下那个单子"
+输出: {"route": "general", "confidence": 0.4, "reason": "请问您是要查营收数据单、培训单，还是考勤异常单？"}
+${contextStr}
+当前用户输入: "${t}"
+请严格返回JSON：`;
+
+  try {
+    const llm = await callLLM([
+      { role: 'system', content: systemPrompt }
+    ], { temperature: 0.1, max_tokens: 150 }); // 增加token以容纳JSON
+    
+    let resultText = String(llm.content || '').trim();
+    // 移除可能包裹的 markdown JSON 标记
+    resultText = resultText.replace(/^```json\s*/i, '').replace(/```$/i, '').trim();
+    
+    let result;
+    try {
+      result = JSON.parse(resultText);
+    } catch (parseError) {
+      console.error('[route] JSON parse failed, text:', resultText);
+      return { route: 'general' };
+    }
+    
+    const validRoutes = ['data_auditor', 'ops_supervisor', 'chief_evaluator', 'train_advisor', 'appeal', 'general'];
+    
+    // 置信度过滤
+    if (result.confidence < 0.7 && result.reason) {
+      return { route: 'clarify', message: result.reason };
+    }
+    
+    if (validRoutes.includes(result.route)) {
+      return { route: result.route };
+    }
+    return { route: 'general' };
+  } catch (e) {
+    console.error('[route] LLM routing failed, fallback to general:', e?.message);
+    return { route: 'general' };
+  }
 }
 
 // ─────────────────────────────────────────────
@@ -3522,9 +3598,32 @@ function routeMessage(text, hasImage) {
 
 async function handleAgentMessage(senderUsername, senderName, senderStore, senderRole, senderBrandContext, text, imageUrls) {
   const hasImage = Array.isArray(imageUrls) && imageUrls.length > 0;
-  const route = routeMessage(text, hasImage);
+  let routeRes = await routeMessage(text, hasImage, senderUsername);
+  let route = routeRes.route;
+  
+  if (route === 'clarify') {
+    return prefixWithAgentName('master', routeRes.message || '请问您具体想咨询哪个方面的问题？');
+  }
+
   const store = senderStore;
   
+  // 【修复】继承上一轮的 Agent，解决多轮对话中断（例如用户回复选项 1, 2）的问题
+  // 仅继承5分钟内的最近一条非general路由，避免跨对话污染
+  if (route === 'general' && (/^\d+$/.test(text) || /^[一二三四五六七八九十]$/.test(text))) {
+    try {
+      const lastRouteResult = await pool().query(
+        `SELECT routed_to FROM agent_messages WHERE sender_username = $1 AND direction = 'in' AND content_type IN ('text','image') AND routed_to IS NOT NULL AND routed_to != 'general' AND created_at > NOW() - INTERVAL '5 minutes' ORDER BY created_at DESC LIMIT 1`,
+        [senderUsername]
+      );
+      if (lastRouteResult.rows && lastRouteResult.rows.length > 0) {
+        route = lastRouteResult.rows[0].routed_to;
+        console.log(`[route] Inherited recent route: ${route} for short input: ${text}`);
+      }
+    } catch (e) {
+      console.error('[route] inherit route error:', e?.message);
+    }
+  }
+
   // 检查是否为培训任务审批（管理员审核下发）
   if (text.includes('审核通过') && text.includes('下发') && (senderRole === 'admin' || senderRole === 'hr_manager')) {
     const pendingTasks = await pool().query(
@@ -3612,19 +3711,25 @@ async function handleAgentMessage(senderUsername, senderName, senderStore, sende
   try {
     switch (route) {
       case 'data_auditor': {
-        const issuesR = await pool().query(
-          `SELECT * FROM agent_issues WHERE store = $1 AND status != 'resolved' ORDER BY created_at DESC LIMIT 10`, [store]
-        );
-        const issues = issuesR.rows || [];
-        if (issues.length) {
-          const list = issues.map((i, idx) => `${idx + 1}. ${i.severity === 'high' ? '🔴' : '🟡'} ${i.title}`).join('\n');
-          response = `${senderName}，${store}门店当前有 ${issues.length} 条未解决的审计异常：\n\n${list}\n\n请针对以上问题逐条排查并回复整改措施。`;
-        } else {
-          const result = await runDataAuditor();
-          response = result.issuesCreated > 0
-            ? `刚完成数据审计，发现 ${result.issuesCreated} 条新异常，稍后推送给你。`
-            : `${store}门店近期数据审计正常，暂无异常项。继续保持！👍`;
-        }
+        // 先查异常数据作为上下文
+        let issueContext = '';
+        try {
+          const issuesR = await pool().query(
+            `SELECT severity, title, created_at FROM agent_issues WHERE store = $1 AND status != 'resolved' ORDER BY created_at DESC LIMIT 5`, [store]
+          );
+          if (issuesR.rows?.length) {
+            issueContext = '\n\n当前门店未解决的审计异常：\n' + issuesR.rows.map((i, idx) => `${idx+1}. [${i.severity}] ${i.title}`).join('\n');
+          }
+        } catch (e) {}
+
+        const biLlm = await callLLM([
+          { role: 'system', content: `你是餐饮企业数据审计专员（BI Agent），负责门店数据分析、异常检测和审计。当前门店：${store}（${brand}）。用户：${senderName}（${senderRole === 'store_manager' ? '店长' : senderRole === 'store_production_manager' ? '出品经理' : '员工'}）。\n\n你的职责：\n- 损耗分析、盘点数据、毛利率监控\n- 营收对账、成本异常检测\n- 差评数据分析\n- 充值数据追踪\n\n${issueContext}\n\n请根据用户问题，结合门店实际数据给出专业、简洁的分析和建议。如果用户问的是具体数据，尽量给出结构化回复。回复不超过300字。` },
+          ...getContext(senderUsername).slice(-4),
+          { role: 'user', content: text }
+        ]);
+        response = biLlm.content || '收到，我会查看门店数据并尽快回复。';
+        updateContext(senderUsername, 'user', text);
+        updateContext(senderUsername, 'assistant', response);
         agentData = { route, store, brand, brandId, brandConfig };
         break;
       }
@@ -3699,67 +3804,62 @@ async function handleAgentMessage(senderUsername, senderName, senderStore, sende
       }
 
       case 'chief_evaluator': {
-        const scoresR = await pool().query(
-          `SELECT * FROM agent_scores WHERE username = $1 ORDER BY created_at DESC LIMIT 1`, [senderUsername]
-        );
-        const score = scoresR.rows?.[0];
-        if (score) {
-          // 新评分模型显示格式
-          const bd = score.breakdown || {};
-          const storeRating = bd.store_rating || null;
-          const execRating = bd.execution_rating || null;
-          const attRating = bd.attitude_rating || null;
-          const abiRating = bd.ability_rating || null;
-          
-          // 判断是否为新模型
-          const isNewModel = score.score_model === 'new_model';
-          
-          if (isNewModel) {
-            // 新模型：门店评级 + 三维评分
-            const storeRatingText = storeRating ? `${storeRating}级` : '待评估';
-            const execRatingText = execRating ? `${execRating}级` : '待评估';
-            const attRatingText = attRating ? `${attRating}级` : '待评估';
-            const abiRatingText = abiRating ? `${abiRating}级` : '待评估';
+        // 判断是否在问绩效分数（走数据查询），还是HR流程问题（走LLM）
+        const isScoreQuery = /分数|绩效|考核|得分|扣分|排名|评价|评级|奖金/.test(text);
+        
+        if (isScoreQuery) {
+          // 绩效查询：查数据库
+          const scoresR = await pool().query(
+            `SELECT * FROM agent_scores WHERE username = $1 ORDER BY created_at DESC LIMIT 1`, [senderUsername]
+          );
+          const score = scoresR.rows?.[0];
+          if (score) {
+            const bd = score.breakdown || {};
+            const storeRatingText = bd.store_rating ? `${bd.store_rating}级` : '-';
+            const execRatingText = bd.execution_rating ? `${bd.execution_rating}级` : '-';
+            const attRatingText = bd.attitude_rating ? `${bd.attitude_rating}级` : '-';
+            const abiRatingText = bd.ability_rating ? `${bd.ability_rating}级` : '-';
             
-            response = `HR: ${senderName}，你在${score.store}（${score.brand}）的最新考核：
-
-📊 绩效得分：${score.total_score} 分
-📋 模型：${score.score_model || 'new_model'}
-
-🏪 门店评级：${storeRatingText}
-📈 执行力：${execRatingText}
-💪 工作态度：${attRatingText}
-🎯 工作能力：${abiRatingText}
-
-${score.summary || ''}`;
+            response = `HR: ${senderName}，你在${score.store}（${score.brand}）的最新考核：\n\n📊 绩效得分：${score.total_score} 分\n🏪 门店评级：${storeRatingText}\n📈 执行力：${execRatingText}\n💪 工作态度：${attRatingText}\n🎯 工作能力：${abiRatingText}\n\n${score.summary || ''}`;
           } else {
-            // 旧模型兼容显示
-            const deductions = Array.isArray(score.deductions) ? score.deductions : [];
-            const deductionText = deductions.length
-              ? deductions.map(d => `• ${d.category}: ${d.points}分`).join('\n')
-              : '无扣分项';
-            response = `${senderName}，你在${score.store}（${score.brand}）的最新考核：\n\n📊 绩效得分：${score.total_score} 分\n📋 模型：${score.score_model}\n${Object.entries(bd).map(([k, v]) => `  • ${k}: ${v}分`).join('\n')}\n\n扣分明细：\n${deductionText}\n\n${score.summary || ''}`;
+            response = `${senderName}，暂无你的考核记录。考核将在月末自动生成。`;
           }
         } else {
-          const now = new Date();
-          const weekNum = Math.ceil((now.getDate() + new Date(now.getFullYear(), now.getMonth(), 1).getDay()) / 7);
-          const period = `${now.getFullYear()}-W${String(weekNum).padStart(2, '0')}`;
-          const result = await runChiefEvaluator(period);
-          const mine = result.results?.find(r => r.username === senderUsername);
-          response = mine
-            ? `刚完成本周考核：\n\n📊 总分：${mine.totalScore} 分\n${mine.summary || ''}`
-            : `暂无你的考核记录。考核将在本周结束时自动生成。`;
+          // HR流程问题：用LLM回答（带Check Agent质检）
+          const hrSystemPrompt = `你是餐饮企业HR专员（HR Agent），负责人事管理和员工服务。当前门店：${store}（${brand}）。用户：${senderName}（${senderRole === 'store_manager' ? '店长' : senderRole === 'store_production_manager' ? '出品经理' : '员工'}）。\n\n你的职责：\n- 离职流程指引（提交申请→审批→交接→结算）\n- 入职/转正/晋升/调岗流程\n- 薪资/加薪咨询（需走审批流程）\n- 请假/休假/考勤政策\n- 社保/档案/人事制度\n- 绩效考核规则说明\n\n请根据用户问题给出专业、简洁、有温度的回复。涉及具体流程时，分步骤说明。回复不超过300字。`;
+          const hrContext = getContext(senderUsername).slice(-4);
+          response = await runWithCheckAgent(text, 'chief_evaluator', async (checkFeedback) => {
+            const extraNote = checkFeedback ? `\n\n【质检反馈，请修正后重新回答】${checkFeedback}` : '';
+            const hrLlm = await callLLM([
+              { role: 'system', content: hrSystemPrompt + extraNote },
+              ...hrContext,
+              { role: 'user', content: text }
+            ]);
+            return hrLlm.content || '收到，我会为您查询相关信息并尽快回复。';
+          });
+          updateContext(senderUsername, 'user', text);
+          updateContext(senderUsername, 'assistant', response);
         }
         agentData = { route, brandId, brandConfig };
         break;
       }
 
       case 'appeal': {
-        const llm = await callLLM([
-          { role: 'system', content: `你是餐饮绩效申诉处理员。确认申诉内容，说明将核实数据，给出预计处理时间。专业公正有温度。` },
-          { role: 'user', content: `店长${senderName}（${store}门店）申诉：${text}` }
-        ]);
-        response = llm.content || '已记录你的申诉，我们将在24小时内核实并回复。';
+        const appealSystemPrompt = `你是餐饮企业投诉与申诉处理专员。你负责处理两类事务：
+1. 投诉（对店长、同事、服务等的投诉）：确认投诉内容，说明将转交相关负责人核实，保护投诉人隐私，给出处理流程和预计时间。
+2. 申诉（对绩效扣分、处罚等的申诉）：确认申诉内容，说明将核实数据，给出预计处理时间。
+回复要专业、公正、有温度，极其简短。如果用户回复数字选项，根据上下文理解用户选择并给出对应回复。`;
+        const appealContext = getContext(senderUsername);
+        const appealUserMsg = `${senderName}（${store}门店，${senderRole === 'store_manager' ? '店长' : senderRole === 'store_production_manager' ? '出品经理' : '员工'}）说：${text}`;
+        response = await runWithCheckAgent(text, 'appeal', async (checkFeedback) => {
+          const extraNote = checkFeedback ? `\n\n【质检反馈，请修正后重新回答】${checkFeedback}` : '';
+          const llm = await callLLM([
+            { role: 'system', content: appealSystemPrompt + extraNote },
+            ...appealContext,
+            { role: 'user', content: appealUserMsg }
+          ]);
+          return llm.content || '已记录，我们将在24小时内核实并回复。';
+        });
         try {
           await pool().query(`INSERT INTO agent_appeals (username, reason, status) VALUES ($1, $2, 'pending')`, [senderUsername, text]);
         } catch (e) {}
@@ -3849,12 +3949,14 @@ ${kbContext}${trainingTasksContext}
 
       default: {
         const roleText = senderRole === 'store_manager' ? '店长' : senderRole === 'store_production_manager' ? '出品经理' : '员工';
+
         const llm = await callLLM([
-          { role: 'system', content: `你是餐饮门店数字助理，服务于${store}（${brand}，brand_id=${brandId || 'n/a'}）。当前用户是${roleText}（${senderName}）。可以帮助：数据审计、营运检查、绩效查询、SOP咨询、申诉处理。简洁友好。` },
+          { role: 'system', content: `你是餐饮门店数字助理，服务于${store}（${brand}，brand_id=${brandId || 'n/a'}）。当前用户是${roleText}（${senderName}）。可以帮助：数据审计、营运检查、绩效查询、SOP咨询、申诉处理。回复需极其简短，最多提供带emoji的数字编号选项供用户选择。` },
+          ...getContext(senderUsername),
           { role: 'user', content: text }
         ]);
         response = llm.content || '收到你的消息。你可以问我数据审计、营运检查、绩效考核等问题，也可以直接发照片给我审核。';
-        agentData = { route, brandId, brandConfig, userRole: senderRole };
+        agentData = { route: 'general', contextUsed: getContext(senderUsername).length, brandId };
         break;
       }
     }
@@ -3868,8 +3970,67 @@ ${kbContext}${trainingTasksContext}
 }
 
 // ─────────────────────────────────────────────
-// 12. Bitable Polling Scheduler
+// 11. Check Agent - Self-Reflection Quality Gate
 // ─────────────────────────────────────────────
+
+async function checkAgentAudit(userQuery, agentResponse, route) {
+  const auditPrompt = `你是HRMS系统的质检Agent（Check Agent）。你的任务是审核子Agent的回答质量。
+
+【用户问题】
+${userQuery}
+
+【子Agent（${route}）的回答】
+${agentResponse}
+
+请从以下3个维度评分（每项1-10分），并给出综合判断：
+1. **准确性**：回答是否基于事实，有无幻觉或编造内容？
+2. **相关性**：回答是否真正解决了用户的问题？
+3. **语气**：语气是否专业、得当、不冷漠也不过度？
+
+请严格输出JSON格式：
+{
+  "accuracy": 分数,
+  "relevance": 分数,
+  "tone": 分数,
+  "total": 综合分数(三项平均),
+  "pass": true或false（total>=7为pass）,
+  "feedback": "如果不通过，给出具体的修改建议，指出哪里有问题以及如何改进"
+}`;
+
+  try {
+    const llm = await callLLM([
+      { role: 'system', content: auditPrompt }
+    ], { temperature: 0.1, max_tokens: 300 });
+
+    let text = String(llm.content || '').trim()
+      .replace(/^```json\s*/i, '').replace(/```$/i, '').trim();
+    return JSON.parse(text);
+  } catch (e) {
+    console.error('[check_agent] audit error:', e?.message);
+    return { pass: true }; // 审核失败时放行，避免阻塞
+  }
+}
+
+async function runWithCheckAgent(userQuery, route, generateFn, maxRetries = 2) {
+  let response = await generateFn(null);
+  
+  // 仅对关键Agent启用Check Agent（避免增加general/ops的延迟）
+  const checkEnabledRoutes = ['chief_evaluator', 'data_auditor', 'appeal', 'train_advisor'];
+  if (!checkEnabledRoutes.includes(route)) return response;
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const audit = await checkAgentAudit(userQuery, response, route);
+    console.log(`[check_agent] route=${route} attempt=${attempt + 1} pass=${audit.pass} total=${audit.total}`);
+    
+    if (audit.pass !== false) break; // 通过则直接返回
+
+    // 不通过：带着 Check Agent 的反馈让子 Agent 重写
+    console.log(`[check_agent] rewriting: ${audit.feedback}`);
+    response = await generateFn(audit.feedback);
+  }
+
+  return response;
+}
 
 let _bitablePollingInterval = null;
 
@@ -4638,6 +4799,21 @@ export function registerAgentRoutes(app, authRequired) {
     } catch (e) { return res.status(500).json({ error: String(e?.message || e) }); }
   });
 
+  // ── My Score (for profile page) ──
+  app.get('/api/agent-scores/me', authRequired, async (req, res) => {
+    const username = String(req.user?.username || '').trim();
+    if (!username) return res.status(400).json({ error: 'missing_username' });
+    try {
+      const r = await pool().query(
+        `SELECT total_score, breakdown, summary, period, brand, store FROM agent_scores WHERE username = $1 ORDER BY created_at DESC LIMIT 1`,
+        [username]
+      );
+      if (!r.rows?.length) return res.json({ total_score: null, breakdown: {} });
+      const row = r.rows[0];
+      return res.json({ total_score: row.total_score, breakdown: row.breakdown || {}, summary: row.summary, period: row.period, brand: row.brand, store: row.store });
+    } catch (e) { return res.status(500).json({ error: String(e?.message || e) }); }
+  });
+
   // ── Scores ──
   app.get('/api/agents/scores', authRequired, async (req, res) => {
     const username = String(req.user?.username || '').trim();
@@ -4824,14 +5000,16 @@ export function registerAgentRoutes(app, authRequired) {
     const AUDIT_KEYWORDS = ['损耗', '盘点', '毛利', '牛肉', '成本', '差评', '折扣', '营收', '对账', '异常'];
     const OPS_KEYWORDS = ['图片', '卫生', '检查', '拍照', '摆盘', '收货', '消毒', '开市', '闭市', '巡检'];
     const EVAL_KEYWORDS = ['分数', '绩效', '考核', '奖金', '得分', '扣分', '排名', '评价', '这周'];
-    const APPEAL_KEYWORDS = ['申诉', '取消扣分', '不公平', '误判', '恢复'];
-    const SOP_KEYWORDS = ['标准', '流程', 'SOP', '规范', '手册', '赔付', '退款', '怎么办', '怎么处理', '培训', '入职培训', '课件', '带教', '讲师', '考核培训', '技能培训'];
+    const HR_KEYWORDS = ['离职', '辞职', '入职', '转正', '晋升', '调岗', '加薪', '薪资', '工资', '请假', '休假', '社保', '人事', '档案', '考勤'];
+    const APPEAL_KEYWORDS = ['申诉', '取消扣分', '不公平', '误判', '恢复', '投诉', '举报'];
+    const SOP_KEYWORDS = ['SOP', '赔付', '退款', '培训', '入职培训', '课件', '带教', '讲师', '考核培训', '技能培训', '标准作业'];
     const matched = [
       ...AUDIT_KEYWORDS.filter(k => text.includes(k)).map(k => `audit:${k}`),
       ...OPS_KEYWORDS.filter(k => text.includes(k)).map(k => `ops:${k}`),
+      ...HR_KEYWORDS.filter(k => text.includes(k)).map(k => `hr:${k}`),
       ...EVAL_KEYWORDS.filter(k => text.includes(k)).map(k => `eval:${k}`),
       ...APPEAL_KEYWORDS.filter(k => text.includes(k)).map(k => `appeal:${k}`),
-      ...SOP_KEYWORDS.filter(k => text.includes(k)).map(k => `sop:${k}`),
+      ...SOP_KEYWORDS.filter(k => text.includes(k)).map(k => `train:${k}`),
     ];
     return res.json({ route, text, hasImage, matchedKeywords: matched });
   });
