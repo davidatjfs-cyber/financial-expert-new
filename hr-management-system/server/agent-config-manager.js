@@ -76,6 +76,62 @@ const DEFAULT_RULES = [
   { category: '图片审核不合格', assignee_role: 'store_production_manager', normal_deduction: 2, major_deduction: 5 }
 ];
 
+const DEFAULT_PROMPT_TEMPLATES = [
+  { template_key: 'master_default_v1', agent_id: 'master', name: 'Master 默认模板', content: '你是 HRMS 系统的 Master Agent，负责调度和任务流转。', enabled: true, is_builtin: true },
+  { template_key: 'data_auditor_default_v1', agent_id: 'data_auditor', name: 'BI 默认模板', content: '你是数据审计 Agent，负责从业务报表和客诉数据中发现异常。', enabled: true, is_builtin: true },
+  { template_key: 'ops_supervisor_default_v1', agent_id: 'ops_supervisor', name: 'OP 默认模板', content: '你是营运督导 Agent，负责跟进异常任务的整改并审核照片。', enabled: true, is_builtin: true },
+  { template_key: 'sop_advisor_default_v1', agent_id: 'sop_advisor', name: 'SOP 默认模板', content: '你是 SOP 顾问 Agent，负责解答运营标准相关问题。', enabled: true, is_builtin: true },
+  { template_key: 'chief_evaluator_default_v1', agent_id: 'chief_evaluator', name: 'HR 默认模板', content: '你是绩效考核 Agent，负责根据任务解决情况进行扣分和结算。', enabled: true, is_builtin: true },
+  { template_key: 'appeal_handler_default_v1', agent_id: 'appeal_handler', name: '申诉 默认模板', content: '你是申诉处理 Agent，负责处理员工对扣分或处罚的异议。', enabled: true, is_builtin: true }
+];
+
+const DEFAULT_EMPLOYEE_RATING_CONFIG = {
+  execution: {
+    store_production_manager: { A_max_missing: 6, B_max_missing: 13, C_max_missing: 20 },
+    store_manager: {
+      hongchao: { A_min_new_members: 300, B_min_new_members: 249, C_min_new_members: 200 },
+      majixian: { low_score_threshold: 7, A_max_missing: 2, A_max_low_score: 2, B_max_missing: 4, B_max_low_score: 4, C_max_missing: 6, C_max_low_score: 6 }
+    }
+  },
+  attitude: { A_max_incomplete: 2, B_max_incomplete: 4 },
+  ability: {
+    store_production_manager: { A_min_diff: 1.01, B_min_diff: -1, B_max_diff: 1, C_min_diff: -2, C_max_diff: -1.01 },
+    store_manager: {
+      hongchao: { A_min_rating: 4.6, B_min_rating: 4.5, C_min_rating: 4.3 },
+      majixian: { A_min_rating: 4.5, B_min_rating: 4.4, C_min_rating: 4.0 }
+    }
+  }
+};
+
+function toJson(v, fallback = {}) {
+  try { return typeof v === 'string' ? JSON.parse(v) : (v || fallback); } catch (_) { return fallback; }
+}
+
+function validateEmployeeRatingConfig(cfg) {
+  if (!cfg || typeof cfg !== 'object') return false;
+  const ex = cfg.execution || {};
+  const at = cfg.attitude || {};
+  const ab = cfg.ability || {};
+  const ePm = ex.store_production_manager || {};
+  const eMgrHz = ex.store_manager?.hongchao || {};
+  const eMgrMjx = ex.store_manager?.majixian || {};
+  const a = at || {};
+  const bPm = ab.store_production_manager || {};
+  const bMgrHz = ab.store_manager?.hongchao || {};
+  const bMgrMjx = ab.store_manager?.majixian || {};
+  const checks = [
+    ePm.A_max_missing, ePm.B_max_missing, ePm.C_max_missing,
+    eMgrHz.A_min_new_members, eMgrHz.B_min_new_members, eMgrHz.C_min_new_members,
+    eMgrMjx.low_score_threshold, eMgrMjx.A_max_missing, eMgrMjx.A_max_low_score,
+    eMgrMjx.B_max_missing, eMgrMjx.B_max_low_score, eMgrMjx.C_max_missing, eMgrMjx.C_max_low_score,
+    a.A_max_incomplete, a.B_max_incomplete,
+    bPm.A_min_diff, bPm.B_min_diff, bPm.B_max_diff, bPm.C_min_diff, bPm.C_max_diff,
+    bMgrHz.A_min_rating, bMgrHz.B_min_rating, bMgrHz.C_min_rating,
+    bMgrMjx.A_min_rating, bMgrMjx.B_min_rating, bMgrMjx.C_min_rating
+  ];
+  return checks.every((v) => Number.isFinite(Number(v)));
+}
+
 export async function ensureAgentConfigTables() {
   try {
     await pool().query('create extension if not exists pgcrypto');
@@ -96,6 +152,11 @@ export async function ensureAgentConfigTables() {
       )
     `);
 
+    await pool().query(`
+      alter table agent_configs
+      add column if not exists prompt_template_id uuid
+    `);
+
     // 2. 异常扣分与责任人路由规则表
     await pool().query(`
       create table if not exists agent_rules (
@@ -109,13 +170,67 @@ export async function ensureAgentConfigTables() {
       )
     `);
 
+    await pool().query(`
+      create table if not exists agent_prompt_templates (
+        id uuid primary key default gen_random_uuid(),
+        template_key varchar(120) unique not null,
+        agent_id varchar(50) not null,
+        name varchar(120) not null,
+        content text not null,
+        enabled boolean default true,
+        is_builtin boolean default false,
+        created_at timestamp default current_timestamp,
+        updated_at timestamp default current_timestamp
+      )
+    `);
+
+    await pool().query(`
+      create table if not exists hr_rating_configs (
+        id uuid primary key default gen_random_uuid(),
+        config_key varchar(80) unique not null,
+        config jsonb not null,
+        enabled boolean default true,
+        updated_at timestamp default current_timestamp
+      )
+    `);
+
+    await pool().query(`
+      alter table agent_configs
+      add constraint fk_agent_prompt_template
+      foreign key (prompt_template_id) references agent_prompt_templates(id)
+      on delete set null
+    `).catch(() => null);
+
+    const templateIdMap = {};
+    for (const tpl of DEFAULT_PROMPT_TEMPLATES) {
+      const tr = await pool().query(
+        `insert into agent_prompt_templates (template_key, agent_id, name, content, enabled, is_builtin)
+         values ($1, $2, $3, $4, $5, $6)
+         on conflict (template_key)
+         do update set name = excluded.name, content = excluded.content, enabled = excluded.enabled, updated_at = now()
+         returning id, template_key`,
+        [tpl.template_key, tpl.agent_id, tpl.name, tpl.content, tpl.enabled !== false, tpl.is_builtin === true]
+      );
+      const row = tr.rows?.[0];
+      if (row?.template_key && row?.id) templateIdMap[row.template_key] = row.id;
+    }
+
     // 初始化默认 Agent 数据
     for (const agent of DEFAULT_AGENTS) {
+      const defaultTpl = DEFAULT_PROMPT_TEMPLATES.find((x) => x.agent_id === agent.agent_id);
+      const promptTemplateId = defaultTpl ? (templateIdMap[defaultTpl.template_key] || null) : null;
       await pool().query(`
-        insert into agent_configs (agent_id, name, description, system_prompt, model_name, temperature, enabled, schedule_interval)
-        values ($1, $2, $3, $4, $5, $6, $7, $8)
+        insert into agent_configs (agent_id, name, description, system_prompt, model_name, temperature, enabled, schedule_interval, prompt_template_id)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         on conflict (agent_id) do nothing
-      `, [agent.agent_id, agent.name, agent.description, agent.system_prompt, agent.model_name, agent.temperature, agent.enabled, agent.schedule_interval]);
+      `, [agent.agent_id, agent.name, agent.description, agent.system_prompt, agent.model_name, agent.temperature, agent.enabled, agent.schedule_interval, promptTemplateId]);
+
+      if (promptTemplateId) {
+        await pool().query(
+          `update agent_configs set prompt_template_id = coalesce(prompt_template_id, $1) where agent_id = $2`,
+          [promptTemplateId, agent.agent_id]
+        );
+      }
     }
 
     // 初始化默认 Rule 数据
@@ -126,6 +241,13 @@ export async function ensureAgentConfigTables() {
         on conflict (category) do nothing
       `, [rule.category, rule.assignee_role, rule.normal_deduction, rule.major_deduction]);
     }
+
+    await pool().query(
+      `insert into hr_rating_configs (config_key, config, enabled)
+       values ('employee_rating', $1::jsonb, true)
+       on conflict (config_key) do nothing`,
+      [JSON.stringify(DEFAULT_EMPLOYEE_RATING_CONFIG)]
+    );
     
     console.log('[AgentConfig] Tables ensured and default data seeded.');
   } catch (e) {
@@ -134,32 +256,195 @@ export async function ensureAgentConfigTables() {
 }
 
 export function registerAgentConfigRoutes(app, authRequired) {
+  const assertAdmin = (req, res) => {
+    const role = String(req.user?.role || '').trim();
+    if (!['admin', 'hq_manager'].includes(role)) {
+      res.status(403).json({ error: 'forbidden' });
+      return false;
+    }
+    return true;
+  };
+
   // === Agent Configs ===
   app.get('/api/admin/agents/configs', authRequired, async (req, res) => {
-    if (req.user?.role !== 'admin') return res.status(403).json({ error: 'forbidden' });
+    if (!assertAdmin(req, res)) return;
     try {
-      const r = await pool().query('select * from agent_configs order by agent_id');
+      const r = await pool().query(`
+        select c.*, t.name as prompt_template_name
+        from agent_configs c
+        left join agent_prompt_templates t on c.prompt_template_id = t.id
+        order by c.agent_id
+      `);
       res.json({ configs: r.rows });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
   app.put('/api/admin/agents/configs/:agent_id', authRequired, async (req, res) => {
-    if (req.user?.role !== 'admin') return res.status(403).json({ error: 'forbidden' });
+    if (!assertAdmin(req, res)) return;
     const agentId = req.params.agent_id;
-    const { system_prompt, model_name, temperature, enabled, schedule_interval } = req.body;
+    const body = req.body || {};
+    const { system_prompt, model_name, temperature, enabled, schedule_interval } = body;
+    const hasTemplateField = Object.prototype.hasOwnProperty.call(body, 'prompt_template_id');
+    const promptTemplateId = hasTemplateField ? String(body.prompt_template_id || '').trim() : null;
     try {
+      let nextPrompt = String(system_prompt || '').trim();
+      if (hasTemplateField && promptTemplateId) {
+        const t = await pool().query(
+          `select id, content from agent_prompt_templates where id = $1 and enabled = true limit 1`,
+          [promptTemplateId]
+        );
+        if (!t.rows?.length) return res.status(400).json({ error: 'invalid_prompt_template_id' });
+        nextPrompt = String(t.rows[0].content || '').trim();
+      }
       const r = await pool().query(`
-        update agent_configs 
-        set system_prompt = $1, model_name = $2, temperature = $3, enabled = $4, schedule_interval = $5, updated_at = now()
-        where agent_id = $6 returning *
-      `, [system_prompt, model_name, temperature, enabled, schedule_interval, agentId]);
+        update agent_configs
+        set system_prompt = $1,
+            model_name = $2,
+            temperature = $3,
+            enabled = $4,
+            schedule_interval = $5,
+            prompt_template_id = case when $6 then nullif($7, '')::uuid else prompt_template_id end,
+            updated_at = now()
+        where agent_id = $8 returning *
+      `, [nextPrompt, model_name, temperature, enabled, schedule_interval, hasTemplateField, promptTemplateId, agentId]);
+      clearAgentConfigCache();
       res.json({ config: r.rows[0] });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
+  // === Prompt Templates ===
+  app.get('/api/admin/agents/templates', authRequired, async (req, res) => {
+    if (!assertAdmin(req, res)) return;
+    const agentId = String(req.query?.agent_id || '').trim();
+    try {
+      if (agentId) {
+        const r = await pool().query(
+          `select * from agent_prompt_templates where agent_id = $1 order by is_builtin desc, updated_at desc`,
+          [agentId]
+        );
+        return res.json({ templates: r.rows });
+      }
+      const r = await pool().query('select * from agent_prompt_templates order by agent_id, is_builtin desc, updated_at desc');
+      return res.json({ templates: r.rows });
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/admin/agents/templates', authRequired, async (req, res) => {
+    if (!assertAdmin(req, res)) return;
+    const agentId = String(req.body?.agent_id || '').trim();
+    const name = String(req.body?.name || '').trim();
+    const content = String(req.body?.content || '').trim();
+    const enabled = req.body?.enabled !== false;
+    if (!agentId || !name || !content) return res.status(400).json({ error: 'missing_params' });
+    try {
+      const key = `custom_${agentId}_${Date.now()}`;
+      const r = await pool().query(
+        `insert into agent_prompt_templates (template_key, agent_id, name, content, enabled, is_builtin)
+         values ($1, $2, $3, $4, $5, false)
+         returning *`,
+        [key, agentId, name, content, enabled]
+      );
+      return res.json({ template: r.rows[0] });
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.put('/api/admin/agents/templates/:id', authRequired, async (req, res) => {
+    if (!assertAdmin(req, res)) return;
+    const id = String(req.params?.id || '').trim();
+    if (!id) return res.status(400).json({ error: 'missing_id' });
+    try {
+      const old = await pool().query('select * from agent_prompt_templates where id = $1 limit 1', [id]);
+      if (!old.rows?.length) return res.status(404).json({ error: 'not_found' });
+      const row = old.rows[0];
+
+      if (row.is_builtin) {
+        const enabled2 = req.body?.enabled === undefined ? row.enabled : !!req.body.enabled;
+        const name2 = String(req.body?.name || row.name).trim() || row.name;
+        const r = await pool().query(
+          `update agent_prompt_templates set name = $1, enabled = $2, updated_at = now() where id = $3 returning *`,
+          [name2, enabled2, id]
+        );
+        return res.json({ template: r.rows[0], locked_content: true });
+      }
+
+      const name2 = String(req.body?.name || row.name).trim() || row.name;
+      const content2 = String(req.body?.content || row.content).trim() || row.content;
+      const enabled2 = req.body?.enabled === undefined ? row.enabled : !!req.body.enabled;
+      const r = await pool().query(
+        `update agent_prompt_templates set name = $1, content = $2, enabled = $3, updated_at = now() where id = $4 returning *`,
+        [name2, content2, enabled2, id]
+      );
+      return res.json({ template: r.rows[0] });
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.delete('/api/admin/agents/templates/:id', authRequired, async (req, res) => {
+    if (!assertAdmin(req, res)) return;
+    const id = String(req.params?.id || '').trim();
+    if (!id) return res.status(400).json({ error: 'missing_id' });
+    try {
+      const old = await pool().query('select * from agent_prompt_templates where id = $1 limit 1', [id]);
+      if (!old.rows?.length) return res.status(404).json({ error: 'not_found' });
+      if (old.rows[0].is_builtin) return res.status(400).json({ error: 'builtin_template_cannot_delete' });
+
+      const used = await pool().query('select count(*)::int as c from agent_configs where prompt_template_id = $1', [id]);
+      if (Number(used.rows?.[0]?.c || 0) > 0) return res.status(400).json({ error: 'template_in_use' });
+
+      await pool().query('delete from agent_prompt_templates where id = $1', [id]);
+      return res.json({ ok: true });
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
+  });
+
+  // === HR 员工评级模型配置 ===
+  app.get('/api/admin/hr/employee-rating-config', authRequired, async (req, res) => {
+    if (!assertAdmin(req, res)) return;
+    try {
+      const r = await pool().query(`
+        select config, enabled, updated_at
+        from hr_rating_configs
+        where config_key = 'employee_rating'
+        limit 1
+      `);
+      const row = r.rows?.[0];
+      const config = row?.config ? toJson(row.config, DEFAULT_EMPLOYEE_RATING_CONFIG) : DEFAULT_EMPLOYEE_RATING_CONFIG;
+      return res.json({ config, enabled: row?.enabled !== false, updated_at: row?.updated_at || null });
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.put('/api/admin/hr/employee-rating-config', authRequired, async (req, res) => {
+    if (!assertAdmin(req, res)) return;
+    const config = req.body?.config;
+    const enabled2 = req.body?.enabled !== false;
+    if (!validateEmployeeRatingConfig(config)) return res.status(400).json({ error: 'invalid_config' });
+    try {
+      const r = await pool().query(
+        `insert into hr_rating_configs (config_key, config, enabled, updated_at)
+         values ('employee_rating', $1::jsonb, $2, now())
+         on conflict (config_key)
+         do update set config = excluded.config, enabled = excluded.enabled, updated_at = now()
+         returning config, enabled, updated_at`,
+        [JSON.stringify(config), enabled2]
+      );
+      clearEmployeeRatingConfigCache();
+      return res.json({ ok: true, config: toJson(r.rows?.[0]?.config, config), enabled: r.rows?.[0]?.enabled !== false });
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
+  });
+
   // === Agent Rules ===
   app.get('/api/admin/agents/rules', authRequired, async (req, res) => {
-    if (req.user?.role !== 'admin') return res.status(403).json({ error: 'forbidden' });
+    if (!assertAdmin(req, res)) return;
     try {
       const r = await pool().query('select * from agent_rules order by category');
       res.json({ rules: r.rows });
@@ -167,36 +452,39 @@ export function registerAgentConfigRoutes(app, authRequired) {
   });
 
   app.put('/api/admin/agents/rules/:id', authRequired, async (req, res) => {
-    if (req.user?.role !== 'admin') return res.status(403).json({ error: 'forbidden' });
+    if (!assertAdmin(req, res)) return;
     const id = req.params.id;
     const { category, assignee_role, normal_deduction, major_deduction, enabled } = req.body;
     try {
       const r = await pool().query(`
-        update agent_rules 
+        update agent_rules
         set category = $1, assignee_role = $2, normal_deduction = $3, major_deduction = $4, enabled = $5, updated_at = now()
         where id = $6 returning *
       `, [category, assignee_role, normal_deduction, major_deduction, enabled, id]);
+      clearAgentRuleCache();
       res.json({ rule: r.rows[0] });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
   app.post('/api/admin/agents/rules', authRequired, async (req, res) => {
-    if (req.user?.role !== 'admin') return res.status(403).json({ error: 'forbidden' });
+    if (!assertAdmin(req, res)) return;
     const { category, assignee_role, normal_deduction, major_deduction, enabled } = req.body;
     try {
       const r = await pool().query(`
         insert into agent_rules (category, assignee_role, normal_deduction, major_deduction, enabled)
         values ($1, $2, $3, $4, $5) returning *
       `, [category, assignee_role, normal_deduction, major_deduction, enabled !== false]);
+      clearAgentRuleCache();
       res.json({ rule: r.rows[0] });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
   app.delete('/api/admin/agents/rules/:id', authRequired, async (req, res) => {
-    if (req.user?.role !== 'admin') return res.status(403).json({ error: 'forbidden' });
+    if (!assertAdmin(req, res)) return;
     const id = req.params.id;
     try {
       await pool().query('delete from agent_rules where id = $1', [id]);
+      clearAgentRuleCache();
       res.json({ ok: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
@@ -206,6 +494,11 @@ export function registerAgentConfigRoutes(app, authRequired) {
 let cachedRules = null;
 let rulesLastFetched = 0;
 const CACHE_TTL = 60 * 1000; // 1 分钟缓存
+
+export function clearAgentRuleCache() {
+  cachedRules = null;
+  rulesLastFetched = 0;
+}
 
 export async function getAgentRules() {
   const now = Date.now();
@@ -247,6 +540,11 @@ export async function getIssueScoreRulesMap() {
 let cachedConfigs = null;
 let configsLastFetched = 0;
 
+export function clearAgentConfigCache() {
+  cachedConfigs = null;
+  configsLastFetched = 0;
+}
+
 export async function getAgentConfigs() {
   const now = Date.now();
   if (cachedConfigs && (now - configsLastFetched < CACHE_TTL)) {
@@ -270,4 +568,33 @@ export async function getAgentConfigs() {
 export async function getAgentConfig(agentId) {
   const configs = await getAgentConfigs();
   return configs[agentId] || null;
+}
+
+let cachedEmployeeRatingConfig = null;
+let employeeRatingLastFetched = 0;
+
+export function clearEmployeeRatingConfigCache() {
+  cachedEmployeeRatingConfig = null;
+  employeeRatingLastFetched = 0;
+}
+
+export async function getEmployeeRatingConfig() {
+  const now = Date.now();
+  if (cachedEmployeeRatingConfig && (now - employeeRatingLastFetched < CACHE_TTL)) {
+    return cachedEmployeeRatingConfig;
+  }
+  try {
+    const r = await pool().query(`
+      select config
+      from hr_rating_configs
+      where config_key = 'employee_rating' and enabled = true
+      limit 1
+    `);
+    cachedEmployeeRatingConfig = r.rows?.[0]?.config ? toJson(r.rows[0].config, DEFAULT_EMPLOYEE_RATING_CONFIG) : DEFAULT_EMPLOYEE_RATING_CONFIG;
+    employeeRatingLastFetched = now;
+    return cachedEmployeeRatingConfig;
+  } catch (e) {
+    console.error('[getEmployeeRatingConfig] Error:', e);
+    return DEFAULT_EMPLOYEE_RATING_CONFIG;
+  }
 }

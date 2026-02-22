@@ -128,6 +128,36 @@ export const EMPLOYEE_SCORE_CONFIG = {
   }
 };
 
+const DEFAULT_EMPLOYEE_RATING_CONFIG = {
+  execution: {
+    store_production_manager: { A_max_missing: 6, B_max_missing: 13, C_max_missing: 20 },
+    store_manager: {
+      hongchao: { A_min_new_members: 300, B_min_new_members: 249, C_min_new_members: 200 },
+      majixian: { low_score_threshold: 7, A_max_missing: 2, A_max_low_score: 2, B_max_missing: 4, B_max_low_score: 4, C_max_missing: 6, C_max_low_score: 6 }
+    }
+  },
+  attitude: { A_max_incomplete: 2, B_max_incomplete: 4 },
+  ability: {
+    store_production_manager: { A_min_diff: 1.01, B_min_diff: -1, B_max_diff: 1, C_min_diff: -2, C_max_diff: -1.01 },
+    store_manager: {
+      hongchao: { A_min_rating: 4.6, B_min_rating: 4.5, C_min_rating: 4.3 },
+      majixian: { A_min_rating: 4.5, B_min_rating: 4.4, C_min_rating: 4.0 }
+    }
+  }
+};
+
+async function getRuntimeEmployeeRatingConfig() {
+  try {
+    const r = await pool().query(
+      `select config from hr_rating_configs where config_key = 'employee_rating' and enabled = true limit 1`
+    );
+    const cfg = r.rows?.[0]?.config;
+    return cfg && typeof cfg === 'object' ? cfg : DEFAULT_EMPLOYEE_RATING_CONFIG;
+  } catch (_) {
+    return DEFAULT_EMPLOYEE_RATING_CONFIG;
+  }
+}
+
 // ─────────────────────────────────────────────
 // 3. 门店评级计算函数
 // ─────────────────────────────────────────────
@@ -233,6 +263,7 @@ export async function calculateEmployeeScore(store, username, role, period) {
 // ─────────────────────────────────────────────
 export async function calculateExecutionRating(store, username, role, period) {
   try {
+    const cfg = await getRuntimeEmployeeRatingConfig();
     if (role === 'store_production_manager') {
       // 出品经理：检查3种申报报表的提交情况
       const openingReports = await getKitchenReportsCount(store, period, 'opening');
@@ -243,11 +274,12 @@ export async function calculateExecutionRating(store, username, role, period) {
       const totalExpected = expectedDays * 3; // 每天3种报告
       const totalSubmitted = openingReports + closingReports + receivingReports;
       const totalMissing = totalExpected - totalSubmitted;
+      const t = cfg?.execution?.store_production_manager || DEFAULT_EMPLOYEE_RATING_CONFIG.execution.store_production_manager;
       
       // 根据缺提交次数确定评级
-      if (totalMissing <= 6) return 'A';
-      else if (totalMissing <= 13) return 'B';
-      else if (totalMissing <= 20) return 'C';
+      if (totalMissing <= Number(t.A_max_missing)) return 'A';
+      else if (totalMissing <= Number(t.B_max_missing)) return 'B';
+      else if (totalMissing <= Number(t.C_max_missing)) return 'C';
       else return 'D';
     }
     
@@ -257,9 +289,10 @@ export async function calculateExecutionRating(store, username, role, period) {
       if (brand === '洪潮') {
         // 洪潮店长：企微会员每月新增数量
         const newMembers = await getMonthlyNewWechatMembers(store, period);
-        if (newMembers >= 300) return 'A';
-        else if (newMembers >= 249) return 'B';
-        else if (newMembers >= 200) return 'C';
+        const t = cfg?.execution?.store_manager?.hongchao || DEFAULT_EMPLOYEE_RATING_CONFIG.execution.store_manager.hongchao;
+        if (newMembers >= Number(t.A_min_new_members)) return 'A';
+        else if (newMembers >= Number(t.B_min_new_members)) return 'B';
+        else if (newMembers >= Number(t.C_min_new_members)) return 'C';
         else return 'D';
       } else {
         // 马己仙店长：例会报告每天提交1次且得分>=7分
@@ -267,11 +300,12 @@ export async function calculateExecutionRating(store, username, role, period) {
         const expectedDays = getDaysInPeriod(period);
         const submittedCount = meetingReports.filter(r => r.submitted).length;
         const totalMissing = expectedDays - submittedCount;
-        const lowScoreCount = meetingReports.filter(r => r.submitted && r.meeting_score < 7).length;
+        const t = cfg?.execution?.store_manager?.majixian || DEFAULT_EMPLOYEE_RATING_CONFIG.execution.store_manager.majixian;
+        const lowScoreCount = meetingReports.filter(r => r.submitted && r.meeting_score < Number(t.low_score_threshold)).length;
         
-        if (totalMissing <= 2 && lowScoreCount <= 2) return 'A';
-        else if (totalMissing <= 4 && lowScoreCount <= 4) return 'B';
-        else if (totalMissing <= 6 && lowScoreCount <= 6) return 'C';
+        if (totalMissing <= Number(t.A_max_missing) && lowScoreCount <= Number(t.A_max_low_score)) return 'A';
+        else if (totalMissing <= Number(t.B_max_missing) && lowScoreCount <= Number(t.B_max_low_score)) return 'B';
+        else if (totalMissing <= Number(t.C_max_missing) && lowScoreCount <= Number(t.C_max_low_score)) return 'C';
         else return 'D';
       }
     }
@@ -289,12 +323,14 @@ export async function calculateExecutionRating(store, username, role, period) {
 // ─────────────────────────────────────────────
 export async function calculateAttitudeRating(username, period) {
   try {
+    const cfg = await getRuntimeEmployeeRatingConfig();
+    const t = cfg?.attitude || DEFAULT_EMPLOYEE_RATING_CONFIG.attitude;
     // 获取该用户在period期间未完成的agent任务次数
     const incompleteCount = await getIncompleteTaskCount(username, period);
     
     // 根据未完成任务次数确定评级
-    if (incompleteCount <= 2) return 'A';
-    else if (incompleteCount <= 4) return 'B';
+    if (incompleteCount <= Number(t.A_max_incomplete)) return 'A';
+    else if (incompleteCount <= Number(t.B_max_incomplete)) return 'B';
     else return 'C';
     
   } catch (error) {
@@ -308,6 +344,7 @@ export async function calculateAttitudeRating(username, period) {
 // ─────────────────────────────────────────────
 export async function calculateAbilityRating(store, username, role, period) {
   try {
+    const cfg = await getRuntimeEmployeeRatingConfig();
     if (role === 'store_production_manager') {
       // 出品经理：基于毛利率
       const marginData = await getMarginData(store, period);
@@ -316,10 +353,11 @@ export async function calculateAbilityRating(store, username, role, period) {
       }
       
       const diff = marginData.actual_margin - marginData.target_margin;
+      const t = cfg?.ability?.store_production_manager || DEFAULT_EMPLOYEE_RATING_CONFIG.ability.store_production_manager;
       
-      if (diff > 1) return 'A';
-      else if (diff >= -1 && diff <= 1) return 'B';
-      else if (diff >= -2 && diff < -1) return 'C';
+      if (diff >= Number(t.A_min_diff)) return 'A';
+      else if (diff >= Number(t.B_min_diff) && diff <= Number(t.B_max_diff)) return 'B';
+      else if (diff >= Number(t.C_min_diff) && diff <= Number(t.C_max_diff)) return 'C';
       else return 'D';
     }
     
@@ -329,13 +367,14 @@ export async function calculateAbilityRating(store, username, role, period) {
       const brand = inferBrandFromStoreName(store);
       
       if (!rating) return 'C';
-      
-      const rules = EMPLOYEE_SCORE_CONFIG.ability_rules.store_manager.rating_thresholds[brand];
+
+      const key = brand === '洪潮' ? 'hongchao' : 'majixian';
+      const rules = cfg?.ability?.store_manager?.[key] || DEFAULT_EMPLOYEE_RATING_CONFIG.ability.store_manager[key];
       if (!rules) return 'C';
       
-      if (rating >= rules.A.min_rating) return 'A';
-      else if (rating >= rules.B.min_rating) return 'B';
-      else if (rating >= rules.C.min_rating) return 'C';
+      if (rating >= Number(rules.A_min_rating)) return 'A';
+      else if (rating >= Number(rules.B_min_rating)) return 'B';
+      else if (rating >= Number(rules.C_min_rating)) return 'C';
       else return 'D';
     }
     

@@ -6676,6 +6676,176 @@
                 </div>
             </div>
 
+            <div id="agent-config-modal" class="modal">
+                <div class="modal-content am-modal-content" style="max-width: 1100px;">
+                    <div class="am-header">
+                        <div class="am-header-left">
+                            <div class="am-logo">⚙</div>
+                            <div class="am-header-text">
+                                <h3>Agent 配置中心</h3>
+                                <span class="am-header-sub">管理员可调整模型、提示词、责任人和扣分规则</span>
+                            </div>
+                        </div>
+                        <button class="am-close" onclick="closeAgentConfigModal()">×</button>
+                    </div>
+                    <div class="am-nav">
+                        <button id="agent-config-tab-btn-configs" class="am-nav-btn active" onclick="switchAgentConfigTab('configs')"><span>基础配置</span></button>
+                        <button id="agent-config-tab-btn-rules" class="am-nav-btn btn-secondary" onclick="switchAgentConfigTab('rules')"><span>责任人/扣分规则</span></button>
+                        <button id="agent-config-tab-btn-templates" class="am-nav-btn btn-secondary" onclick="switchAgentConfigTab('templates')"><span>模板库</span></button>
+                        <button id="agent-config-tab-btn-hr-rating" class="am-nav-btn btn-secondary" onclick="switchAgentConfigTab('hr_rating')"><span>HR评级模型</span></button>
+                    </div>
+                    <div class="am-body">
+                        <div id="agent-config-tab-configs" class="am-tab-panel">
+                            <div id="agent-configs-list" class="am-list"></div>
+                        </div>
+                        <div id="agent-config-tab-rules" class="am-tab-panel" style="display:none;">
+                            <div style="display:flex;justify-content:flex-end;margin-bottom:10px;">
+                                <button class="btn" onclick="openAgentRuleEditor('')">新增规则</button>
+                            </div>
+                            <div class="am-card" style="overflow:auto;">
+                                <table style="width:100%; border-collapse:collapse;">
+                                    <thead>
+                                        <tr>
+                                            <th style="text-align:left; padding:8px;">异常类型</th>
+                                            <th style="text-align:left; padding:8px;">责任人角色</th>
+                                            <th style="text-align:left; padding:8px;">中度扣分</th>
+                                            <th style="text-align:left; padding:8px;">重度扣分</th>
+                                            <th style="text-align:left; padding:8px;">状态</th>
+                                            <th style="text-align:left; padding:8px;">操作</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="agent-rules-tbody"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                        <div id="agent-config-tab-templates" class="am-tab-panel" style="display:none;">
+                            <div class="am-card" style="margin-bottom:10px;">
+                                <div style="display:grid;grid-template-columns:160px 220px 1fr auto;gap:8px;align-items:end;">
+                                    <div>
+                                        <label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px;">Agent</label>
+                                        <select id="agent-template-new-agent"></select>
+                                    </div>
+                                    <div>
+                                        <label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px;">模板名称</label>
+                                        <input id="agent-template-new-name" placeholder="例如：公司标准回复v2">
+                                    </div>
+                                    <div>
+                                        <label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px;">模板内容</label>
+                                        <textarea id="agent-template-new-content" style="width:100%;min-height:72px;background:rgba(15,23,42,0.45);color:#e2e8f0;border:1px solid rgba(148,163,184,.25);border-radius:8px;padding:8px;"></textarea>
+                                    </div>
+                                    <button class="btn" onclick="createAgentTemplate()">新增模板</button>
+                                </div>
+                            </div>
+                            <div id="agent-templates-list" class="am-list"></div>
+                        </div>
+                        <div id="agent-config-tab-hr-rating" class="am-tab-panel" style="display:none;">
+                            <div class="am-card">
+                                <div style="font-weight:700;margin-bottom:10px;">出品经理 · 执行力（缺失次数阈值）</div>
+                                <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;">
+                                    <input id="hr-rating-exec-pm-a" type="number" min="0" step="1" placeholder="A 最大缺失">
+                                    <input id="hr-rating-exec-pm-b" type="number" min="0" step="1" placeholder="B 最大缺失">
+                                    <input id="hr-rating-exec-pm-c" type="number" min="0" step="1" placeholder="C 最大缺失">
+                                </div>
+                            </div>
+                            <div class="am-card">
+                                <div style="font-weight:700;margin-bottom:10px;">店长 · 执行力（洪潮：企微会员月新增）</div>
+                                <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;">
+                                    <input id="hr-rating-exec-sm-hz-a" type="number" min="0" step="1" placeholder="A 最小新增">
+                                    <input id="hr-rating-exec-sm-hz-b" type="number" min="0" step="1" placeholder="B 最小新增">
+                                    <input id="hr-rating-exec-sm-hz-c" type="number" min="0" step="1" placeholder="C 最小新增">
+                                </div>
+                            </div>
+                            <div class="am-card">
+                                <div style="font-weight:700;margin-bottom:10px;">店长 · 执行力（马己仙：例会缺失/低分）</div>
+                                <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;">
+                                    <input id="hr-rating-exec-sm-mjx-score" type="number" min="0" step="0.1" placeholder="低分阈值">
+                                    <input id="hr-rating-exec-sm-mjx-a-miss" type="number" min="0" step="1" placeholder="A 最大缺失">
+                                    <input id="hr-rating-exec-sm-mjx-a-low" type="number" min="0" step="1" placeholder="A 最大低分次数">
+                                    <input id="hr-rating-exec-sm-mjx-b-miss" type="number" min="0" step="1" placeholder="B 最大缺失">
+                                    <input id="hr-rating-exec-sm-mjx-b-low" type="number" min="0" step="1" placeholder="B 最大低分次数">
+                                    <input id="hr-rating-exec-sm-mjx-c-miss" type="number" min="0" step="1" placeholder="C 最大缺失">
+                                    <input id="hr-rating-exec-sm-mjx-c-low" type="number" min="0" step="1" placeholder="C 最大低分次数">
+                                </div>
+                            </div>
+                            <div class="am-card">
+                                <div style="font-weight:700;margin-bottom:10px;">工作态度（未完成任务次数阈值）</div>
+                                <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;">
+                                    <input id="hr-rating-att-a" type="number" min="0" step="1" placeholder="A 最大未完成">
+                                    <input id="hr-rating-att-b" type="number" min="0" step="1" placeholder="B 最大未完成">
+                                </div>
+                            </div>
+                            <div class="am-card">
+                                <div style="font-weight:700;margin-bottom:10px;">工作能力（出品经理：毛利率差值）</div>
+                                <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;">
+                                    <input id="hr-rating-abl-pm-a" type="number" step="0.01" placeholder="A 最小差值">
+                                    <input id="hr-rating-abl-pm-b-min" type="number" step="0.01" placeholder="B 最小差值">
+                                    <input id="hr-rating-abl-pm-b-max" type="number" step="0.01" placeholder="B 最大差值">
+                                    <input id="hr-rating-abl-pm-c-min" type="number" step="0.01" placeholder="C 最小差值">
+                                    <input id="hr-rating-abl-pm-c-max" type="number" step="0.01" placeholder="C 最大差值">
+                                </div>
+                            </div>
+                            <div class="am-card">
+                                <div style="font-weight:700;margin-bottom:10px;">工作能力（店长：点评星级阈值）</div>
+                                <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:8px;">
+                                    <input id="hr-rating-abl-sm-hz-a" type="number" step="0.1" min="0" max="5" placeholder="洪潮 A 最小星级">
+                                    <input id="hr-rating-abl-sm-hz-b" type="number" step="0.1" min="0" max="5" placeholder="洪潮 B 最小星级">
+                                    <input id="hr-rating-abl-sm-hz-c" type="number" step="0.1" min="0" max="5" placeholder="洪潮 C 最小星级">
+                                </div>
+                                <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;">
+                                    <input id="hr-rating-abl-sm-mjx-a" type="number" step="0.1" min="0" max="5" placeholder="马己仙 A 最小星级">
+                                    <input id="hr-rating-abl-sm-mjx-b" type="number" step="0.1" min="0" max="5" placeholder="马己仙 B 最小星级">
+                                    <input id="hr-rating-abl-sm-mjx-c" type="number" step="0.1" min="0" max="5" placeholder="马己仙 C 最小星级">
+                                </div>
+                            </div>
+                            <div style="display:flex;justify-content:flex-end;">
+                                <button class="btn" onclick="saveHrEmployeeRatingConfig()">保存HR评级模型</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div id="agent-rule-modal" class="modal">
+                <div class="modal-content" style="max-width:560px;">
+                    <div class="modal-header">
+                        <h3>编辑 Agent 规则</h3>
+                        <button class="modal-close" onclick="closeAgentRuleModal()">×</button>
+                    </div>
+                    <input type="hidden" id="rule-id">
+                    <div class="form-group">
+                        <label>异常类型</label>
+                        <input id="rule-category" type="text" placeholder="例如：产品差评异常">
+                    </div>
+                    <div class="form-group">
+                        <label>责任人角色</label>
+                        <select id="rule-role">
+                            <option value="store_manager">store_manager（店长）</option>
+                            <option value="store_production_manager">store_production_manager（出品经理）</option>
+                        </select>
+                    </div>
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+                        <div class="form-group">
+                            <label>中度扣分</label>
+                            <input id="rule-normal" type="number" min="0" step="1" value="5">
+                        </div>
+                        <div class="form-group">
+                            <label>重度扣分</label>
+                            <input id="rule-major" type="number" min="0" step="1" value="10">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label style="display:flex;align-items:center;gap:8px;">
+                            <input id="rule-enabled" type="checkbox" checked>
+                            启用
+                        </label>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn btn-secondary" onclick="closeAgentRuleModal()">取消</button>
+                        <button class="btn" onclick="saveAgentRule()">保存</button>
+                    </div>
+                </div>
+            </div>
+
             <div id="points-page" class="hidden">
                 <div class="page-header">
                     <h2>员工积分</h2>
@@ -7824,6 +7994,7 @@
                             <div class="emp-subtitle">统一管理员工信息、账号权限与组织结构</div>
                         </div>
                         <div class="emp-actions">
+                            <button class="btn btn-secondary" onclick="publishExamAssignment()" id="btn-training-batch-assign" style="display:none;"><i>🎯</i> 培训批量安排</button>
                             <button class="btn" onclick="showAddEmployeeModal()" id="add-emp-btn"><i>➕</i> 新增员工</button>
                             <button class="btn" onclick="showBatchImportModal()" id="batch-import-btn"><i>📥</i> 批量导入</button>
                             <button class="btn btn-secondary" onclick="downloadEmployeeImportTemplate()" id="emp-import-template-btn"><i>⬇️</i> 模板</button>
@@ -12635,6 +12806,11 @@
                 if (addEmpBtn) addEmpBtn.style.display = (isAdminUser() || currentUser.role === ROLES.STORE_MANAGER) ? '' : 'none';
             } catch (e) {}
 
+            try {
+                const trainingBatchBtn = document.getElementById('btn-training-batch-assign');
+                if (trainingBatchBtn) trainingBatchBtn.style.display = isAdminUser() ? '' : 'none';
+            } catch (e) {}
+
             updateMobileNavigationVisibility();
         }
         
@@ -15309,6 +15485,10 @@ ${r.approvalNote ? '审批备注：' + r.approvalNote : ''}
             const isAdmin = currentUser && currentUser.role === ROLES.ADMIN;
             if (btn) btn.style.display = isAdmin ? '' : 'none';
 
+            const canManageAgents = currentUser && (currentUser.role === 'admin' || currentUser.role === 'hq_manager');
+            const agentConfigBtn = document.getElementById('btn-agent-config');
+            if (agentConfigBtn) agentConfigBtn.style.display = canManageAgents ? '' : 'none';
+
             const fcBtn = document.getElementById('btn-knowledge-flashcards');
             if (fcBtn) fcBtn.style.display = currentUser ? '' : 'none';
 
@@ -16265,6 +16445,448 @@ ${knowledgeContent.slice(0, 30000)}`;
             if (!modal) return;
             modal.classList.remove('show');
             modal.style.display = '';
+        }
+
+        // ========== Agent 配置中心 ==========
+        let __AGENT_CONFIGS = [];
+        let __AGENT_RULES = [];
+        let __AGENT_TEMPLATES = [];
+        let __AGENT_TEMPLATE_MAP = {};
+
+        function openAgentConfigModal() {
+            if (!currentUser || !['admin', 'hq_manager'].includes(currentUser.role)) {
+                showNotification('仅管理员可使用 Agent 配置', 'warning');
+                return;
+            }
+            const modal = document.getElementById('agent-config-modal');
+            if (!modal) return;
+            if (!modal.dataset.boundClose) {
+                modal.addEventListener('click', (e) => { if (e.target === modal) closeAgentConfigModal(); });
+                modal.dataset.boundClose = '1';
+            }
+            modal.style.display = '';
+            modal.classList.add('show');
+            switchAgentConfigTab('configs');
+        }
+
+        function closeAgentConfigModal() {
+            const modal = document.getElementById('agent-config-modal');
+            if (!modal) return;
+            modal.classList.remove('show');
+            modal.style.display = '';
+        }
+
+        function switchAgentConfigTab(tab) {
+            const cfgPanel = document.getElementById('agent-config-tab-configs');
+            const rulePanel = document.getElementById('agent-config-tab-rules');
+            const tplPanel = document.getElementById('agent-config-tab-templates');
+            const hrPanel = document.getElementById('agent-config-tab-hr-rating');
+            const cfgBtn = document.getElementById('agent-config-tab-btn-configs');
+            const ruleBtn = document.getElementById('agent-config-tab-btn-rules');
+            const tplBtn = document.getElementById('agent-config-tab-btn-templates');
+            const hrBtn = document.getElementById('agent-config-tab-btn-hr-rating');
+            if (cfgPanel) cfgPanel.style.display = tab === 'configs' ? '' : 'none';
+            if (rulePanel) rulePanel.style.display = tab === 'rules' ? '' : 'none';
+            if (tplPanel) tplPanel.style.display = tab === 'templates' ? '' : 'none';
+            if (hrPanel) hrPanel.style.display = tab === 'hr_rating' ? '' : 'none';
+            if (cfgBtn) cfgBtn.classList.toggle('btn-secondary', tab !== 'configs');
+            if (ruleBtn) ruleBtn.classList.toggle('btn-secondary', tab !== 'rules');
+            if (tplBtn) tplBtn.classList.toggle('btn-secondary', tab !== 'templates');
+            if (hrBtn) hrBtn.classList.toggle('btn-secondary', tab !== 'hr_rating');
+            if (tab === 'configs') loadAgentConfigs();
+            if (tab === 'rules') loadAgentRules();
+            if (tab === 'templates') loadAgentTemplates();
+            if (tab === 'hr_rating') loadHrEmployeeRatingConfig();
+        }
+
+        async function loadAgentTemplates(agentId = '') {
+            const box = document.getElementById('agent-templates-list');
+            if (box) box.innerHTML = '<div class="am-card" style="text-align:center;">加载中...</div>';
+            try {
+                const token = localStorage.getItem('hrms_token');
+                const url = agentId ? ('/api/admin/agents/templates?agent_id=' + encodeURIComponent(agentId)) : '/api/admin/agents/templates';
+                const resp = await fetch(url, { headers: { 'Authorization': 'Bearer ' + token } });
+                if (!resp.ok) throw new Error('load_templates_failed');
+                const data = await resp.json();
+                __AGENT_TEMPLATES = Array.isArray(data?.templates) ? data.templates : [];
+                __AGENT_TEMPLATE_MAP = {};
+                __AGENT_TEMPLATES.forEach((t) => {
+                    const k = String(t.agent_id || '').trim();
+                    if (!k) return;
+                    if (!__AGENT_TEMPLATE_MAP[k]) __AGENT_TEMPLATE_MAP[k] = [];
+                    __AGENT_TEMPLATE_MAP[k].push(t);
+                });
+                renderAgentTemplateCreatorOptions();
+                renderAgentTemplatesList();
+            } catch (e) {
+                if (box) box.innerHTML = '<div class="am-card" style="text-align:center;color:#f87171;">模板加载失败</div>';
+            }
+        }
+
+        function renderAgentTemplateCreatorOptions() {
+            const sel = document.getElementById('agent-template-new-agent');
+            if (!sel) return;
+            sel.innerHTML = (__AGENT_CONFIGS || []).map((c) => `<option value="${escapeHtml(c.agent_id || '')}">${escapeHtml(c.name || c.agent_id || '')}</option>`).join('');
+        }
+
+        function renderAgentTemplatesList() {
+            const box = document.getElementById('agent-templates-list');
+            if (!box) return;
+            if (!Array.isArray(__AGENT_TEMPLATES) || !__AGENT_TEMPLATES.length) {
+                box.innerHTML = '<div class="am-card" style="text-align:center;">暂无模板</div>';
+                return;
+            }
+            box.innerHTML = __AGENT_TEMPLATES.map((t) => {
+                const locked = !!t.is_builtin;
+                return `
+                    <div class="am-card">
+                        <div class="am-card-header">
+                            <div class="am-card-title">${escapeHtml(t.name || '')}</div>
+                            <label style="font-size:12px;color:#cbd5e1;display:flex;gap:6px;align-items:center;">
+                                <input type="checkbox" id="tpl-enabled-${escapeHtml(t.id)}" ${t.enabled ? 'checked' : ''}> 启用
+                            </label>
+                        </div>
+                        <div class="am-card-meta">${escapeHtml(t.agent_id || '')} ${locked ? '· 系统模板(仅可改名称/启停)' : '· 公司模板'}</div>
+                        <input id="tpl-name-${escapeHtml(t.id)}" value="${escapeHtml(t.name || '')}" placeholder="模板名称" style="margin-top:8px;">
+                        <textarea id="tpl-content-${escapeHtml(t.id)}" ${locked ? 'readonly' : ''} style="width:100%;min-height:84px;margin-top:8px;background:rgba(15,23,42,0.45);color:#e2e8f0;border:1px solid rgba(148,163,184,.25);border-radius:8px;padding:8px;">${escapeHtml(t.content || '')}</textarea>
+                        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px;">
+                            ${locked ? '' : `<button class="btn btn-secondary" onclick="deleteAgentTemplate('${escapeHtml(t.id)}')">删除</button>`}
+                            <button class="btn" onclick="saveAgentTemplate('${escapeHtml(t.id)}')">保存</button>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        async function createAgentTemplate() {
+            const agentId = String(document.getElementById('agent-template-new-agent')?.value || '').trim();
+            const name = String(document.getElementById('agent-template-new-name')?.value || '').trim();
+            const content = String(document.getElementById('agent-template-new-content')?.value || '').trim();
+            if (!agentId || !name || !content) { showNotification('请完整填写模板信息', 'warning'); return; }
+            try {
+                const token = localStorage.getItem('hrms_token');
+                const resp = await fetch('/api/admin/agents/templates', {
+                    method: 'POST',
+                    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ agent_id: agentId, name, content, enabled: true })
+                });
+                if (!resp.ok) throw new Error('create_template_failed');
+                showNotification('模板已新增', 'success');
+                document.getElementById('agent-template-new-name').value = '';
+                document.getElementById('agent-template-new-content').value = '';
+                await loadAgentTemplates();
+                loadAgentConfigs();
+            } catch (e) {
+                showNotification('模板新增失败', 'error');
+            }
+        }
+
+        async function saveAgentTemplate(id) {
+            const payload = {
+                name: String(document.getElementById(`tpl-name-${id}`)?.value || '').trim(),
+                content: String(document.getElementById(`tpl-content-${id}`)?.value || '').trim(),
+                enabled: !!document.getElementById(`tpl-enabled-${id}`)?.checked
+            };
+            if (!payload.name) { showNotification('模板名称不能为空', 'warning'); return; }
+            try {
+                const token = localStorage.getItem('hrms_token');
+                const resp = await fetch('/api/admin/agents/templates/' + encodeURIComponent(id), {
+                    method: 'PUT',
+                    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                if (!resp.ok) throw new Error('save_template_failed');
+                showNotification('模板已保存', 'success');
+                await loadAgentTemplates();
+                loadAgentConfigs();
+            } catch (e) {
+                showNotification('模板保存失败', 'error');
+            }
+        }
+
+        async function deleteAgentTemplate(id) {
+            if (!confirm('确定删除该模板？')) return;
+            try {
+                const token = localStorage.getItem('hrms_token');
+                const resp = await fetch('/api/admin/agents/templates/' + encodeURIComponent(id), {
+                    method: 'DELETE',
+                    headers: { 'Authorization': 'Bearer ' + token }
+                });
+                if (!resp.ok) throw new Error('delete_template_failed');
+                showNotification('模板已删除', 'success');
+                await loadAgentTemplates();
+                loadAgentConfigs();
+            } catch (e) {
+                showNotification('模板删除失败（可能模板正在使用）', 'error');
+            }
+        }
+
+        async function loadHrEmployeeRatingConfig() {
+            try {
+                const token = localStorage.getItem('hrms_token');
+                const resp = await fetch('/api/admin/hr/employee-rating-config', { headers: { 'Authorization': 'Bearer ' + token } });
+                if (!resp.ok) throw new Error('load_hr_rating_failed');
+                const data = await resp.json();
+                const c = data?.config || {};
+                const setV = (id, v) => { const el = document.getElementById(id); if (el) el.value = (v ?? ''); };
+                setV('hr-rating-exec-pm-a', c?.execution?.store_production_manager?.A_max_missing);
+                setV('hr-rating-exec-pm-b', c?.execution?.store_production_manager?.B_max_missing);
+                setV('hr-rating-exec-pm-c', c?.execution?.store_production_manager?.C_max_missing);
+                setV('hr-rating-exec-sm-hz-a', c?.execution?.store_manager?.hongchao?.A_min_new_members);
+                setV('hr-rating-exec-sm-hz-b', c?.execution?.store_manager?.hongchao?.B_min_new_members);
+                setV('hr-rating-exec-sm-hz-c', c?.execution?.store_manager?.hongchao?.C_min_new_members);
+                setV('hr-rating-exec-sm-mjx-score', c?.execution?.store_manager?.majixian?.low_score_threshold);
+                setV('hr-rating-exec-sm-mjx-a-miss', c?.execution?.store_manager?.majixian?.A_max_missing);
+                setV('hr-rating-exec-sm-mjx-a-low', c?.execution?.store_manager?.majixian?.A_max_low_score);
+                setV('hr-rating-exec-sm-mjx-b-miss', c?.execution?.store_manager?.majixian?.B_max_missing);
+                setV('hr-rating-exec-sm-mjx-b-low', c?.execution?.store_manager?.majixian?.B_max_low_score);
+                setV('hr-rating-exec-sm-mjx-c-miss', c?.execution?.store_manager?.majixian?.C_max_missing);
+                setV('hr-rating-exec-sm-mjx-c-low', c?.execution?.store_manager?.majixian?.C_max_low_score);
+                setV('hr-rating-att-a', c?.attitude?.A_max_incomplete);
+                setV('hr-rating-att-b', c?.attitude?.B_max_incomplete);
+                setV('hr-rating-abl-pm-a', c?.ability?.store_production_manager?.A_min_diff);
+                setV('hr-rating-abl-pm-b-min', c?.ability?.store_production_manager?.B_min_diff);
+                setV('hr-rating-abl-pm-b-max', c?.ability?.store_production_manager?.B_max_diff);
+                setV('hr-rating-abl-pm-c-min', c?.ability?.store_production_manager?.C_min_diff);
+                setV('hr-rating-abl-pm-c-max', c?.ability?.store_production_manager?.C_max_diff);
+                setV('hr-rating-abl-sm-hz-a', c?.ability?.store_manager?.hongchao?.A_min_rating);
+                setV('hr-rating-abl-sm-hz-b', c?.ability?.store_manager?.hongchao?.B_min_rating);
+                setV('hr-rating-abl-sm-hz-c', c?.ability?.store_manager?.hongchao?.C_min_rating);
+                setV('hr-rating-abl-sm-mjx-a', c?.ability?.store_manager?.majixian?.A_min_rating);
+                setV('hr-rating-abl-sm-mjx-b', c?.ability?.store_manager?.majixian?.B_min_rating);
+                setV('hr-rating-abl-sm-mjx-c', c?.ability?.store_manager?.majixian?.C_min_rating);
+            } catch (e) {
+                showNotification('HR评级模型加载失败', 'error');
+            }
+        }
+
+        async function saveHrEmployeeRatingConfig() {
+            const n = (id) => Number(document.getElementById(id)?.value || 0);
+            const config = {
+                execution: {
+                    store_production_manager: {
+                        A_max_missing: n('hr-rating-exec-pm-a'),
+                        B_max_missing: n('hr-rating-exec-pm-b'),
+                        C_max_missing: n('hr-rating-exec-pm-c')
+                    },
+                    store_manager: {
+                        hongchao: {
+                            A_min_new_members: n('hr-rating-exec-sm-hz-a'),
+                            B_min_new_members: n('hr-rating-exec-sm-hz-b'),
+                            C_min_new_members: n('hr-rating-exec-sm-hz-c')
+                        },
+                        majixian: {
+                            low_score_threshold: n('hr-rating-exec-sm-mjx-score'),
+                            A_max_missing: n('hr-rating-exec-sm-mjx-a-miss'),
+                            A_max_low_score: n('hr-rating-exec-sm-mjx-a-low'),
+                            B_max_missing: n('hr-rating-exec-sm-mjx-b-miss'),
+                            B_max_low_score: n('hr-rating-exec-sm-mjx-b-low'),
+                            C_max_missing: n('hr-rating-exec-sm-mjx-c-miss'),
+                            C_max_low_score: n('hr-rating-exec-sm-mjx-c-low')
+                        }
+                    }
+                },
+                attitude: {
+                    A_max_incomplete: n('hr-rating-att-a'),
+                    B_max_incomplete: n('hr-rating-att-b')
+                },
+                ability: {
+                    store_production_manager: {
+                        A_min_diff: n('hr-rating-abl-pm-a'),
+                        B_min_diff: n('hr-rating-abl-pm-b-min'),
+                        B_max_diff: n('hr-rating-abl-pm-b-max'),
+                        C_min_diff: n('hr-rating-abl-pm-c-min'),
+                        C_max_diff: n('hr-rating-abl-pm-c-max')
+                    },
+                    store_manager: {
+                        hongchao: {
+                            A_min_rating: n('hr-rating-abl-sm-hz-a'),
+                            B_min_rating: n('hr-rating-abl-sm-hz-b'),
+                            C_min_rating: n('hr-rating-abl-sm-hz-c')
+                        },
+                        majixian: {
+                            A_min_rating: n('hr-rating-abl-sm-mjx-a'),
+                            B_min_rating: n('hr-rating-abl-sm-mjx-b'),
+                            C_min_rating: n('hr-rating-abl-sm-mjx-c')
+                        }
+                    }
+                }
+            };
+            try {
+                const token = localStorage.getItem('hrms_token');
+                const resp = await fetch('/api/admin/hr/employee-rating-config', {
+                    method: 'PUT',
+                    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ config, enabled: true })
+                });
+                if (!resp.ok) throw new Error('save_hr_rating_failed');
+                showNotification('HR评级模型已保存', 'success');
+            } catch (e) {
+                showNotification('HR评级模型保存失败', 'error');
+            }
+        }
+
+        async function loadAgentConfigs() {
+            const box = document.getElementById('agent-configs-list');
+            if (!box) return;
+            box.innerHTML = '<div class="am-card" style="text-align:center;">加载中...</div>';
+            try {
+                const token = localStorage.getItem('hrms_token');
+                const resp = await fetch('/api/admin/agents/configs', { headers: { 'Authorization': 'Bearer ' + token } });
+                if (!resp.ok) {
+                    box.innerHTML = '<div class="am-card" style="text-align:center;color:#f87171;">无权限或接口不可用</div>';
+                    return;
+                }
+                const data = await resp.json();
+                __AGENT_CONFIGS = Array.isArray(data?.configs) ? data.configs : [];
+                await loadAgentTemplates();
+                if (!__AGENT_CONFIGS.length) {
+                    box.innerHTML = '<div class="am-card" style="text-align:center;">暂无配置</div>';
+                    return;
+                }
+                box.innerHTML = __AGENT_CONFIGS.map((c) => `
+                    <div class="am-card">
+                        <div class="am-card-header">
+                            <div class="am-card-title">${escapeHtml(c.name || c.agent_id || '')}</div>
+                            <label style="font-size:12px;color:#cbd5e1;display:flex;gap:6px;align-items:center;">
+                                <input type="checkbox" id="cfg-enabled-${escapeHtml(c.agent_id)}" ${c.enabled ? 'checked' : ''}> 启用
+                            </label>
+                        </div>
+                        <div class="am-card-meta">${escapeHtml(c.agent_id || '')}</div>
+                        <div style="display:grid;grid-template-columns:1fr 120px 120px;gap:8px;margin-top:8px;">
+                            <input id="cfg-model-${escapeHtml(c.agent_id)}" value="${escapeHtml(c.model_name || '')}" placeholder="模型名">
+                            <input id="cfg-temp-${escapeHtml(c.agent_id)}" value="${escapeHtml(String(c.temperature ?? '0.1'))}" placeholder="temperature">
+                            <input id="cfg-interval-${escapeHtml(c.agent_id)}" value="${escapeHtml(String(c.schedule_interval ?? '0'))}" placeholder="间隔(分钟)">
+                        </div>
+                        <div style="display:grid;grid-template-columns:1fr auto;gap:8px;margin-top:8px;align-items:center;">
+                            <select id="cfg-template-${escapeHtml(c.agent_id)}" onchange="onConfigTemplateChange('${escapeHtml(c.agent_id)}')">
+                                <option value="">手动提示词</option>
+                                ${(Array.isArray(__AGENT_TEMPLATE_MAP?.[c.agent_id]) ? __AGENT_TEMPLATE_MAP[c.agent_id] : []).map((t) => `<option value="${escapeHtml(t.id)}" ${String(c.prompt_template_id || '') === String(t.id || '') ? 'selected' : ''}>${escapeHtml(t.name || '')}${t.is_builtin ? '（系统）' : ''}</option>`).join('')}
+                            </select>
+                            <button class="btn btn-secondary" onclick="switchAgentConfigTab('templates')">管理模板</button>
+                        </div>
+                        <textarea id="cfg-prompt-${escapeHtml(c.agent_id)}" style="width:100%;min-height:84px;margin-top:8px;background:rgba(15,23,42,0.45);color:#e2e8f0;border:1px solid rgba(148,163,184,.25);border-radius:8px;padding:8px;">${escapeHtml(c.system_prompt || '')}</textarea>
+                        <div style="display:flex;justify-content:flex-end;margin-top:8px;">
+                            <button class="btn" onclick="saveAgentConfig('${escapeHtml(c.agent_id)}')">保存</button>
+                        </div>
+                    </div>
+                `).join('');
+            } catch (e) {
+                box.innerHTML = '<div class="am-card" style="text-align:center;color:#f87171;">加载失败</div>';
+            }
+        }
+
+        function onConfigTemplateChange(agentId) {
+            const tplId = String(document.getElementById(`cfg-template-${agentId}`)?.value || '').trim();
+            if (!tplId) return;
+            const t = (__AGENT_TEMPLATES || []).find((x) => String(x.id) === tplId);
+            if (!t) return;
+            const promptEl = document.getElementById(`cfg-prompt-${agentId}`);
+            if (promptEl) promptEl.value = String(t.content || '');
+        }
+
+        async function saveAgentConfig(agentId) {
+            try {
+                const token = localStorage.getItem('hrms_token');
+                const payload = {
+                    enabled: !!document.getElementById(`cfg-enabled-${agentId}`)?.checked,
+                    model_name: String(document.getElementById(`cfg-model-${agentId}`)?.value || '').trim(),
+                    temperature: Number(document.getElementById(`cfg-temp-${agentId}`)?.value || 0.1),
+                    schedule_interval: Number(document.getElementById(`cfg-interval-${agentId}`)?.value || 0),
+                    system_prompt: String(document.getElementById(`cfg-prompt-${agentId}`)?.value || '').trim(),
+                    prompt_template_id: String(document.getElementById(`cfg-template-${agentId}`)?.value || '').trim() || null
+                };
+                const resp = await fetch('/api/admin/agents/configs/' + encodeURIComponent(agentId), {
+                    method: 'PUT',
+                    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                if (!resp.ok) throw new Error('save_failed');
+                showNotification('Agent 配置已保存', 'success');
+                loadAgentConfigs();
+            } catch (e) {
+                showNotification('保存失败', 'error');
+            }
+        }
+
+        async function loadAgentRules() {
+            const tbody = document.getElementById('agent-rules-tbody');
+            if (!tbody) return;
+            tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;">加载中...</td></tr>';
+            try {
+                const token = localStorage.getItem('hrms_token');
+                const resp = await fetch('/api/admin/agents/rules', { headers: { 'Authorization': 'Bearer ' + token } });
+                if (!resp.ok) {
+                    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#f87171;">无权限或接口不可用</td></tr>';
+                    return;
+                }
+                const data = await resp.json();
+                __AGENT_RULES = Array.isArray(data?.rules) ? data.rules : [];
+                if (!__AGENT_RULES.length) {
+                    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;">暂无规则</td></tr>';
+                    return;
+                }
+                tbody.innerHTML = __AGENT_RULES.map((r) => `
+                    <tr>
+                        <td>${escapeHtml(r.category || '')}</td>
+                        <td>${escapeHtml(r.assignee_role || '')}</td>
+                        <td>${Number(r.normal_deduction || 0)}</td>
+                        <td>${Number(r.major_deduction || 0)}</td>
+                        <td>${r.enabled ? '启用' : '停用'}</td>
+                        <td><button class="btn btn-secondary" onclick="openAgentRuleEditor('${escapeHtml(r.id)}')">编辑</button></td>
+                    </tr>
+                `).join('');
+            } catch (e) {
+                tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#f87171;">加载失败</td></tr>';
+            }
+        }
+
+        function openAgentRuleEditor(ruleId) {
+            const modal = document.getElementById('agent-rule-modal');
+            if (!modal) return;
+            const row = __AGENT_RULES.find((x) => String(x.id) === String(ruleId)) || null;
+            document.getElementById('rule-id').value = row?.id || '';
+            document.getElementById('rule-category').value = row?.category || '';
+            document.getElementById('rule-role').value = row?.assignee_role || 'store_manager';
+            document.getElementById('rule-normal').value = Number(row?.normal_deduction || 5);
+            document.getElementById('rule-major').value = Number(row?.major_deduction || 10);
+            document.getElementById('rule-enabled').checked = row?.enabled !== false;
+            modal.style.display = '';
+            modal.classList.add('show');
+        }
+
+        function closeAgentRuleModal() {
+            const modal = document.getElementById('agent-rule-modal');
+            if (!modal) return;
+            modal.classList.remove('show');
+            modal.style.display = '';
+        }
+
+        async function saveAgentRule() {
+            const id = String(document.getElementById('rule-id')?.value || '').trim();
+            const payload = {
+                category: String(document.getElementById('rule-category')?.value || '').trim(),
+                assignee_role: String(document.getElementById('rule-role')?.value || 'store_manager').trim(),
+                normal_deduction: Number(document.getElementById('rule-normal')?.value || 5),
+                major_deduction: Number(document.getElementById('rule-major')?.value || 10),
+                enabled: !!document.getElementById('rule-enabled')?.checked
+            };
+            if (!payload.category) { showNotification('请填写异常类型', 'warning'); return; }
+            try {
+                const token = localStorage.getItem('hrms_token');
+                const isNew = !id;
+                const resp = await fetch(isNew ? '/api/admin/agents/rules' : ('/api/admin/agents/rules/' + encodeURIComponent(id)), {
+                    method: isNew ? 'POST' : 'PUT',
+                    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                if (!resp.ok) throw new Error('save_rule_failed');
+                showNotification('规则已保存', 'success');
+                closeAgentRuleModal();
+                loadAgentRules();
+            } catch (e) {
+                showNotification('规则保存失败', 'error');
+            }
         }
 
         function switchAmTab(tab) {
