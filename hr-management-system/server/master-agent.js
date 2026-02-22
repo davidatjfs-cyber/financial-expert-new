@@ -58,20 +58,8 @@ export function pool() {
   return _pool; 
 }
 
-// 责任人角色映射：异常类型 → 应找谁
-// 厨房/出品问题 → store_production_manager（出品经理）
-// 其他问题     → store_manager（店长）
-const CATEGORY_ASSIGNEE_ROLE = {
-  '桌访产品异常':    'store_production_manager',  // 产品投诉，找出品经理
-  '桌访占比异常':    'store_manager',
-  '实收营收异常':    'store_manager',
-  '人效值异常':      'store_manager',
-  '充值异常':        'store_manager',
-  '总实收毛利率异常': 'store_production_manager',  // 毛利率与出品相关
-  '产品差评异常':    'store_production_manager',
-  '服务差评异常':    'store_manager',
-  '图片审核不合格':   'store_production_manager',
-};
+// 责任人角色映射已移至 agent-config-manager.js 动态读取
+import { getCategoryAssigneeRoleMap, getIssueScoreRulesMap } from './agent-config-manager.js';
 
 // 状态机定义
 const STATUS_FLOW = {
@@ -327,7 +315,8 @@ async function createTask({ source, sourceRef, category, severity, store, brand,
 // 根据异常类型和门店找到责任人
 async function resolveAssignee(category, store) {
   const state = await getSharedState();
-  const targetRole = CATEGORY_ASSIGNEE_ROLE[category] || 'store_manager';
+  const roleMap = await getCategoryAssigneeRoleMap();
+  const targetRole = roleMap[category] || 'store_manager';
 
   const all = [
     ...(Array.isArray(state?.employees) ? state.employees : []),
@@ -713,18 +702,10 @@ async function chiefEvaluatorListener() {
       let reason = '';
 
       // 从agents.js导入的扣分规则（这里简化处理）
-      const deductMap = {
-        '实收营收异常': { medium: 20, high: 40 },
-        '人效值异常': { medium: 10, high: 20 },
-        '充值异常': { medium: 2, high: 4 },
-        '桌访产品异常': { medium: 5, high: 10 },    // 产品投诉
-        '桌访占比异常': { medium: 10, high: 20 },
-        '总实收毛利率异常': { medium: 10, high: 20 },
-        '产品差评异常': { medium: 10, high: 20 },
-        '服务差评异常': { medium: 10, high: 20 },
-      };
-      const deduct = deductMap[task.category] || { medium: 5, high: 10 };
-      scoreImpact = -(task.severity === 'high' ? deduct.high : deduct.medium);
+      const deductMap = await getIssueScoreRulesMap();
+      const deduct = deductMap[task.category] || { normal: 5, major: 10 };
+      const scoreImpactVal = -(task.severity === 'high' ? deduct.major : deduct.normal);
+      scoreImpact = scoreImpactVal;
       reason = `${task.category}异常(${task.severity})扣${Math.abs(scoreImpact)}分`;
 
       // 检查响应时效

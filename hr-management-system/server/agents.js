@@ -637,7 +637,7 @@ export function setPool(p) {
   _pool = p; 
   setUnifiedAgentPool(p); // 同时设置统一数据库连接
 }
-function pool() { 
+export function pool() { 
   if (!_pool) throw new Error('agents: pool not set'); 
   return _pool; 
 }
@@ -2163,7 +2163,7 @@ async function executeScheduledTask(taskKey, config) {
   }
 }
 
-async function sendScheduledChecklist(config) {
+export async function sendScheduledChecklist(config) {
   // 查找对应品牌的门店
   const sharedState = await getSharedState();
   const stores = Object.entries(sharedState.stores || {});
@@ -2174,31 +2174,46 @@ async function sendScheduledChecklist(config) {
     return;
   }
   
+  // 提取所有员工信息以寻找店长和出品经理
+  const allStaff = [
+    ...(Array.isArray(sharedState.employees) ? sharedState.employees : []),
+    ...(Array.isArray(sharedState.users) ? sharedState.users : [])
+  ];
+
   // 向每个门店发送检查表
   for (const [storeKey, store] of brandStores) {
     try {
-      const feishuUser = await lookupFeishuUserByUsername(store.manager || '');
-      if (feishuUser?.open_id) {
-        const formUrl = 'https://ycnp8e71t8x8.feishu.cn/base/PtVObRtoPaMAP3stIIFc8DnJngd?table=tblxHI9ZAKONOTpp&view=vewjuqywQu';
-        const typeLabel = config.checkType === 'opening' ? '开市' : '收档';
-        
-        const card = {
-          config: { wide_screen_mode: true },
-          header: { title: { tag: 'plain_text', content: `${config.brand}${typeLabel}检查提醒` }, template: 'blue' },
-          elements: [
-            {
-              tag: 'div',
-              text: {
-                tag: 'lark_md',
-                content: `**${config.brand} - ${store.name}**\n\n⏰ **时间**: ${config.time}\n**类型**: ${typeLabel}检查\n\n📋 请点击下方链接填写检查表：\n${formUrl}\n\n✅ 填写完成后系统会自动确认\n\n如有问题请联系督导员。`
+      // 同时查找该门店的 店长(store_manager) 和 出品经理(store_production_manager)
+      const targets = allStaff.filter(u =>
+        String(u?.store || '').trim() === store.name &&
+        (u.role === 'store_manager' || u.role === 'store_production_manager')
+      );
+      const uniqueUsernames = [...new Set(targets.map(u => String(u.username || '').trim()).filter(Boolean))];
+      
+      for (const username of uniqueUsernames) {
+        const feishuUser = await lookupFeishuUserByUsername(username);
+        if (feishuUser?.open_id) {
+          const formUrl = 'https://ycnp8e71t8x8.feishu.cn/base/PtVObRtoPaMAP3stIIFc8DnJngd?table=tblxHI9ZAKONOTpp&view=vewjuqywQu';
+          const typeLabel = config.checkType === 'opening' ? '开市' : '收档';
+          
+          const card = {
+            config: { wide_screen_mode: true },
+            header: { title: { tag: 'plain_text', content: `${config.brand}${typeLabel}检查提醒` }, template: 'blue' },
+            elements: [
+              {
+                tag: 'div',
+                text: {
+                  tag: 'lark_md',
+                  content: `**${config.brand} - ${store.name}**\n\n⏰ **时间**: ${config.time}\n**类型**: ${typeLabel}检查\n\n📋 请点击下方链接填写检查表：\n${formUrl}\n\n✅ 填写完成后系统会自动确认\n\n如有问题请联系督导员。`
+                }
               }
-            }
-          ]
-        };
-        
-        const cardResult = await sendLarkCard(feishuUser.open_id, card);
-        if (cardResult.ok) {
-          console.log(`[ops] sent scheduled checklist to ${store.name}`);
+            ]
+          };
+          
+          const cardResult = await sendLarkCard(feishuUser.open_id, card);
+          if (cardResult.ok) {
+            console.log(`[ops] sent scheduled checklist to ${store.name} (${username})`);
+          }
         }
       }
     } catch (e) {

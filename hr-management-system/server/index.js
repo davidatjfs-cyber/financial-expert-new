@@ -18,6 +18,8 @@ import zlib from 'zlib';
 import XLSX from 'xlsx';
 import axios from 'axios';
 import { setPool as setAgentPool, ensureAgentTables, registerAgentRoutes, startAgentScheduler, setTaskResponseHook, startBitablePolling, startScheduledTasks } from './agents.js';
+import { ensureAgentConfigTables, registerAgentConfigRoutes } from "./agent-config-manager.js";
+
 import { setMasterPool, ensureMasterTables, startMasterAgent, registerMasterRoutes, handleTaskResponse } from './master-agent.js';
 import { startDailyFeishuSync } from './feishu-sync.js';
 import { calculateStoreRating, calculateEmployeeScore } from './new-scoring-model.js';
@@ -10605,6 +10607,8 @@ app.post('/api/training/tasks/batch', authRequired, async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 registerAgentRoutes(app, authRequired);
+registerAgentConfigRoutes(app, authRequired);
+
 registerMasterRoutes(app, authRequired);
 registerNewScoringRoutes(app, authRequired);
 
@@ -11439,6 +11443,8 @@ ensureHrmsStateTable();
 ensureApprovalTables();
 ensureUserReadsTable();
 ensureUserSessionsTable();
+ensureAgentConfigTables();
+
 ensureCheckinTable();
 ensureOpsTasksTable();
 ensureFeishuSyncTable();
