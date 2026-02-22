@@ -1,4 +1,4 @@
-const CACHE_NAME = 'hrms-pwa-v151';
+const CACHE_NAME = 'hrms-pwa-v152';
 const PRECACHE_URLS = [
   '/',
   '/index.html',
@@ -43,6 +43,12 @@ function isApiRequest(url) {
     return false;
   }
 }
+
+self.addEventListener('message', (event) => {
+  if (event.data && event.data.type === 'SKIP_WAITING') {
+    self.skipWaiting();
+  }
+});
 
 self.addEventListener('fetch', (event) => {
   const req = event.request;

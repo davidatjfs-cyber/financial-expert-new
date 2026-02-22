@@ -182,3 +182,37 @@ sudo -u hrms bash -lc 'cd /opt/hrms/hr-management-system/server && npm install -
 - 反代/Nginx 的 `client_max_body_size` 是否足够（建议 ≥ 350m，支持 300MB 单文件）
 
 提示：本仓库 `deploy/nginx.conf` 已将 `client_max_body_size` 调整为 `350m`，若线上 Nginx 配置不同需要同步修改并 reload。
+
+# 8. 部署后必须 git commit（防止修改丢失）
+
+> **⚠️ 极其重要：每次部署后必须立即执行此步骤。** 历史教训：Feb 21 的所有修改（毛利率目标、企微会员等功能）因未 git commit，在下次会话中被旧版本覆盖，导致 4700+ 行代码丢失。
+
+```bash
+# 在本地仓库根目录执行
+cd /Users/xieding/windsure/CascadeProjects/windsurf-project
+
+# 查看有哪些文件被修改
+git status --short
+
+# 暂存所有 HRMS 相关修改（根据实际情况调整）
+git add hr-management-system/working-fixed.html \
+        hr-management-system/sw.js \
+        hr-management-system/server/agents.js \
+        hr-management-system/server/index.js \
+        hr-management-system/server/new-scoring-model.js
+
+# 提交，描述本次修改内容（必须写清楚改了什么）
+git commit -m "deploy: 描述本次修改内容 + sw vXXX"
+```
+
+**提交信息规范：**
+- 前缀用 `deploy:` 或 `feat:` 或 `fix:`
+- 必须说明改了哪些功能/文件
+- 必须注明 SW 版本号（如 `sw v152`）
+
+**验证提交成功：**
+```bash
+git log --oneline -3
+```
+
+确认最新 commit 时间戳与本次部署时间一致。
