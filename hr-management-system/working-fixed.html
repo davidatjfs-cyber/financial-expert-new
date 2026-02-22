@@ -6216,6 +6216,11 @@
                         <span class="nav-badge" id="nav-badge-knowledge" style="display:none;">0</span>
                     </a>
                 </div>
+                <div class="nav-item" data-page="agents">
+                    <a href="#" class="nav-link" onclick="showPage('agents')">
+                        <i>🤖</i> <span>Agent中心</span>
+                    </a>
+                </div>
                 <div class="nav-item" data-page="exam">
                     <a href="#" class="nav-link" onclick="showPage('exam')">
                         <i>📝</i> <span>考试测评</span>
@@ -8096,8 +8101,6 @@
                         <button class="btn" id="btn-knowledge-upload" onclick="openKnowledgeUploadModal()"><i>📤</i> 上传内容</button>
                         <button class="btn btn-secondary" id="btn-knowledge-flashcards" onclick="openKnowledgeFlashcardsModal()"><i>🃏</i> 自我测验模块</button>
                         <button class="btn btn-secondary" id="btn-knowledge-chat" onclick="openKnowledgeChatModal()" style="background: linear-gradient(135deg, #8b5cf6, #6366f1);"><i>🎓</i> AI培训</button>
-                        <button class="btn btn-secondary" id="btn-agent-monitor" onclick="openAgentMonitorModal()" style="background: linear-gradient(135deg, #0f766e, #0ea5a0);"><i>🤖</i> Agent监控</button>
-  <button class="btn btn-secondary" id="btn-agent-config" onclick="openAgentConfigModal()" style="background: linear-gradient(135deg, #6366f1, #4f46e5); display: none;"><i>⚙️</i> Agent配置</button>
                     </div>
                 </div>
 
@@ -8207,6 +8210,35 @@
                             <button class="btn btn-secondary" id="kb-toolbar-download" type="button">下载</button>
                             <button class="btn btn-danger" id="kb-toolbar-delete" type="button" style="display:none;">删除</button>
                         </div>
+                    </div>
+                </div>
+            </div>
+
+            <div id="agents-page" class="hidden">
+                <div class="page-header" style="display:flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap;">
+                    <div>
+                        <h2 style="margin: 0;">Agent 中心</h2>
+                        <div style="margin-top: 6px; color:#777; font-size: 12px;">统一管理 Agent 监控、规则、模板与 HR 评级模型</div>
+                    </div>
+                    <div style="display:flex; gap:10px; flex-wrap:wrap;">
+                        <button class="btn btn-secondary" id="btn-agents-monitor-main" onclick="openAgentMonitorModal()" style="background: linear-gradient(135deg, #0f766e, #0ea5a0);"><i>🤖</i> Agent监控</button>
+                        <button class="btn" id="btn-agents-config-main" onclick="openAgentConfigModal()" style="background: linear-gradient(135deg, #6366f1, #4f46e5); display:none;"><i>⚙️</i> Agent配置中心</button>
+                    </div>
+                </div>
+
+                <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px;">
+                    <div class="card">
+                        <div class="card-icon" style="background: linear-gradient(135deg, rgba(15,118,110,0.25), rgba(20,184,166,0.18));">📡</div>
+                        <h4 style="margin:0;">Agent监控</h4>
+                        <div style="margin-top:8px; color:#94a3b8; font-size:12px;">查看异常、绩效、审核、飞书消息与品牌态势。</div>
+                        <div style="margin-top:12px;"><button class="btn btn-secondary" onclick="openAgentMonitorModal()">打开监控台</button></div>
+                    </div>
+                    <div class="card">
+                        <div class="card-icon" style="background: linear-gradient(135deg, rgba(99,102,241,0.25), rgba(79,70,229,0.18));">🛠️</div>
+                        <h4 style="margin:0;">Agent配置</h4>
+                        <div style="margin-top:8px; color:#94a3b8; font-size:12px;">维护模型参数、责任规则、模板库与 HR 评级模型。</div>
+                        <div style="margin-top:12px;"><button class="btn" id="btn-agents-config-card" onclick="openAgentConfigModal()" style="display:none;">打开配置中心</button></div>
+                        <div id="agents-config-lock-tip" style="margin-top:10px; color:#f59e0b; font-size:12px; display:none;">仅管理员/总部营运可进入配置中心</div>
                     </div>
                 </div>
             </div>
@@ -12878,6 +12910,14 @@
                 }
             }
 
+            if (pageName === 'agents') {
+                const canAccess = !!currentUser;
+                if (!canAccess) {
+                    showNotification('请先登录后访问 Agent 中心', 'warning');
+                    pageName = getHomePageName();
+                }
+            }
+
             if (pageName === 'stores' || pageName === 'roles' || pageName === 'settings' || pageName === 'users') {
                 if (!isAdminUser()) {
                     showNotification('仅管理员可访问该模块', 'warning');
@@ -12941,6 +12981,7 @@
                         employees: '员工管理',
                         users: '用户管理',
                         knowledge: '知识库',
+                        agents: 'Agent中心',
                         flashcards: '自我测验',
                         stores: '门店管理',
                         roles: '角色权限',
@@ -13031,6 +13072,9 @@
                     break;
                 case 'knowledge':
                     loadKnowledgeData();
+                    break;
+                case 'agents':
+                    loadAgentsData();
                     break;
                 case 'flashcards':
                     loadFlashcardsModule();
@@ -15485,10 +15529,6 @@ ${r.approvalNote ? '审批备注：' + r.approvalNote : ''}
             const isAdmin = currentUser && currentUser.role === ROLES.ADMIN;
             if (btn) btn.style.display = isAdmin ? '' : 'none';
 
-            const canManageAgents = currentUser && (currentUser.role === 'admin' || currentUser.role === 'hq_manager');
-            const agentConfigBtn = document.getElementById('btn-agent-config');
-            if (agentConfigBtn) agentConfigBtn.style.display = canManageAgents ? '' : 'none';
-
             const fcBtn = document.getElementById('btn-knowledge-flashcards');
             if (fcBtn) fcBtn.style.display = currentUser ? '' : 'none';
 
@@ -15561,6 +15601,16 @@ ${r.approvalNote ? '审批备注：' + r.approvalNote : ''}
                     }
                 }
             })();
+        }
+
+        function loadAgentsData() {
+            const canManageAgents = currentUser && (currentUser.role === 'admin' || currentUser.role === 'hq_manager');
+            const btnMain = document.getElementById('btn-agents-config-main');
+            const btnCard = document.getElementById('btn-agents-config-card');
+            const lockTip = document.getElementById('agents-config-lock-tip');
+            if (btnMain) btnMain.style.display = canManageAgents ? '' : 'none';
+            if (btnCard) btnCard.style.display = canManageAgents ? '' : 'none';
+            if (lockTip) lockTip.style.display = canManageAgents ? 'none' : '';
         }
 
         function applyKnowledgeFiltersVisibility() {
@@ -32250,6 +32300,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                 { icon:'✅', label:'待审批', page:'approvals', roles:['admin','hr_manager','hq_manager','store_manager'] },
                 { icon:'💰', label:'请款', page:'payment', roles:['admin','hq_manager','store_manager','cashier'] },
                 { icon:'📚', label:'知识库', page:'knowledge' },
+                { icon:'🤖', label:'Agent中心', page:'agents' },
                 { icon:'📝', label:'考试测评', page:'exam' },
                 { icon:'🏆', label:'奖惩管理', page:'rewards', roles:['admin','hr_manager','hq_manager','store_manager'] },
                 { icon:'💎', label:'员工积分', page:'points' },
@@ -32371,6 +32422,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                 dashboard: { icon: '🏠', label: '首页' },
                 attendance: { icon: '👤', label: '打卡' },
                 knowledge: { icon: '📚', label: '知识库' },
+                agents: { icon: '🤖', label: 'Agent' },
                 exam: { icon: '📝', label: '考试' },
                 'daily-report': { icon: '📒', label: '日报' },
                 payment: { icon: '💰', label: '请款' },
@@ -32428,6 +32480,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                     'dashboard': 'dashboard',
                     'attendance': 'attendance',
                     'knowledge': 'knowledge',
+                    'agents': 'agents',
                     'exam': 'exam',
                     'approvals': 'approvals',
                     'payment': 'payment',
