@@ -25447,7 +25447,6 @@ ${knowledgeContent.slice(0, 30000)}`;
                         badge.style.display = 'block';
                         }
                     }
-                }
             } catch (e) {
                 console.warn('loadProfileStoreRating error:', e);
             }
@@ -32363,8 +32362,8 @@ ${knowledgeContent.slice(0, 30000)}`;
             try {
                 if ('serviceWorker' in navigator) {
                     // NUCLEAR OPTION: Force unregister ALL service workers and clear ALL caches
-                    const forceVersion = 'hrms-pwa-v152';
-                    const needsNuke = !sessionStorage.getItem('hrms-cache-nuked-v152');
+                    const forceVersion = 'hrms-pwa-v153';
+                    const needsNuke = !sessionStorage.getItem('hrms-cache-nuked-v153');
                     
                     if (needsNuke) {
                         console.log('[HRMS] Nuclear cache clear initiated...');
@@ -32377,13 +32376,13 @@ ${knowledgeContent.slice(0, 30000)}`;
                         if (typeof caches !== 'undefined') {
                             caches.keys().then(keys => {
                                 Promise.all(keys.map(k => caches.delete(k))).then(() => {
-                                    sessionStorage.setItem('hrms-cache-nuked-v152', '1');
+                                    sessionStorage.setItem('hrms-cache-nuked-v153', '1');
                                     console.log('[HRMS] All caches cleared, reloading...');
                                     window.location.reload();
                                 });
                             }).catch(() => {});
                         } else {
-                            sessionStorage.setItem('hrms-cache-nuked-v152', '1');
+                            sessionStorage.setItem('hrms-cache-nuked-v153', '1');
                             window.location.reload();
                         }
                         return;
