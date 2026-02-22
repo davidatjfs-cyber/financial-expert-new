@@ -6681,190 +6681,282 @@
                 </div>
             </div>
 
-            <div id="agent-config-modal" class="modal">
-                <div class="modal-content am-modal-content" style="max-width: 1100px;">
-                    <div class="am-header">
-                        <div class="am-header-left">
-                            <div class="am-logo">⚙</div>
-                            <div class="am-header-text">
-                                <h3>Agent 配置中心</h3>
-                                <span class="am-header-sub">管理员可调整模型、提示词、责任人和扣分规则</span>
+            <style>
+                #agent-config-modal{position:fixed;inset:0;z-index:3000;display:none;align-items:flex-end;justify-content:center;background:rgba(0,0,0,0.62);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px)}
+                #agent-config-modal.open{display:flex}
+                .acm-sheet{width:100%;max-width:700px;max-height:93dvh;background:linear-gradient(170deg,#0f172a 0%,#0b1120 100%);border-radius:24px 24px 0 0;border-top:1px solid rgba(255,255,255,0.09);box-shadow:0 -20px 80px rgba(0,0,0,0.7);display:flex;flex-direction:column;overflow:hidden;animation:acm-up .26s cubic-bezier(.32,1,.6,1) both}
+                @keyframes acm-up{from{transform:translateY(100%);opacity:0}to{transform:translateY(0);opacity:1}}
+                .acm-handle{width:38px;height:4px;background:rgba(255,255,255,0.15);border-radius:2px;margin:10px auto 0;flex-shrink:0}
+                .acm-topbar{display:flex;align-items:center;justify-content:space-between;padding:12px 20px 8px;flex-shrink:0}
+                .acm-title-wrap{display:flex;align-items:center;gap:10px}
+                .acm-icon-box{width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,#6366f1,#4f46e5);display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0}
+                .acm-h1{font-size:16px;font-weight:800;color:#f1f5f9;line-height:1.2}
+                .acm-sub{font-size:11px;color:#475569;margin-top:1px}
+                .acm-x{width:32px;height:32px;border-radius:50%;background:rgba(255,255,255,0.07);border:none;color:#64748b;font-size:20px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;line-height:1}
+                .acm-tabs{display:flex;gap:6px;overflow-x:auto;padding:4px 20px 14px;scrollbar-width:none;flex-shrink:0}
+                .acm-tabs::-webkit-scrollbar{display:none}
+                .acm-tab{flex-shrink:0;padding:8px 16px;border-radius:20px;font-size:13px;font-weight:600;border:1.5px solid rgba(255,255,255,0.09);background:rgba(255,255,255,0.04);color:#64748b;cursor:pointer;transition:all .18s;white-space:nowrap}
+                .acm-tab.active{background:linear-gradient(135deg,#6366f1,#4f46e5);border-color:transparent;color:#fff;box-shadow:0 4px 14px rgba(99,102,241,.35)}
+                .acm-body{flex:1;overflow-y:auto;padding:4px 16px 36px;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,0.08) transparent}
+                .acm-body::-webkit-scrollbar{width:3px}
+                .acm-body::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.09);border-radius:2px}
+                .acm-panel{display:flex;flex-direction:column;gap:12px}
+                .acm-card{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:16px;padding:16px}
+                .acm-card-hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+                .acm-card-title{font-size:11px;font-weight:700;color:#64748b;letter-spacing:.7px;text-transform:uppercase;display:flex;align-items:center;gap:7px}
+                .acm-lbl{font-size:11px;font-weight:600;color:#475569;margin-bottom:5px;display:block}
+                .acm-inp{width:100%;padding:11px 13px;background:rgba(15,23,42,0.7);border:1.5px solid rgba(255,255,255,0.08);border-radius:11px;color:#e2e8f0;font-size:14px;outline:none;box-sizing:border-box;-webkit-appearance:none;transition:border-color .15s}
+                .acm-inp:focus{border-color:#6366f1}
+                .acm-inp::placeholder{color:#334155}
+                .acm-inp-sm{padding:9px 11px;font-size:13px;border-radius:10px}
+                .acm-abc{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+                .acm-abc-col{display:flex;flex-direction:column;gap:5px}
+                .acm-badge{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:5px;font-size:10px;font-weight:800}
+                .acm-ba{background:rgba(34,197,94,.15);color:#4ade80}
+                .acm-bb{background:rgba(59,130,246,.15);color:#60a5fa}
+                .acm-bc{background:rgba(239,68,68,.15);color:#f87171}
+                .acm-save{width:100%;padding:14px;border-radius:14px;border:none;background:linear-gradient(135deg,#6366f1,#4f46e5);color:#fff;font-size:15px;font-weight:700;cursor:pointer;box-shadow:0 6px 20px rgba(99,102,241,.3);margin-top:6px;transition:opacity .15s}
+                .acm-save:active{opacity:.82}
+                .acm-add-btn{padding:7px 14px;border-radius:10px;background:rgba(99,102,241,.12);border:1.5px solid rgba(99,102,241,.2);color:#818cf8;font-size:12px;font-weight:700;cursor:pointer;flex-shrink:0;white-space:nowrap}
+                .acm-rule-row{display:flex;align-items:center;gap:10px;padding:12px 14px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:13px}
+                .acm-rule-info{flex:1;min-width:0}
+                .acm-rule-cat{font-size:14px;font-weight:700;color:#e2e8f0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+                .acm-rule-meta{font-size:11px;color:#475569;margin-top:2px}
+                .acm-rule-deduct{padding:3px 9px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(239,68,68,.12);color:#f87171;flex-shrink:0}
+                .acm-edit-btn{padding:7px 13px;border-radius:10px;background:rgba(99,102,241,.12);border:1px solid rgba(99,102,241,.2);color:#818cf8;font-size:12px;font-weight:600;cursor:pointer;flex-shrink:0}
+                .acm-tpl-card{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:14px;padding:14px 16px}
+                .acm-tpl-name{font-size:14px;font-weight:700;color:#e2e8f0}
+                .acm-tpl-agent{font-size:11px;color:#6366f1;margin-top:2px}
+                .acm-tpl-preview{font-size:12px;color:#475569;margin-top:8px;line-height:1.55;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+                .acm-tpl-footer{display:flex;gap:8px;margin-top:12px}
+                .acm-tpl-del{padding:6px 12px;border-radius:9px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.2);color:#f87171;font-size:12px;font-weight:600;cursor:pointer}
+                .acm-chip-row{display:flex;flex-wrap:wrap;gap:8px}
+                .acm-chip{display:flex;align-items:center;gap:6px;padding:9px 14px;border-radius:12px;background:rgba(255,255,255,0.05);border:1.5px solid rgba(255,255,255,0.09);font-size:13px;color:#e2e8f0;cursor:pointer}
+                .acm-chip input[type=checkbox]{accent-color:#6366f1;width:15px;height:15px;flex-shrink:0}
+                .acm-empty{text-align:center;color:#334155;font-size:13px;padding:24px 0}
+            </style>
+            <div id="agent-config-modal">
+                <div class="acm-sheet">
+                    <div class="acm-handle"></div>
+                    <div class="acm-topbar">
+                        <div class="acm-title-wrap">
+                            <div class="acm-icon-box">⚙️</div>
+                            <div>
+                                <div class="acm-h1">Agent 配置中心</div>
+                                <div class="acm-sub">模型 · 规则 · 模板 · HR评级</div>
                             </div>
                         </div>
-                        <button class="am-close" onclick="closeAgentConfigModal()">×</button>
+                        <button class="acm-x" onclick="closeAgentConfigModal()">×</button>
                     </div>
-                    <div class="am-nav" style="overflow-x: auto; white-space: nowrap; -webkit-overflow-scrolling: touch; padding: 10px 16px; scrollbar-width: none;">
-                        <style>
-                            .am-nav::-webkit-scrollbar { display: none; }
-                        </style>
-                        <button id="agent-config-tab-btn-configs" class="am-nav-btn active" onclick="switchAgentConfigTab('configs')" style="flex-shrink: 0;"><span>基础配置</span></button>
-                        <button id="agent-config-tab-btn-op_config" class="am-nav-btn btn-secondary" onclick="switchAgentConfigTab('op_config')" style="flex-shrink: 0;"><span>OP巡检配置</span></button>
-                        <button id="agent-config-tab-btn-rules" class="am-nav-btn btn-secondary" onclick="switchAgentConfigTab('rules')" style="flex-shrink: 0;"><span>责任人规则</span></button>
-                        <button id="agent-config-tab-btn-templates" class="am-nav-btn btn-secondary" onclick="switchAgentConfigTab('templates')" style="flex-shrink: 0;"><span>模板库</span></button>
-                        <button id="agent-config-tab-btn-hr-rating" class="am-nav-btn btn-secondary" onclick="switchAgentConfigTab('hr_rating')" style="flex-shrink: 0;"><span>HR评级模型</span></button>
+                    <div class="acm-tabs">
+                        <button id="agent-config-tab-btn-configs"   class="acm-tab active" onclick="switchAgentConfigTab('configs')">基础配置</button>
+                        <button id="agent-config-tab-btn-op_config" class="acm-tab"        onclick="switchAgentConfigTab('op_config')">OP巡检</button>
+                        <button id="agent-config-tab-btn-rules"     class="acm-tab"        onclick="switchAgentConfigTab('rules')">责任人规则</button>
+                        <button id="agent-config-tab-btn-templates" class="acm-tab"        onclick="switchAgentConfigTab('templates')">模板库</button>
+                        <button id="agent-config-tab-btn-hr-rating" class="acm-tab"        onclick="switchAgentConfigTab('hr_rating')">HR评级</button>
                     </div>
-                    <div class="am-body" style="background: rgba(2, 6, 23, 0.4);">
-                        <div id="agent-config-tab-configs" class="am-tab-panel">
-                            <div id="agent-configs-list" class="am-list" style="gap: 16px;"></div>
+                    <div class="acm-body">
+
+                        <!-- ── 基础配置 ── -->
+                        <div id="agent-config-tab-configs" class="acm-panel">
+                            <div id="agent-configs-list" style="display:flex;flex-direction:column;gap:12px;"></div>
                         </div>
 
-                        <div id="agent-config-tab-op_config" class="am-tab-panel" style="display:none; gap: 16px;">
-                            <div class="am-card" style="padding: 20px;">
-                                <div style="font-weight: 600; font-size: 15px; margin-bottom: 16px; display: flex; align-items: center; gap: 8px;">
-                                    <span style="font-size: 18px;">👥</span> 派单人员角色
+                        <!-- ── OP巡检配置 ── -->
+                        <div id="agent-config-tab-op_config" class="acm-panel" style="display:none;">
+                            <div class="acm-card">
+                                <div class="acm-card-hd">
+                                    <div class="acm-card-title">👥 派单人员角色</div>
                                 </div>
-                                <div style="font-size: 12px; color: #94a3b8; margin-bottom: 12px;">选择哪些角色可以接收和处理异常任务</div>
-                                <div style="display:flex; flex-wrap: wrap; gap: 12px;" id="op-config-dispatchers">
-                                    <label style="display:flex; align-items:center; gap:6px; font-size:13px; color:#e2e8f0; cursor:pointer;"><input type="checkbox" value="store_manager" checked style="accent-color:#3b82f6;"> 店长</label>
-                                    <label style="display:flex; align-items:center; gap:6px; font-size:13px; color:#e2e8f0; cursor:pointer;"><input type="checkbox" value="store_production_manager" checked style="accent-color:#3b82f6;"> 出品经理</label>
-                                    <label style="display:flex; align-items:center; gap:6px; font-size:13px; color:#e2e8f0; cursor:pointer;"><input type="checkbox" value="store_staff" style="accent-color:#3b82f6;"> 店员</label>
+                                <div style="font-size:12px;color:#475569;margin-bottom:12px;">选择哪些角色可以接收和处理异常任务</div>
+                                <div class="acm-chip-row" id="op-config-dispatchers">
+                                    <label class="acm-chip"><input type="checkbox" value="store_manager" checked> 店长</label>
+                                    <label class="acm-chip"><input type="checkbox" value="store_production_manager" checked> 出品经理</label>
+                                    <label class="acm-chip"><input type="checkbox" value="store_staff"> 店员</label>
                                 </div>
                             </div>
-
-                            <div class="am-card" style="padding: 20px;">
-                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
-                                    <div style="font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 8px;">
-                                        <span style="font-size: 18px;">📋</span> 日常巡检任务 (开/收市)
-                                    </div>
-                                    <button class="btn" onclick="addOpConfigDailyInspection()" style="padding: 6px 12px; font-size: 12px;">+ 添加</button>
+                            <div class="acm-card">
+                                <div class="acm-card-hd">
+                                    <div class="acm-card-title">📋 日常巡检 (开/收市)</div>
+                                    <button class="acm-add-btn" onclick="addOpConfigDailyInspection()">+ 添加</button>
                                 </div>
-                                <div id="op-config-daily-list" style="display: flex; flex-direction: column; gap: 12px;"></div>
+                                <div id="op-config-daily-list" style="display:flex;flex-direction:column;gap:10px;"></div>
                             </div>
-
-                            <div class="am-card" style="padding: 20px;">
-                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
-                                    <div style="font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 8px;">
-                                        <span style="font-size: 18px;">🎲</span> 随机抽检 (食安等)
-                                    </div>
-                                    <button class="btn" onclick="addOpConfigRandomInspection()" style="padding: 6px 12px; font-size: 12px;">+ 添加</button>
+                            <div class="acm-card">
+                                <div class="acm-card-hd">
+                                    <div class="acm-card-title">🎲 随机抽检 (食安等)</div>
+                                    <button class="acm-add-btn" onclick="addOpConfigRandomInspection()">+ 添加</button>
                                 </div>
-                                <div id="op-config-random-list" style="display: flex; flex-direction: column; gap: 12px;"></div>
+                                <div id="op-config-random-list" style="display:flex;flex-direction:column;gap:10px;"></div>
                             </div>
-                            
-                            <div style="display:flex;justify-content:flex-end;margin-top:8px;">
-                                <button class="btn" onclick="saveOpAgentConfig()" style="padding: 12px 24px; font-weight: 600; background: linear-gradient(135deg, #3b82f6, #2563eb);">保存OP配置</button>
-                            </div>
+                            <button class="acm-save" onclick="saveOpAgentConfig()">保存 OP 配置</button>
                         </div>
 
-                        <div id="agent-config-tab-rules" class="am-tab-panel" style="display:none;">
-                            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 12px; flex-wrap: wrap; gap: 10px;">
-                                <div style="font-weight: 600; font-size: 15px; color: rgba(255,255,255,0.9);">责任人/扣分规则</div>
-                                <button class="btn" onclick="openAgentRuleEditor('')" style="padding: 8px 16px;">+ 新增规则</button>
+                        <div id="agent-config-tab-rules" class="acm-panel" style="display:none;">
+                            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+                                <div style="font-size:13px;font-weight:700;color:#94a3b8;letter-spacing:.5px;">责任人 / 扣分规则</div>
+                                <button class="acm-add-btn" onclick="openAgentRuleEditor('')">+ 新增规则</button>
                             </div>
-                            
-                            <!-- 移动端卡片视图 (默认隐藏，通过CSS在移动端显示) -->
-                            <style>
-                                .rules-table-view { display: block; }
-                                .rules-card-view { display: none; }
-                                @media (max-width: 768px) {
-                                    .rules-table-view { display: none; }
-                                    .rules-card-view { display: flex; flex-direction: column; gap: 12px; }
-                                }
-                            </style>
-                            <div id="agent-rules-card-list" class="rules-card-view"></div>
-                            
-                            <!-- 桌面端表格视图 -->
-                            <div class="rules-table-view" style="overflow-x:auto; background: rgba(0,0,0,0.2); border-radius: 12px; border: 1px solid rgba(255,255,255,0.08);">
-                                <table class="am-table" style="width:100%;text-align:left;border-collapse:collapse;font-size:13px;color:#e2e8f0;">
-                                    <thead style="background: rgba(255,255,255,0.04);">
-                                        <tr style="border-bottom:1px solid rgba(255,255,255,0.1);">
-                                            <th style="padding:12px 16px; font-weight: 600; color: #94a3b8;">分类 / 子分类</th>
-                                            <th style="padding:12px 16px; font-weight: 600; color: #94a3b8;">责任人角色</th>
-                                            <th style="padding:12px 16px; font-weight: 600; color: #94a3b8;">扣分</th>
-                                            <th style="padding:12px 16px; font-weight: 600; color: #94a3b8; text-align:center;">高优</th>
-                                            <th style="padding:12px 16px; font-weight: 600; color: #94a3b8; text-align:right;">操作</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody id="agent-rules-tbody"></tbody>
-                                </table>
-                            </div>
+                            <div id="agent-rules-card-list" style="display:flex;flex-direction:column;gap:10px;"></div>
+                            <div id="agent-rules-tbody" style="display:none;"></div>
                         </div>
-                        <div id="agent-config-tab-templates" class="am-tab-panel" style="display:none;">
-                            <div class="am-card" style="margin-bottom:10px;">
-                                <div style="display:grid;grid-template-columns:160px 220px 1fr auto;gap:8px;align-items:end;">
+                        <div id="agent-config-tab-templates" class="acm-panel" style="display:none;">
+                            <div class="acm-card">
+                                <div class="acm-card-title" style="margin-bottom:14px;">新增模板</div>
+                                <div style="display:flex;flex-direction:column;gap:10px;">
                                     <div>
-                                        <label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px;">Agent</label>
-                                        <select id="agent-template-new-agent"></select>
+                                        <label class="acm-lbl">所属 Agent</label>
+                                        <select id="agent-template-new-agent" class="acm-inp acm-inp-sm"></select>
                                     </div>
                                     <div>
-                                        <label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px;">模板名称</label>
-                                        <input id="agent-template-new-name" placeholder="例如：公司标准回复v2">
+                                        <label class="acm-lbl">模板名称</label>
+                                        <input id="agent-template-new-name" class="acm-inp acm-inp-sm" placeholder="例如：公司标准回复 v2">
                                     </div>
                                     <div>
-                                        <label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px;">模板内容</label>
-                                        <textarea id="agent-template-new-content" style="width:100%;min-height:72px;background:rgba(15,23,42,0.45);color:#e2e8f0;border:1px solid rgba(148,163,184,.25);border-radius:8px;padding:8px;"></textarea>
+                                        <label class="acm-lbl">模板内容</label>
+                                        <textarea id="agent-template-new-content" class="acm-inp" style="min-height:80px;resize:vertical;" placeholder="输入提示词模板内容…"></textarea>
                                     </div>
-                                    <button class="btn" onclick="createAgentTemplate()">新增模板</button>
+                                    <button class="acm-save" onclick="createAgentTemplate()">新增模板</button>
                                 </div>
                             </div>
-                            <div id="agent-templates-list" class="am-list"></div>
+                            <div id="agent-templates-list" style="display:flex;flex-direction:column;gap:10px;"></div>
                         </div>
-                        <div id="agent-config-tab-hr-rating" class="am-tab-panel" style="display:none;">
-                            <div class="am-card">
-                                <div style="font-weight:700;margin-bottom:10px;">出品经理 · 执行力（缺失次数阈值）</div>
-                                <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;">
-                                    <input id="hr-rating-exec-pm-a" type="number" min="0" step="1" placeholder="A 最大缺失">
-                                    <input id="hr-rating-exec-pm-b" type="number" min="0" step="1" placeholder="B 最大缺失">
-                                    <input id="hr-rating-exec-pm-c" type="number" min="0" step="1" placeholder="C 最大缺失">
+                        <div id="agent-config-tab-hr-rating" class="acm-panel" style="display:none;">
+                            <!-- 出品经理·执行力 -->
+                            <div class="acm-card">
+                                <div class="acm-card-title" style="margin-bottom:12px;">出品经理 · 执行力（缺失次数阈值）</div>
+                                <div class="acm-abc">
+                                    <div class="acm-abc-col">
+                                        <span class="acm-badge acm-ba">A</span>
+                                        <input id="hr-rating-exec-pm-a" type="number" min="0" step="1" class="acm-inp acm-inp-sm" placeholder="最大缺失">
+                                    </div>
+                                    <div class="acm-abc-col">
+                                        <span class="acm-badge acm-bb">B</span>
+                                        <input id="hr-rating-exec-pm-b" type="number" min="0" step="1" class="acm-inp acm-inp-sm" placeholder="最大缺失">
+                                    </div>
+                                    <div class="acm-abc-col">
+                                        <span class="acm-badge acm-bc">C</span>
+                                        <input id="hr-rating-exec-pm-c" type="number" min="0" step="1" class="acm-inp acm-inp-sm" placeholder="最大缺失">
+                                    </div>
                                 </div>
                             </div>
-                            <div class="am-card">
-                                <div style="font-weight:700;margin-bottom:10px;">店长 · 执行力（洪潮：企微会员月新增）</div>
-                                <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;">
-                                    <input id="hr-rating-exec-sm-hz-a" type="number" min="0" step="1" placeholder="A 最小新增">
-                                    <input id="hr-rating-exec-sm-hz-b" type="number" min="0" step="1" placeholder="B 最小新增">
-                                    <input id="hr-rating-exec-sm-hz-c" type="number" min="0" step="1" placeholder="C 最小新增">
+                            <!-- 店长·执行力·洪潮 -->
+                            <div class="acm-card">
+                                <div class="acm-card-title" style="margin-bottom:12px;">店长 · 执行力 · 洪潮（企微会员月新增）</div>
+                                <div class="acm-abc">
+                                    <div class="acm-abc-col">
+                                        <span class="acm-badge acm-ba">A</span>
+                                        <input id="hr-rating-exec-sm-hz-a" type="number" min="0" step="1" class="acm-inp acm-inp-sm" placeholder="最小新增">
+                                    </div>
+                                    <div class="acm-abc-col">
+                                        <span class="acm-badge acm-bb">B</span>
+                                        <input id="hr-rating-exec-sm-hz-b" type="number" min="0" step="1" class="acm-inp acm-inp-sm" placeholder="最小新增">
+                                    </div>
+                                    <div class="acm-abc-col">
+                                        <span class="acm-badge acm-bc">C</span>
+                                        <input id="hr-rating-exec-sm-hz-c" type="number" min="0" step="1" class="acm-inp acm-inp-sm" placeholder="最小新增">
+                                    </div>
                                 </div>
                             </div>
-                            <div class="am-card">
-                                <div style="font-weight:700;margin-bottom:10px;">店长 · 执行力（马己仙：例会缺失/低分）</div>
-                                <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;">
-                                    <input id="hr-rating-exec-sm-mjx-score" type="number" min="0" step="0.1" placeholder="低分阈值">
-                                    <input id="hr-rating-exec-sm-mjx-a-miss" type="number" min="0" step="1" placeholder="A 最大缺失">
-                                    <input id="hr-rating-exec-sm-mjx-a-low" type="number" min="0" step="1" placeholder="A 最大低分次数">
-                                    <input id="hr-rating-exec-sm-mjx-b-miss" type="number" min="0" step="1" placeholder="B 最大缺失">
-                                    <input id="hr-rating-exec-sm-mjx-b-low" type="number" min="0" step="1" placeholder="B 最大低分次数">
-                                    <input id="hr-rating-exec-sm-mjx-c-miss" type="number" min="0" step="1" placeholder="C 最大缺失">
-                                    <input id="hr-rating-exec-sm-mjx-c-low" type="number" min="0" step="1" placeholder="C 最大低分次数">
+                            <!-- 店长·执行力·马己仙 -->
+                            <div class="acm-card">
+                                <div class="acm-card-title" style="margin-bottom:12px;">店长 · 执行力 · 马己仙（例会缺失/低分）</div>
+                                <div style="margin-bottom:10px;">
+                                    <label class="acm-lbl">低分阈值</label>
+                                    <input id="hr-rating-exec-sm-mjx-score" type="number" min="0" step="0.1" class="acm-inp acm-inp-sm" placeholder="例：85">
+                                </div>
+                                <div class="acm-abc">
+                                    <div class="acm-abc-col">
+                                        <span class="acm-badge acm-ba">A</span>
+                                        <input id="hr-rating-exec-sm-mjx-a-miss" type="number" min="0" step="1" class="acm-inp acm-inp-sm" placeholder="最大缺失">
+                                        <input id="hr-rating-exec-sm-mjx-a-low"  type="number" min="0" step="1" class="acm-inp acm-inp-sm" placeholder="最大低分">
+                                    </div>
+                                    <div class="acm-abc-col">
+                                        <span class="acm-badge acm-bb">B</span>
+                                        <input id="hr-rating-exec-sm-mjx-b-miss" type="number" min="0" step="1" class="acm-inp acm-inp-sm" placeholder="最大缺失">
+                                        <input id="hr-rating-exec-sm-mjx-b-low"  type="number" min="0" step="1" class="acm-inp acm-inp-sm" placeholder="最大低分">
+                                    </div>
+                                    <div class="acm-abc-col">
+                                        <span class="acm-badge acm-bc">C</span>
+                                        <input id="hr-rating-exec-sm-mjx-c-miss" type="number" min="0" step="1" class="acm-inp acm-inp-sm" placeholder="最大缺失">
+                                        <input id="hr-rating-exec-sm-mjx-c-low"  type="number" min="0" step="1" class="acm-inp acm-inp-sm" placeholder="最大低分">
+                                    </div>
                                 </div>
                             </div>
-                            <div class="am-card">
-                                <div style="font-weight:700;margin-bottom:10px;">工作态度（未完成任务次数阈值）</div>
-                                <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;">
-                                    <input id="hr-rating-att-a" type="number" min="0" step="1" placeholder="A 最大未完成">
-                                    <input id="hr-rating-att-b" type="number" min="0" step="1" placeholder="B 最大未完成">
+                            <!-- 工作态度 -->
+                            <div class="acm-card">
+                                <div class="acm-card-title" style="margin-bottom:12px;">工作态度（未完成任务次数阈值）</div>
+                                <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+                                    <div class="acm-abc-col">
+                                        <span class="acm-badge acm-ba">A</span>
+                                        <input id="hr-rating-att-a" type="number" min="0" step="1" class="acm-inp acm-inp-sm" placeholder="最大未完成">
+                                    </div>
+                                    <div class="acm-abc-col">
+                                        <span class="acm-badge acm-bb">B</span>
+                                        <input id="hr-rating-att-b" type="number" min="0" step="1" class="acm-inp acm-inp-sm" placeholder="最大未完成">
+                                    </div>
                                 </div>
                             </div>
-                            <div class="am-card">
-                                <div style="font-weight:700;margin-bottom:10px;">工作能力（出品经理：毛利率差值）</div>
-                                <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;">
-                                    <input id="hr-rating-abl-pm-a" type="number" step="0.01" placeholder="A 最小差值">
-                                    <input id="hr-rating-abl-pm-b-min" type="number" step="0.01" placeholder="B 最小差值">
-                                    <input id="hr-rating-abl-pm-b-max" type="number" step="0.01" placeholder="B 最大差值">
-                                    <input id="hr-rating-abl-pm-c-min" type="number" step="0.01" placeholder="C 最小差值">
-                                    <input id="hr-rating-abl-pm-c-max" type="number" step="0.01" placeholder="C 最大差值">
+                            <!-- 工作能力·出品经理 -->
+                            <div class="acm-card">
+                                <div class="acm-card-title" style="margin-bottom:12px;">工作能力 · 出品经理（毛利率差值）</div>
+                                <div class="acm-abc">
+                                    <div class="acm-abc-col">
+                                        <span class="acm-badge acm-ba">A</span>
+                                        <input id="hr-rating-abl-pm-a" type="number" step="0.01" class="acm-inp acm-inp-sm" placeholder="最小差值">
+                                    </div>
+                                    <div class="acm-abc-col">
+                                        <span class="acm-badge acm-bb">B</span>
+                                        <input id="hr-rating-abl-pm-b-min" type="number" step="0.01" class="acm-inp acm-inp-sm" placeholder="最小差值">
+                                        <input id="hr-rating-abl-pm-b-max" type="number" step="0.01" class="acm-inp acm-inp-sm" placeholder="最大差值">
+                                    </div>
+                                    <div class="acm-abc-col">
+                                        <span class="acm-badge acm-bc">C</span>
+                                        <input id="hr-rating-abl-pm-c-min" type="number" step="0.01" class="acm-inp acm-inp-sm" placeholder="最小差值">
+                                        <input id="hr-rating-abl-pm-c-max" type="number" step="0.01" class="acm-inp acm-inp-sm" placeholder="最大差值">
+                                    </div>
                                 </div>
                             </div>
-                            <div class="am-card">
-                                <div style="font-weight:700;margin-bottom:10px;">工作能力（店长：点评星级阈值）</div>
-                                <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:8px;">
-                                    <input id="hr-rating-abl-sm-hz-a" type="number" step="0.1" min="0" max="5" placeholder="洪潮 A 最小星级">
-                                    <input id="hr-rating-abl-sm-hz-b" type="number" step="0.1" min="0" max="5" placeholder="洪潮 B 最小星级">
-                                    <input id="hr-rating-abl-sm-hz-c" type="number" step="0.1" min="0" max="5" placeholder="洪潮 C 最小星级">
+                            <!-- 工作能力·店长 -->
+                            <div class="acm-card">
+                                <div class="acm-card-title" style="margin-bottom:12px;">工作能力 · 店长（点评星级阈值）</div>
+                                <div style="font-size:11px;color:#475569;margin-bottom:8px;">洪潮</div>
+                                <div class="acm-abc" style="margin-bottom:12px;">
+                                    <div class="acm-abc-col">
+                                        <span class="acm-badge acm-ba">A</span>
+                                        <input id="hr-rating-abl-sm-hz-a" type="number" step="0.1" min="0" max="5" class="acm-inp acm-inp-sm" placeholder="最小星级">
+                                    </div>
+                                    <div class="acm-abc-col">
+                                        <span class="acm-badge acm-bb">B</span>
+                                        <input id="hr-rating-abl-sm-hz-b" type="number" step="0.1" min="0" max="5" class="acm-inp acm-inp-sm" placeholder="最小星级">
+                                    </div>
+                                    <div class="acm-abc-col">
+                                        <span class="acm-badge acm-bc">C</span>
+                                        <input id="hr-rating-abl-sm-hz-c" type="number" step="0.1" min="0" max="5" class="acm-inp acm-inp-sm" placeholder="最小星级">
+                                    </div>
                                 </div>
-                                <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;">
-                                    <input id="hr-rating-abl-sm-mjx-a" type="number" step="0.1" min="0" max="5" placeholder="马己仙 A 最小星级">
-                                    <input id="hr-rating-abl-sm-mjx-b" type="number" step="0.1" min="0" max="5" placeholder="马己仙 B 最小星级">
-                                    <input id="hr-rating-abl-sm-mjx-c" type="number" step="0.1" min="0" max="5" placeholder="马己仙 C 最小星级">
+                                <div style="font-size:11px;color:#475569;margin-bottom:8px;">马己仙</div>
+                                <div class="acm-abc">
+                                    <div class="acm-abc-col">
+                                        <span class="acm-badge acm-ba">A</span>
+                                        <input id="hr-rating-abl-sm-mjx-a" type="number" step="0.1" min="0" max="5" class="acm-inp acm-inp-sm" placeholder="最小星级">
+                                    </div>
+                                    <div class="acm-abc-col">
+                                        <span class="acm-badge acm-bb">B</span>
+                                        <input id="hr-rating-abl-sm-mjx-b" type="number" step="0.1" min="0" max="5" class="acm-inp acm-inp-sm" placeholder="最小星级">
+                                    </div>
+                                    <div class="acm-abc-col">
+                                        <span class="acm-badge acm-bc">C</span>
+                                        <input id="hr-rating-abl-sm-mjx-c" type="number" step="0.1" min="0" max="5" class="acm-inp acm-inp-sm" placeholder="最小星级">
+                                    </div>
                                 </div>
                             </div>
-                            <div style="display:flex;justify-content:flex-end;">
-                                <button class="btn" onclick="saveHrEmployeeRatingConfig()">保存HR评级模型</button>
-                            </div>
+                            <button class="acm-save" onclick="saveHrEmployeeRatingConfig()">保存 HR 评级模型</button>
                         </div>
-                    </div>
-                </div>
-            </div>
+
+                    </div><!-- /.acm-body -->
+                </div><!-- /.acm-sheet -->
+            </div><!-- /#agent-config-modal -->
 
             <div id="agent-rule-modal" class="modal">
                 <div class="modal-content" style="max-width:560px;">
@@ -16810,7 +16902,7 @@ ${knowledgeContent.slice(0, 30000)}`;
 
         async function loadAgentTemplates(agentId = '') {
             const box = document.getElementById('agent-templates-list');
-            if (box) box.innerHTML = '<div class="am-card" style="text-align:center;">加载中...</div>';
+            if (box) box.innerHTML = '<div class="acm-empty">加载中…</div>';
             try {
                 const token = localStorage.getItem('hrms_token');
                 const url = agentId ? ('/api/admin/agents/templates?agent_id=' + encodeURIComponent(agentId)) : '/api/admin/agents/templates';
@@ -16828,7 +16920,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                 renderAgentTemplateCreatorOptions();
                 renderAgentTemplatesList();
             } catch (e) {
-                if (box) box.innerHTML = '<div class="am-card" style="text-align:center;color:#f87171;">模板加载失败</div>';
+                if (box) box.innerHTML = '<div class="acm-empty" style="color:#f87171;">模板加载失败</div>';
             }
         }
 
@@ -16842,25 +16934,27 @@ ${knowledgeContent.slice(0, 30000)}`;
             const box = document.getElementById('agent-templates-list');
             if (!box) return;
             if (!Array.isArray(__AGENT_TEMPLATES) || !__AGENT_TEMPLATES.length) {
-                box.innerHTML = '<div class="am-card" style="text-align:center;">暂无模板</div>';
+                box.innerHTML = '<div class="acm-empty">暂无模板，请在上方新增</div>';
                 return;
             }
             box.innerHTML = __AGENT_TEMPLATES.map((t) => {
                 const locked = !!t.is_builtin;
                 return `
-                    <div class="am-card">
-                        <div class="am-card-header">
-                            <div class="am-card-title">${escapeHtml(t.name || '')}</div>
-                            <label style="font-size:12px;color:#cbd5e1;display:flex;gap:6px;align-items:center;">
-                                <input type="checkbox" id="tpl-enabled-${escapeHtml(t.id)}" ${t.enabled ? 'checked' : ''}> 启用
+                    <div class="acm-tpl-card">
+                        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;">
+                            <div style="flex:1;min-width:0;">
+                                <div class="acm-tpl-name">${escapeHtml(t.name || '')}</div>
+                                <div class="acm-tpl-agent">${escapeHtml(t.agent_id || '')} ${locked ? '· 系统模板' : '· 公司模板'}</div>
+                            </div>
+                            <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:#64748b;flex-shrink:0;">
+                                <input type="checkbox" id="tpl-enabled-${escapeHtml(t.id)}" ${t.enabled ? 'checked' : ''} style="accent-color:#6366f1;"> 启用
                             </label>
                         </div>
-                        <div class="am-card-meta">${escapeHtml(t.agent_id || '')} ${locked ? '· 系统模板(仅可改名称/启停)' : '· 公司模板'}</div>
-                        <input id="tpl-name-${escapeHtml(t.id)}" value="${escapeHtml(t.name || '')}" placeholder="模板名称" style="margin-top:8px;">
-                        <textarea id="tpl-content-${escapeHtml(t.id)}" ${locked ? 'readonly' : ''} style="width:100%;min-height:84px;margin-top:8px;background:rgba(15,23,42,0.45);color:#e2e8f0;border:1px solid rgba(148,163,184,.25);border-radius:8px;padding:8px;">${escapeHtml(t.content || '')}</textarea>
-                        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px;">
-                            ${locked ? '' : `<button class="btn btn-secondary" onclick="deleteAgentTemplate('${escapeHtml(t.id)}')">删除</button>`}
-                            <button class="btn" onclick="saveAgentTemplate('${escapeHtml(t.id)}')">保存</button>
+                        <input id="tpl-name-${escapeHtml(t.id)}" value="${escapeHtml(t.name || '')}" placeholder="模板名称" class="acm-inp acm-inp-sm" style="margin-top:10px;">
+                        <textarea id="tpl-content-${escapeHtml(t.id)}" ${locked ? 'readonly' : ''} class="acm-inp" style="min-height:80px;resize:vertical;margin-top:8px;">${escapeHtml(t.content || '')}</textarea>
+                        <div class="acm-tpl-footer">
+                            ${locked ? '' : `<button class="acm-tpl-del" onclick="deleteAgentTemplate('${escapeHtml(t.id)}')">删除</button>`}
+                            <button class="acm-edit-btn" onclick="saveAgentTemplate('${escapeHtml(t.id)}')">保存</button>
                         </div>
                     </div>
                 `;
@@ -17038,50 +17132,65 @@ ${knowledgeContent.slice(0, 30000)}`;
         async function loadAgentConfigs() {
             const box = document.getElementById('agent-configs-list');
             if (!box) return;
-            box.innerHTML = '<div class="am-card" style="text-align:center;">加载中...</div>';
+            box.innerHTML = '<div class="acm-empty">加载中…</div>';
             try {
                 const token = localStorage.getItem('hrms_token');
                 const resp = await fetch('/api/admin/agents/configs', { headers: { 'Authorization': 'Bearer ' + token } });
                 if (!resp.ok) {
-                    box.innerHTML = '<div class="am-card" style="text-align:center;color:#f87171;">无权限或接口不可用</div>';
+                    box.innerHTML = '<div class="acm-empty" style="color:#f87171;">无权限或接口不可用</div>';
                     return;
                 }
                 const data = await resp.json();
                 __AGENT_CONFIGS = Array.isArray(data?.configs) ? data.configs : [];
                 await loadAgentTemplates();
                 if (!__AGENT_CONFIGS.length) {
-                    box.innerHTML = '<div class="am-card" style="text-align:center;">暂无配置</div>';
+                    box.innerHTML = '<div class="acm-empty">暂无配置</div>';
                     return;
                 }
                 box.innerHTML = __AGENT_CONFIGS.map((c) => `
-                    <div class="am-card">
-                        <div class="am-card-header">
-                            <div class="am-card-title">${escapeHtml(c.name || c.agent_id || '')}</div>
-                            <label style="font-size:12px;color:#cbd5e1;display:flex;gap:6px;align-items:center;">
-                                <input type="checkbox" id="cfg-enabled-${escapeHtml(c.agent_id)}" ${c.enabled ? 'checked' : ''}> 启用
+                    <div class="acm-card">
+                        <div class="acm-card-hd">
+                            <div class="acm-card-title">${escapeHtml(c.name || c.agent_id || '')}</div>
+                            <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:#64748b;flex-shrink:0;">
+                                <input type="checkbox" id="cfg-enabled-${escapeHtml(c.agent_id)}" ${c.enabled ? 'checked' : ''} style="accent-color:#6366f1;"> 启用
                             </label>
                         </div>
-                        <div class="am-card-meta">${escapeHtml(c.agent_id || '')}</div>
-                        <div style="display:grid;grid-template-columns:1fr 120px 120px;gap:8px;margin-top:8px;">
-                            <input id="cfg-model-${escapeHtml(c.agent_id)}" value="${escapeHtml(c.model_name || '')}" placeholder="模型名">
-                            <input id="cfg-temp-${escapeHtml(c.agent_id)}" value="${escapeHtml(String(c.temperature ?? '0.1'))}" placeholder="temperature">
-                            <input id="cfg-interval-${escapeHtml(c.agent_id)}" value="${escapeHtml(String(c.schedule_interval ?? '0'))}" placeholder="间隔(分钟)">
+                        <div style="font-size:11px;color:#334155;margin-bottom:10px;">${escapeHtml(c.agent_id || '')}</div>
+                        <div style="display:flex;flex-direction:column;gap:8px;">
+                            <div>
+                                <label class="acm-lbl">模型名称</label>
+                                <input id="cfg-model-${escapeHtml(c.agent_id)}" value="${escapeHtml(c.model_name || '')}" placeholder="例如：gpt-4o" class="acm-inp acm-inp-sm">
+                            </div>
+                            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+                                <div>
+                                    <label class="acm-lbl">Temperature</label>
+                                    <input id="cfg-temp-${escapeHtml(c.agent_id)}" value="${escapeHtml(String(c.temperature ?? '0.1'))}" placeholder="0.1" class="acm-inp acm-inp-sm" type="number" step="0.1" min="0" max="2">
+                                </div>
+                                <div>
+                                    <label class="acm-lbl">调度间隔（分钟）</label>
+                                    <input id="cfg-interval-${escapeHtml(c.agent_id)}" value="${escapeHtml(String(c.schedule_interval ?? '0'))}" placeholder="0" class="acm-inp acm-inp-sm" type="number" min="0">
+                                </div>
+                            </div>
+                            <div>
+                                <label class="acm-lbl">提示词模板</label>
+                                <div style="display:flex;gap:8px;align-items:center;">
+                                    <select id="cfg-template-${escapeHtml(c.agent_id)}" onchange="onConfigTemplateChange('${escapeHtml(c.agent_id)}')" class="acm-inp acm-inp-sm" style="flex:1;">
+                                        <option value="">手动提示词</option>
+                                        ${(Array.isArray(__AGENT_TEMPLATE_MAP?.[c.agent_id]) ? __AGENT_TEMPLATE_MAP[c.agent_id] : []).map((t) => `<option value="${escapeHtml(t.id)}" ${String(c.prompt_template_id || '') === String(t.id || '') ? 'selected' : ''}>${escapeHtml(t.name || '')}${t.is_builtin ? '（系统）' : ''}</option>`).join('')}
+                                    </select>
+                                    <button class="acm-add-btn" onclick="switchAgentConfigTab('templates')" style="white-space:nowrap;">管理模板</button>
+                                </div>
+                            </div>
+                            <div>
+                                <label class="acm-lbl">系统提示词</label>
+                                <textarea id="cfg-prompt-${escapeHtml(c.agent_id)}" class="acm-inp" style="min-height:80px;resize:vertical;">${escapeHtml(c.system_prompt || '')}</textarea>
+                            </div>
                         </div>
-                        <div style="display:grid;grid-template-columns:1fr auto;gap:8px;margin-top:8px;align-items:center;">
-                            <select id="cfg-template-${escapeHtml(c.agent_id)}" onchange="onConfigTemplateChange('${escapeHtml(c.agent_id)}')">
-                                <option value="">手动提示词</option>
-                                ${(Array.isArray(__AGENT_TEMPLATE_MAP?.[c.agent_id]) ? __AGENT_TEMPLATE_MAP[c.agent_id] : []).map((t) => `<option value="${escapeHtml(t.id)}" ${String(c.prompt_template_id || '') === String(t.id || '') ? 'selected' : ''}>${escapeHtml(t.name || '')}${t.is_builtin ? '（系统）' : ''}</option>`).join('')}
-                            </select>
-                            <button class="btn btn-secondary" onclick="switchAgentConfigTab('templates')">管理模板</button>
-                        </div>
-                        <textarea id="cfg-prompt-${escapeHtml(c.agent_id)}" style="width:100%;min-height:84px;margin-top:8px;background:rgba(15,23,42,0.45);color:#e2e8f0;border:1px solid rgba(148,163,184,.25);border-radius:8px;padding:8px;">${escapeHtml(c.system_prompt || '')}</textarea>
-                        <div style="display:flex;justify-content:flex-end;margin-top:8px;">
-                            <button class="btn" onclick="saveAgentConfig('${escapeHtml(c.agent_id)}')">保存</button>
-                        </div>
+                        <button class="acm-save" onclick="saveAgentConfig('${escapeHtml(c.agent_id)}')" style="margin-top:12px;">保存配置</button>
                     </div>
                 `).join('');
             } catch (e) {
-                box.innerHTML = '<div class="am-card" style="text-align:center;color:#f87171;">加载失败</div>';
+                box.innerHTML = '<div class="acm-empty" style="color:#f87171;">加载失败</div>';
             }
         }
 
@@ -17119,34 +17228,35 @@ ${knowledgeContent.slice(0, 30000)}`;
         }
 
         async function loadAgentRules() {
-            const tbody = document.getElementById('agent-rules-tbody');
-            if (!tbody) return;
-            tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;">加载中...</td></tr>';
+            const list = document.getElementById('agent-rules-card-list');
+            if (!list) return;
+            list.innerHTML = '<div class="acm-empty">加载中…</div>';
             try {
                 const token = localStorage.getItem('hrms_token');
                 const resp = await fetch('/api/admin/agents/rules', { headers: { 'Authorization': 'Bearer ' + token } });
                 if (!resp.ok) {
-                    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#f87171;">无权限或接口不可用</td></tr>';
+                    list.innerHTML = '<div class="acm-empty" style="color:#f87171;">无权限或接口不可用</div>';
                     return;
                 }
                 const data = await resp.json();
                 __AGENT_RULES = Array.isArray(data?.rules) ? data.rules : [];
                 if (!__AGENT_RULES.length) {
-                    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;">暂无规则</td></tr>';
+                    list.innerHTML = '<div class="acm-empty">暂无规则，点击「+ 新增规则」添加</div>';
                     return;
                 }
-                tbody.innerHTML = __AGENT_RULES.map((r) => `
-                    <tr>
-                        <td>${escapeHtml(r.category || '')}</td>
-                        <td>${escapeHtml(r.assignee_role || '')}</td>
-                        <td>${Number(r.normal_deduction || 0)}</td>
-                        <td>${Number(r.major_deduction || 0)}</td>
-                        <td>${r.enabled ? '启用' : '停用'}</td>
-                        <td><button class="btn btn-secondary" onclick="openAgentRuleEditor('${escapeHtml(r.id)}')">编辑</button></td>
-                    </tr>
+                const roleLabel = { store_manager: '店长', store_production_manager: '出品经理' };
+                list.innerHTML = __AGENT_RULES.map((r) => `
+                    <div class="acm-rule-row">
+                        <div class="acm-rule-info">
+                            <div class="acm-rule-cat">${escapeHtml(r.category || '')}</div>
+                            <div class="acm-rule-meta">${roleLabel[r.assignee_role] || escapeHtml(r.assignee_role || '')} · ${r.enabled ? '启用' : '<span style="color:#f87171">停用</span>'}</div>
+                        </div>
+                        <span class="acm-rule-deduct">中-${Number(r.normal_deduction||0)} / 重-${Number(r.major_deduction||0)}</span>
+                        <button class="acm-edit-btn" onclick="openAgentRuleEditor('${escapeHtml(String(r.id))}')">编辑</button>
+                    </div>
                 `).join('');
             } catch (e) {
-                tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#f87171;">加载失败</td></tr>';
+                list.innerHTML = '<div class="acm-empty" style="color:#f87171;">加载失败</div>';
             }
         }
 
