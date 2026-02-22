@@ -9,10 +9,20 @@ import { fileURLToPath } from 'url';
 import { randomUUID } from 'crypto';
 import multer from 'multer';
 import https from 'https';
+import { execFileSync } from 'child_process';
 import OSS from 'ali-oss';
 import COS from 'cos-nodejs-sdk-v5';
 import { Pool } from 'pg';
 import { Readable } from 'stream';
+import zlib from 'zlib';
+import XLSX from 'xlsx';
+import axios from 'axios';
+import { setPool as setAgentPool, ensureAgentTables, registerAgentRoutes, startAgentScheduler, setTaskResponseHook, startBitablePolling, startScheduledTasks } from './agents.js';
+import { setMasterPool, ensureMasterTables, startMasterAgent, registerMasterRoutes, handleTaskResponse } from './master-agent.js';
+import { startDailyFeishuSync } from './feishu-sync.js';
+import { calculateStoreRating, calculateEmployeeScore } from './new-scoring-model.js';
+import { registerNewScoringRoutes } from './new-scoring-api.js';
+import { handleMarginMessage } from './margin-message-handler.js';
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = String(process.env.HOST || '0.0.0.0');
@@ -21,7 +31,15 @@ const JWT_SECRET = process.env.JWT_SECRET;
 const STARTED_AT = new Date().toISOString();
 
 const app = express();
-app.use(cors());
+// H3-FIX: 限制CORS来源（生产环境使用白名单，开发环境允许所有）
+const CORS_WHITELIST = (process.env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
+app.use(cors(CORS_WHITELIST.length > 0 ? {
+  origin: (origin, cb) => {
+    if (!origin || CORS_WHITELIST.includes(origin)) cb(null, true);
+    else cb(new Error('CORS not allowed'));
+  },
+  credentials: true
+} : undefined));
 app.use(express.json({ limit: '5mb' }));
 
 const OSS_REGION = process.env.OSS_REGION;
@@ -40,6 +58,11 @@ const COS_BUCKET = process.env.COS_BUCKET;
 const COS_REGION = process.env.COS_REGION;
 const COS_PUBLIC_BASE_URL = process.env.COS_PUBLIC_BASE_URL;
 
+// 飞书配置
+const FEISHU_APP_ID = process.env.FEISHU_APP_ID;
+const FEISHU_APP_SECRET = process.env.FEISHU_APP_SECRET;
+const FEISHU_BASE_URL = 'https://open.feishu.cn/open-apis';
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const uploadsDir = path.join(__dirname, 'uploads');
@@ -50,12 +73,1397 @@ function ensureUploadsDir() {
     console.error('[ensureUploadsDir] mkdirSync failed:', e?.message || e);
     return { ok: false, error: String(e?.message || e) };
   }
+
   try {
     fs.accessSync(uploadsDir, fs.constants.R_OK | fs.constants.W_OK);
     return { ok: true };
   } catch (e) {
     console.error('[ensureUploadsDir] accessSync failed:', e?.message || e);
     return { ok: false, error: String(e?.message || e) };
+  }
+}
+
+function normalizeBrandId(input) {
+  const raw = String(input || '').trim().toLowerCase();
+  if (!raw) return '';
+  return raw
+    .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 80);
+}
+
+function getBrandsFromState(state0) {
+  const state = state0 && typeof state0 === 'object' ? state0 : {};
+  const stores = Array.isArray(state?.stores) ? state.stores : [];
+  const existing = Array.isArray(state?.brands) ? state.brands : [];
+  const map = new Map();
+
+  existing.forEach((b) => {
+    const name = String(b?.name || b?.label || '').trim();
+    const id = normalizeBrandId(b?.id || b?.brandId || name);
+    if (!name || !id) return;
+    map.set(id, {
+      id,
+      name,
+      config: b?.config && typeof b.config === 'object' ? b.config : {
+        sopKeypoints: [],
+        performanceWeights: {}
+      }
+    });
+  });
+
+  stores.forEach((s) => {
+    const name = String(s?.brand || s?.brandName || '').trim();
+    const id = normalizeBrandId(s?.brandId || name);
+    if (!name || !id) return;
+    if (!map.has(id)) {
+      map.set(id, {
+        id,
+        name,
+        config: { sopKeypoints: [], performanceWeights: {} }
+      });
+    }
+  });
+
+  return Array.from(map.values()).sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'zh-Hans-CN'));
+}
+
+function resolveStoreBrandContext(state0, storeRef) {
+  const state = state0 && typeof state0 === 'object' ? state0 : {};
+  const stores = Array.isArray(state?.stores) ? state.stores : [];
+  const brands = getBrandsFromState(state);
+  const byId = new Map(brands.map((b) => [String(b.id || ''), b]));
+  const ref = String(storeRef || '').trim();
+  const row = stores.find((s) => String(s?.id || '').trim() === ref || String(s?.name || '').trim() === ref) || null;
+  const brandName = String(row?.brand || row?.brandName || '').trim();
+  const brandId = normalizeBrandId(row?.brandId || brandName);
+  const brand = byId.get(brandId) || (brandId && brandName
+    ? { id: brandId, name: brandName, config: { sopKeypoints: [], performanceWeights: {} } }
+    : null);
+  return {
+    storeId: String(row?.id || '').trim(),
+    storeName: String(row?.name || '').trim(),
+    brandId: String(brand?.id || brandId || '').trim(),
+    brandName: String(brand?.name || brandName || '').trim(),
+    brandConfig: brand?.config && typeof brand.config === 'object' ? brand.config : { sopKeypoints: [], performanceWeights: {} }
+  };
+}
+
+function getStoreNamesByBrand(state0, brandIdInput) {
+  const state = state0 && typeof state0 === 'object' ? state0 : {};
+  const brandId = normalizeBrandId(brandIdInput);
+  if (!brandId) return [];
+  const stores = Array.isArray(state?.stores) ? state.stores : [];
+  return stores
+    .filter((s) => normalizeBrandId(s?.brandId || s?.brand || s?.brandName) === brandId)
+    .map((s) => String(s?.name || '').trim())
+    .filter(Boolean);
+}
+
+function buildKnowledgeBrandScopeTag(input) {
+  const raw = String(input || '').trim();
+  if (!raw || raw === 'all') return 'brand:all';
+  const id = normalizeBrandId(raw);
+  return id ? `brand:${id}` : 'brand:all';
+}
+
+function resolveForecastScope(state0, username, role, requestedStore, requestedBrandId) {
+  const scopedRole = isForecastStoreScopedRole(role);
+  const myStore = pickMyStoreFromState(state0, username);
+  const qStore = String(requestedStore || '').trim();
+  const qBrandId = normalizeBrandId(requestedBrandId);
+
+  if (scopedRole) {
+    const ctx = resolveStoreBrandContext(state0, myStore);
+    const store = String(ctx.storeName || myStore || '').trim();
+    return {
+      store,
+      brandId: normalizeBrandId(ctx.brandId),
+      brandName: String(ctx.brandName || '').trim(),
+      storeScope: store ? [store] : []
+    };
+  }
+
+  if (qStore) {
+    const ctx = resolveStoreBrandContext(state0, qStore);
+    const store = String(ctx.storeName || qStore || '').trim();
+    return {
+      store,
+      brandId: normalizeBrandId(ctx.brandId),
+      brandName: String(ctx.brandName || '').trim(),
+      storeScope: store ? [store] : []
+    };
+  }
+
+  if (qBrandId) {
+    const brands = getBrandsFromState(state0);
+    const brand = brands.find((b) => normalizeBrandId(b?.id) === qBrandId) || null;
+    return {
+      store: '',
+      brandId: qBrandId,
+      brandName: String(brand?.name || '').trim(),
+      storeScope: getStoreNamesByBrand(state0, qBrandId)
+    };
+  }
+
+  return { store: '', brandId: '', brandName: '', storeScope: [] };
+}
+
+function normalizeKnowledgeTags(rawTags, feedAgent, brandScope) {
+  let tags = [];
+  if (Array.isArray(rawTags)) {
+    tags = rawTags;
+  } else if (typeof rawTags === 'string') {
+    const s = rawTags.trim();
+    if (s) {
+      try {
+        const parsed = JSON.parse(s);
+        if (Array.isArray(parsed)) tags = parsed;
+      } catch (e) {
+        tags = s.split(/[，,\/\s]+/g);
+      }
+    }
+  }
+  const clean = tags.map(t => String(t || '').trim()).filter(Boolean);
+  const agent = String(feedAgent || '').trim();
+  if (agent) clean.unshift(`agent:${agent}`);
+  const scope = String(brandScope || '').trim();
+  if (scope) clean.unshift(scope);
+  const uniq = Array.from(new Set(clean));
+  return uniq.length ? uniq : null;
+}
+
+async function ensureFeishuGenericRecordsTable() {
+  try {
+    await pool.query('create extension if not exists pgcrypto');
+    await pool.query(
+      `create table if not exists feishu_generic_records (
+        id uuid primary key default gen_random_uuid(),
+        app_token varchar(100) not null,
+        table_id varchar(100) not null,
+        record_id varchar(100) not null,
+        fields jsonb,
+        raw jsonb,
+        created_at timestamp default current_timestamp,
+        updated_at timestamp default current_timestamp,
+        unique (app_token, table_id, record_id)
+      )`
+    );
+    await pool.query('create index if not exists idx_feishu_generic_table on feishu_generic_records (app_token, table_id, updated_at desc)');
+    await pool.query('create index if not exists idx_feishu_generic_record on feishu_generic_records (record_id)');
+  } catch (e) {
+    if (String(e?.message || e).includes('already exists')) return;
+    console.error('[ensureFeishuGenericRecordsTable] Error:', e?.message || e);
+    throw e;
+  }
+}
+
+function stripAttachmentLikeFields(fields) {
+  const src = fields && typeof fields === 'object' ? fields : {};
+  const out = {};
+  Object.entries(src).forEach(([k, v]) => {
+    if (!k) return;
+    const key = String(k).toLowerCase();
+    if (key.includes('附件') || key.includes('attachment') || key.includes('file') || key.includes('图片') || key.includes('image')) return;
+    out[k] = v;
+  });
+  return out;
+}
+
+async function upsertFeishuGenericRecord({ appToken, tableId, record }) {
+  if (!appToken || !tableId || !record) return;
+  const recordId = String(record?.record_id || '').trim();
+  if (!recordId) return;
+  const rawFields = record?.fields || {};
+  const cleanedFields = stripAttachmentLikeFields(rawFields);
+
+  await pool.query(
+    `insert into feishu_generic_records (app_token, table_id, record_id, fields, raw, updated_at)
+     values ($1, $2, $3, $4, $5, now())
+     on conflict (app_token, table_id, record_id)
+     do update set fields = excluded.fields, raw = excluded.raw, updated_at = now()`,
+    [appToken, tableId, recordId, cleanedFields, record]
+  );
+}
+
+async function ensureOpsTasksTable() {
+  try {
+    await pool.query('create extension if not exists pgcrypto');
+    await pool.query(
+      `create table if not exists ops_tasks (
+        id uuid primary key default gen_random_uuid(),
+        biz_date date not null,
+        store varchar(200) not null,
+        brand varchar(120),
+        task_type varchar(60) not null,
+        schedule_key varchar(100) not null,
+        dedupe_key varchar(220) not null,
+        title varchar(220) not null,
+        instructions text,
+        checklist jsonb not null default '[]'::jsonb,
+        required_photos int not null default 1,
+        assignee_username varchar(100) not null,
+        assignee_role varchar(60) not null,
+        status varchar(20) not null default 'open',
+        due_at timestamp not null,
+        completed_at timestamp,
+        evidence_urls jsonb not null default '[]'::jsonb,
+        evidence_note text,
+        feedback_score int,
+        feedback_text text,
+        source varchar(60) not null default 'ops_agent',
+        created_at timestamp default current_timestamp,
+        updated_at timestamp default current_timestamp,
+        constraint uq_ops_tasks_dedupe unique (dedupe_key)
+      )`
+    );
+    await pool.query(`create index if not exists idx_ops_tasks_assignee_status on ops_tasks (assignee_username, status)`);
+    await pool.query(`create index if not exists idx_ops_tasks_store_date on ops_tasks (store, biz_date)`);
+    await pool.query(`create index if not exists idx_ops_tasks_due on ops_tasks (due_at)`);
+  } catch (e) {
+    if (String(e?.message || e).includes('already exists')) return;
+    console.error('[ensureOpsTasksTable] Error:', e?.message || e);
+    throw e;
+  }
+}
+
+async function getFeishuAccessToken(options = {}) {
+  const appId = options.appId || FEISHU_APP_ID;
+  const appSecret = options.appSecret || FEISHU_APP_SECRET;
+
+  if (!appId || !appSecret) {
+    throw new Error('Feishu app_id/app_secret not configured');
+  }
+
+  try {
+    const response = await axios.post(`${FEISHU_BASE_URL}/auth/v3/tenant_access_token/internal`, {
+      app_id: appId,
+      app_secret: appSecret
+    });
+
+    if (response.data?.code === 0 && response.data?.tenant_access_token) {
+      return response.data.tenant_access_token;
+    }
+    throw new Error(`Feishu API error: ${response.data?.msg || 'Unknown error'} (code: ${response.data?.code})`);
+  } catch (error) {
+    console.error('[getFeishuAccessToken] Error:', error?.message || error);
+    if (error?.response?.data) {
+      const code = error.response.data?.code;
+      const msg = error.response.data?.msg;
+      throw new Error(`Feishu API error: ${msg || error.message} (code: ${code ?? 'unknown'})`);
+    }
+    throw error;
+  }
+}
+
+async function createFeishuBitableRecord({ appToken, tableId, fields, accessToken }) {
+  if (!appToken || !tableId) {
+    throw new Error('missing_app_token_or_table_id');
+  }
+  if (!fields || typeof fields !== 'object' || Array.isArray(fields)) {
+    throw new Error('invalid_fields');
+  }
+
+  try {
+    const url = `${FEISHU_BASE_URL}/bitable/v1/apps/${appToken}/tables/${tableId}/records`;
+    const response = await axios.post(
+      url,
+      { fields },
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    if (response.data?.code !== 0) {
+      throw new Error(`Feishu Bitable Create API error: ${response.data?.msg || 'Unknown error'} (code: ${response.data?.code})`);
+    }
+    return response.data?.data?.record || null;
+  } catch (error) {
+    console.error('[createFeishuBitableRecord] Error:', error?.message || error);
+    if (error?.response?.data) {
+      const code = error.response.data?.code;
+      const msg = error.response.data?.msg;
+      throw new Error(`Feishu Bitable Create API error: ${msg || error.message} (code: ${code ?? 'unknown'})`);
+    }
+    throw error;
+  }
+}
+
+async function getFeishuBitableData(appToken, tableId, accessToken) {
+  try {
+    const allItems = [];
+    let pageToken = '';
+    let guard = 0;
+
+    while (guard < 2000) {
+      guard++;
+      const url = `${FEISHU_BASE_URL}/bitable/v1/apps/${appToken}/tables/${tableId}/records`;
+      const response = await axios.get(url, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json'
+        },
+        params: {
+          page_size: 500,
+          ...(pageToken ? { page_token: pageToken } : {})
+        }
+      });
+
+      if (response.data?.code !== 0) {
+        throw new Error(`Feishu Bitable API error: ${response.data?.msg || 'Unknown error'} (code: ${response.data?.code})`);
+      }
+
+      const data = response.data?.data || {};
+      const items = Array.isArray(data.items) ? data.items : [];
+      allItems.push(...items);
+
+      if (!data.has_more) {
+        return { ...data, items: allItems };
+      }
+
+      pageToken = String(data.page_token || '').trim();
+      if (!pageToken) {
+        // defensive: has_more=true but no token
+        return { ...data, has_more: false, items: allItems };
+      }
+    }
+
+    return { items: allItems, has_more: false };
+  } catch (error) {
+    console.error('[getFeishuBitableData] Error:', error?.message || error);
+    if (error?.response?.data) {
+      const code = error.response.data?.code;
+      const msg = error.response.data?.msg;
+      throw new Error(`Feishu Bitable API error: ${msg || error.message} (code: ${code ?? 'unknown'})`);
+    }
+    throw error;
+  }
+}
+
+async function ensureFeishuSyncTable() {
+  try {
+    await pool.query('create extension if not exists pgcrypto');
+    await pool.query(
+      `create table if not exists feishu_sync_logs (
+        id uuid primary key default gen_random_uuid(),
+        event_type varchar(50) not null,
+        table_id varchar(100) not null,
+        record_id varchar(100),
+        data jsonb,
+        sync_status varchar(20) not null default 'pending',
+        error_message text,
+        created_at timestamp default current_timestamp,
+        processed_at timestamp
+      )`
+    );
+    await pool.query(`create index if not exists idx_feishu_sync_status on feishu_sync_logs (sync_status)`);
+    await pool.query(`create index if not exists idx_feishu_sync_table on feishu_sync_logs (table_id, created_at)`);
+  } catch (e) {
+    if (String(e?.message || e).includes('already exists')) return;
+    console.error('[ensureFeishuSyncTable] Error:', e?.message || e);
+    throw e;
+  }
+}
+
+async function ensureTableVisitRecordsTable() {
+  try {
+    await pool.query('create extension if not exists pgcrypto');
+    
+    // 首先检查表是否存在
+    const tableExists = await pool.query(`
+      select exists (
+        select from information_schema.tables 
+        where table_schema = 'public' 
+        and table_name = 'table_visit_records'
+      )
+    `);
+    
+    if (!tableExists.rows[0].exists) {
+      // 表不存在，创建完整的新表
+      await pool.query(
+        `create table table_visit_records (
+          id uuid primary key default gen_random_uuid(),
+          date date not null,
+          store varchar(200) not null,
+          brand varchar(120),
+          table_number varchar(20),
+          guest_count int default 0,
+          amount decimal(10,2) default 0,
+          has_reservation boolean default false,
+          dissatisfaction_dish text,
+          feedback text,
+          
+          -- 扩展字段（供agent分析使用）
+          reservation_time time,
+          customer_type varchar(50),
+          order_type varchar(50),
+          service_rating int default 0,
+          food_rating int default 0,
+          environment_rating int default 0,
+          waiter_name varchar(100),
+          promotion_info text,
+          weather varchar(50),
+          peak_hours boolean default false,
+          customer_complaint text,
+          complaint_resolution text,
+          satisfaction_level varchar(20),
+          repeat_customer boolean default false,
+          special_requests text,
+          payment_method varchar(50),
+          order_duration int default 0,
+          table_turnover int default 0,
+          dish_recommendations text,
+          allergic_info text,
+          celebration_type varchar(50),
+          visit_purpose varchar(100),
+          companion_info text,
+          customer_age varchar(20),
+          customer_gender varchar(10),
+          visit_frequency varchar(50),
+          preferred_dishes text,
+          unsatisfied_items text,
+          suggested_improvements text,
+          staff_performance text,
+          facility_issues text,
+          hygiene_rating int default 0,
+          value_rating int default 0,
+          ambiance_rating int default 0,
+          noise_level varchar(20),
+          temperature varchar(20),
+          lighting varchar(20),
+          music_volume varchar(20),
+          seating_comfort varchar(20),
+          queue_time int default 0,
+          service_speed varchar(20),
+          order_accuracy varchar(20),
+          staff_attitude varchar(20),
+          problem_resolution text,
+          manager_intervention boolean default false,
+          compensation_provided text,
+          follow_up_required boolean default false,
+          follow_up_details text,
+          additional_notes text,
+          
+          feishu_record_id varchar(100) unique,
+          created_at timestamp default current_timestamp,
+          updated_at timestamp default current_timestamp
+        )`
+      );
+    } else {
+      // 表已存在，检查并添加缺失的字段
+      const existingColumns = await pool.query(`
+        select column_name, data_type 
+        from information_schema.columns 
+        where table_schema = 'public' 
+        and table_name = 'table_visit_records'
+      `);
+      const columnNames = existingColumns.rows.map(row => row.column_name);
+      
+      // 需要添加的字段定义
+      const newColumns = [
+        { name: 'reservation_time', type: 'time' },
+        { name: 'customer_type', type: 'varchar(50)' },
+        { name: 'order_type', type: 'varchar(50)' },
+        { name: 'service_rating', type: 'int default 0' },
+        { name: 'food_rating', type: 'int default 0' },
+        { name: 'environment_rating', type: 'int default 0' },
+        { name: 'waiter_name', type: 'varchar(100)' },
+        { name: 'promotion_info', type: 'text' },
+        { name: 'weather', type: 'varchar(50)' },
+        { name: 'peak_hours', type: 'boolean default false' },
+        { name: 'customer_complaint', type: 'text' },
+        { name: 'complaint_resolution', type: 'text' },
+        { name: 'satisfaction_level', type: 'varchar(20)' },
+        { name: 'repeat_customer', type: 'boolean default false' },
+        { name: 'special_requests', type: 'text' },
+        { name: 'payment_method', type: 'varchar(50)' },
+        { name: 'order_duration', type: 'int default 0' },
+        { name: 'table_turnover', type: 'int default 0' },
+        { name: 'dish_recommendations', type: 'text' },
+        { name: 'allergic_info', type: 'text' },
+        { name: 'celebration_type', type: 'varchar(50)' },
+        { name: 'visit_purpose', type: 'varchar(100)' },
+        { name: 'companion_info', type: 'text' },
+        { name: 'customer_age', type: 'varchar(20)' },
+        { name: 'customer_gender', type: 'varchar(10)' },
+        { name: 'visit_frequency', type: 'varchar(50)' },
+        { name: 'preferred_dishes', type: 'text' },
+        { name: 'unsatisfied_items', type: 'text' },
+        { name: 'suggested_improvements', type: 'text' },
+        { name: 'staff_performance', type: 'text' },
+        { name: 'facility_issues', type: 'text' },
+        { name: 'hygiene_rating', type: 'int default 0' },
+        { name: 'value_rating', type: 'int default 0' },
+        { name: 'ambiance_rating', type: 'int default 0' },
+        { name: 'noise_level', type: 'varchar(20)' },
+        { name: 'temperature', type: 'varchar(20)' },
+        { name: 'lighting', type: 'varchar(20)' },
+        { name: 'music_volume', type: 'varchar(20)' },
+        { name: 'seating_comfort', type: 'varchar(20)' },
+        { name: 'queue_time', type: 'int default 0' },
+        { name: 'service_speed', type: 'varchar(20)' },
+        { name: 'order_accuracy', type: 'varchar(20)' },
+        { name: 'staff_attitude', type: 'varchar(20)' },
+        { name: 'problem_resolution', type: 'text' },
+        { name: 'manager_intervention', type: 'boolean default false' },
+        { name: 'compensation_provided', type: 'text' },
+        { name: 'follow_up_required', type: 'boolean default false' },
+        { name: 'follow_up_details', type: 'text' },
+        { name: 'additional_notes', type: 'text' }
+      ];
+      
+      for (const column of newColumns) {
+        if (!columnNames.includes(column.name)) {
+          try {
+            await pool.query(`alter table table_visit_records add column ${column.name} ${column.type}`);
+            console.log(`[ensureTableVisitRecordsTable] Added column: ${column.name}`);
+          } catch (e) {
+            console.log(`[ensureTableVisitRecordsTable] Failed to add column ${column.name}:`, e?.message || e);
+          }
+        }
+      }
+    }
+    
+    // 创建索引
+    await pool.query(`create index if not exists idx_table_visit_date on table_visit_records (date)`);
+    await pool.query(`create index if not exists idx_table_visit_store on table_visit_records (store)`);
+    await pool.query(`create index if not exists idx_table_visit_feishu_id on table_visit_records (feishu_record_id)`);
+    
+    // 尝试创建新索引（如果字段存在的话）
+    try {
+      await pool.query(`create index if not exists idx_table_visit_satisfaction on table_visit_records (satisfaction_level)`);
+    } catch (e) {
+      console.log('[ensureTableVisitRecordsTable] Satisfaction index skipped (column may not exist)');
+    }
+    
+    try {
+      await pool.query(`create index if not exists idx_table_visit_rating on table_visit_records (service_rating, food_rating, environment_rating)`);
+    } catch (e) {
+      console.log('[ensureTableVisitRecordsTable] Rating index skipped (columns may not exist)');
+    }
+    
+  } catch (e) {
+    if (String(e?.message || e).includes('already exists')) return;
+    console.error('[ensureTableVisitRecordsTable] Error:', e?.message || e);
+    throw e;
+  }
+}
+
+function mapFeishuFieldToHrms(feishuRecord, fieldType) {
+  const mapped = {};
+
+  const normalizeFeishuFieldValue = (rawValue) => {
+    if (rawValue == null) return '';
+    if (typeof rawValue === 'string') return rawValue.trim();
+    if (typeof rawValue === 'number' || typeof rawValue === 'boolean') return rawValue;
+
+    if (Array.isArray(rawValue)) {
+      const parts = rawValue
+        .map((item) => normalizeFeishuFieldValue(item))
+        .filter((item) => item !== '' && item != null);
+      if (!parts.length) return '';
+      if (parts.length === 1) return parts[0];
+      return parts.map((item) => String(item)).join(', ');
+    }
+
+    if (typeof rawValue === 'object') {
+      if (typeof rawValue.text === 'string' && rawValue.text.trim()) return rawValue.text.trim();
+      if (Array.isArray(rawValue.text_arr) && rawValue.text_arr.length) return rawValue.text_arr.join('');
+      if (typeof rawValue.name === 'string' && rawValue.name.trim()) return rawValue.name.trim();
+      if (typeof rawValue.id === 'string' && rawValue.id.trim()) return rawValue.id.trim();
+      return '';
+    }
+
+    return String(rawValue || '').trim();
+  };
+
+  const normalizePgTimeOrNull = (rawValue) => {
+    const s = String(normalizeFeishuFieldValue(rawValue) || '').trim();
+    if (!s) return null;
+    if (/^\d{2}:\d{2}:\d{2}$/.test(s)) return s;
+    if (/^\d{2}:\d{2}$/.test(s)) return s + ':00';
+    return null;
+  };
+
+  const parseFeishuNumber = (rawValue) => {
+    const normalized = normalizeFeishuFieldValue(rawValue);
+    const text = String(normalized || '').trim();
+    if (!text) return 0;
+    const n = Number(text.replace(/[^\d.-]/g, ''));
+    return Number.isFinite(n) ? n : 0;
+  };
+
+  const parseFeishuBoolean = (rawValue) => {
+    if (typeof rawValue === 'boolean') return rawValue;
+    const normalized = String(normalizeFeishuFieldValue(rawValue) || '').trim().toLowerCase();
+    if (!normalized) return false;
+    return ['是', 'true', '1', 'yes', 'y'].includes(normalized);
+  };
+
+  const parseFeishuDate = (rawValue) => {
+    const normalized = normalizeFeishuFieldValue(rawValue);
+    if (normalized === '' || normalized == null) return '';
+
+    const toDateOnly = (dateObj) => {
+      if (!dateObj || !Number.isFinite(dateObj.getTime())) return '';
+      return dateObj.toISOString().slice(0, 10);
+    };
+
+    if (typeof normalized === 'number' && Number.isFinite(normalized)) {
+      const millis = normalized > 1e12 ? normalized : normalized * 1000;
+      return toDateOnly(new Date(millis));
+    }
+
+    const text = String(normalized).trim();
+    if (!text) return '';
+    if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
+
+    if (/^\d{13}$/.test(text)) return toDateOnly(new Date(Number(text)));
+    if (/^\d{10}$/.test(text)) return toDateOnly(new Date(Number(text) * 1000));
+
+    const parsed = new Date(text);
+    if (Number.isFinite(parsed.getTime())) return toDateOnly(parsed);
+    return '';
+  };
+
+  const fields = feishuRecord?.fields || {};
+  const pickRaw = (...keys) => {
+    for (const key of keys) {
+      if (Object.prototype.hasOwnProperty.call(fields, key)) return fields[key];
+    }
+    return undefined;
+  };
+  const pickText = (...keys) => String(normalizeFeishuFieldValue(pickRaw(...keys)) || '').trim();
+  
+  if (fieldType === 'table_visit') {
+    // 桌访记录完整字段映射（供agent使用）
+    mapped.date = parseFeishuDate(pickRaw('日期', '就餐日期', '发生日期'));
+    mapped.store = pickText('所属门店', '门店', '店铺');
+    mapped.brand = pickText('所属品牌', '品牌');
+    mapped.tableNumber = pickText('桌号', '桌位号');
+    mapped.guestCount = parseFeishuNumber(pickRaw('就餐人数', '人数'));
+    mapped.amount = parseFeishuNumber(pickRaw('消费金额', '消费额', '金额'));
+    mapped.hasReservation = parseFeishuBoolean(pickRaw('是否有预订', '有无预订'));
+    mapped.dissatisfactionDish = pickText('今日不满意菜品', '不满意菜品');
+    mapped.feedback = pickText('顾客反馈', '反馈', '评价');
+    
+    // 扩展字段（供agent分析使用）
+    mapped.reservationTime = normalizePgTimeOrNull(pickRaw('预订时间'));
+    mapped.customerType = pickText('客户类型');
+    mapped.orderType = pickText('点单方式');
+    mapped.serviceRating = parseFeishuNumber(pickRaw('服务评分'));
+    mapped.foodRating = parseFeishuNumber(pickRaw('菜品评分'));
+    mapped.environmentRating = parseFeishuNumber(pickRaw('环境评分'));
+    mapped.waiterName = pickText('服务员姓名');
+    mapped.promotionInfo = pickText('促销活动');
+    mapped.weather = pickText('天气情况');
+    mapped.peakHours = parseFeishuBoolean(pickRaw('高峰时段'));
+    mapped.customerComplaint = pickText('客户投诉');
+    mapped.complaintResolution = pickText('投诉处理');
+    mapped.satisfactionLevel = pickText('满意度等级', '满意度');
+    mapped.repeatCustomer = parseFeishuBoolean(pickRaw('是否回头客'));
+    mapped.specialRequests = pickText('特殊要求');
+    mapped.paymentMethod = pickText('支付方式');
+    mapped.orderDuration = parseFeishuNumber(pickRaw('用餐时长（分钟）', '用餐时长'));
+    mapped.tableTurnover = parseFeishuNumber(pickRaw('翻台次数'));
+    mapped.dishRecommendations = pickText('推荐菜品', '菜品推荐');
+    mapped.allergicInfo = pickText('过敏信息');
+    mapped.celebrationType = pickText('庆祝类型');
+    mapped.visitPurpose = pickText('就餐目的');
+    mapped.companionInfo = pickText('同行人员');
+    mapped.customerAge = pickText('客户年龄段');
+    mapped.customerGender = pickText('客户性别');
+    mapped.visitFrequency = pickText('就餐频次');
+    mapped.preferredDishes = pickText('偏好菜品');
+    mapped.unsatisfiedItems = pickText('不满意项');
+    mapped.suggestedImprovements = pickText('改进建议');
+    mapped.staffPerformance = pickText('员工表现');
+    mapped.facilityIssues = pickText('设施问题');
+    mapped.hygieneRating = parseFeishuNumber(pickRaw('卫生评分'));
+    mapped.valueRating = parseFeishuNumber(pickRaw('性价比评分'));
+    mapped.ambianceRating = parseFeishuNumber(pickRaw('氛围评分'));
+    mapped.noiseLevel = pickText('噪音水平');
+    mapped.temperature = pickText('室内温度');
+    mapped.lighting = pickText('照明情况');
+    mapped.musicVolume = pickText('音乐音量');
+    mapped.seatingComfort = pickText('座位舒适度');
+    mapped.queueTime = parseFeishuNumber(pickRaw('等位时间（分钟）', '等位时间'));
+    mapped.serviceSpeed = pickText('服务速度');
+    mapped.orderAccuracy = pickText('点单准确性');
+    mapped.staffAttitude = pickText('员工态度');
+    mapped.problemResolution = pickText('问题解决');
+    mapped.managerIntervention = parseFeishuBoolean(pickRaw('经理介入'));
+    mapped.compensationProvided = pickText('补偿措施');
+    mapped.followUpRequired = parseFeishuBoolean(pickRaw('需要跟进'));
+    mapped.followUpDetails = pickText('跟进详情');
+    mapped.additionalNotes = pickText('备注');
+    mapped.recordId = feishuRecord?.record_id;
+
+    console.log('[mapFeishuFieldToHrms] mapped required fields:', {
+      recordId: mapped.recordId,
+      mappedDate: mapped.date,
+      mappedStore: mapped.store
+    });
+  }
+  
+  return mapped;
+}
+
+// ─── Product Name Normalization ───
+// Maps variant names like "9秒生炒魚片【地道鲜嫩廣府味】" → "九秒生炒鱼片"
+const _TRAD_TO_SIMP = {'魚':'鱼','雞':'鸡','鴨':'鸭','豬':'猪','牛':'牛','蝦':'虾','蠔':'蚝','鵝':'鹅','雜':'杂','滷':'卤','燒':'烧','煲':'煲','湯':'汤','飯':'饭','麵':'面','餅':'饼','粥':'粥','蛋':'蛋','菜':'菜','醬':'酱','糖':'糖','鹽':'盐','點':'点','條':'条','塊':'块','份':'份','碟':'碟','個':'个','隻':'只','煎':'煎','炒':'炒','蒸':'蒸','燜':'焖','燉':'炖','烤':'烤','炸':'炸','焗':'焗','凍':'冻','熱':'热','鮮':'鲜','嫩':'嫩','脆':'脆','軟':'软','濃':'浓','淡':'淡','辣':'辣','甜':'甜','酸':'酸','鹹':'咸','廣':'广','東':'东','風':'风','記':'记','號':'号','閣':'阁','園':'园','館':'馆','樓':'楼','優':'优','選':'选','經':'经','標':'标','準':'准','與':'与','開':'开','關':'关','電':'电','話':'话','網':'网','車':'车','門':'门','書':'书','學':'学','師':'师','員':'员','長':'长','華':'华','國':'国','區':'区','場':'场','種':'种','類':'类','質':'质','體':'体','節':'节','張':'张','動':'动','機':'机','對':'对','裡':'里','後':'后','從':'从','過':'过','間':'间','樣':'样','見':'见','頭':'头','實':'实','結':'结','當':'当','處':'处','總':'总','進':'进','現':'现','發':'发','線':'线','連':'连','運':'运','達':'达','傳':'传','輕':'轻','邊':'边','產':'产','話':'话','識':'识','認':'认','議':'议','論':'论','訂':'订','計':'计','調':'调','設':'设','許':'许','試':'试','語':'语','讀':'读','護':'护','變':'变','讓':'让','買':'买','賣':'卖','費':'费','賞':'赏','資':'资','貨':'货','貿':'贸','財':'财','價':'价','貴':'贵','賓':'宾','貢':'贡','響':'响','頁':'页','順':'顺','領':'领','題':'题','顏':'颜','額':'额','飲':'饮','餐':'餐','養':'养','駕':'驾','騎':'骑','驗':'验','髮':'发','鬥':'斗','鑊':'镬','鍋':'锅','鐵':'铁','鏡':'镜','鋪':'铺','鮑':'鲍','鱸':'鲈','鯇':'鲩','龍':'龙','龜':'龟'};
+const _ARAB_TO_CN = {'0':'零','1':'一','2':'二','3':'三','4':'四','5':'五','6':'六','7':'七','8':'八','9':'九'};
+function normalizeProductName(raw) {
+  let s = String(raw || '').trim();
+  if (!s) return '';
+  // Strip bracketed marketing text: 【...】 （...） (...) [...] etc.
+  s = s.replace(/【[^】]*】/g, '').replace(/\([^)]*\)/g, '').replace(/（[^）]*）/g, '').replace(/\[[^\]]*\]/g, '');
+  // Traditional → Simplified
+  s = s.split('').map(c => _TRAD_TO_SIMP[c] || c).join('');
+  // Arabic digits → Chinese digits (single-char only, for product names like "9秒"→"九秒")
+  s = s.split('').map(c => _ARAB_TO_CN[c] || c).join('');
+  // Remove extra whitespace
+  s = s.replace(/\s+/g, '').trim();
+  return s;
+}
+
+function buildForecastProductAliasLookup(state0, scopeInput) {
+  const scopeStore = typeof scopeInput === 'string' ? String(scopeInput || '').trim() : String(scopeInput?.store || '').trim();
+  const scopeBrandId = normalizeBrandId(typeof scopeInput === 'string' ? '' : scopeInput?.brandId);
+  const inferredBrandId = scopeBrandId || normalizeBrandId(resolveStoreBrandContext(state0, scopeStore).brandId);
+  const lookup = new Map();
+  const list = Array.isArray(state0?.forecastProductAliasRules) ? state0.forecastProductAliasRules : [];
+  list
+    .filter((x) => {
+      const ruleBrandId = normalizeBrandId(x?.brandId);
+      if (ruleBrandId && inferredBrandId) return ruleBrandId === inferredBrandId;
+      if (inferredBrandId && !ruleBrandId) {
+        const rowBrandId = normalizeBrandId(resolveStoreBrandContext(state0, String(x?.store || '').trim()).brandId);
+        return rowBrandId === inferredBrandId;
+      }
+      return String(x?.store || '').trim() === scopeStore;
+    })
+    .forEach((rule) => {
+      const canonical = String(rule?.canonical || '').trim();
+      const canonicalNorm = normalizeProductName(canonical);
+      if (!canonical || !canonicalNorm) return;
+      const aliases = Array.isArray(rule?.aliases) ? rule.aliases : [];
+      [canonical, ...aliases].forEach((name) => {
+        const norm = normalizeProductName(name);
+        if (!norm) return;
+        lookup.set(norm, { canonical, canonicalNorm });
+      });
+    });
+  return lookup;
+}
+
+function resolveForecastProductName(rawName, aliasLookup) {
+  const original = String(rawName || '').trim();
+  const normalized = normalizeProductName(original);
+  if (!normalized) return { key: '', display: '' };
+  if (aliasLookup && aliasLookup.has(normalized)) {
+    const hit = aliasLookup.get(normalized);
+    return {
+      key: String(hit?.canonicalNorm || normalized),
+      display: String(hit?.canonical || original || normalized).trim()
+    };
+  }
+  return { key: normalized, display: original || normalized };
+}
+
+function canonicalizeForecastProductQuantities(input, aliasLookup) {
+  const source = input && typeof input === 'object' ? input : {};
+  const out = {};
+  Object.entries(source).forEach(([product, qtyRaw]) => {
+    const qty = Number(qtyRaw || 0);
+    if (!Number.isFinite(qty) || qty <= 0) return;
+    const resolved = resolveForecastProductName(product, aliasLookup);
+    if (!resolved.key || isExcludedForecastProduct(resolved.display)) return;
+    out[resolved.display] = Number((Number(out[resolved.display] || 0) + qty).toFixed(2));
+  });
+  return out;
+}
+
+function canonicalizeForecastRows(rows, aliasLookup) {
+  return (Array.isArray(rows) ? rows : []).map((row) => ({
+    ...row,
+    productQuantities: canonicalizeForecastProductQuantities(row?.productQuantities, aliasLookup)
+  }));
+}
+
+function forecastDayTypeLabel(date, isHoliday) {
+  if (isHoliday === true) return 'holiday';
+  const d = new Date(String(date || '') + 'T00:00:00');
+  if (Number.isFinite(d.getTime())) {
+    const day = d.getDay();
+    if (day === 0 || day === 6) return 'holiday';
+  }
+  return 'workday';
+}
+
+function normalizeForecastWeatherTag(input) {
+  const s = String(input || '').trim();
+  if (!s) return '';
+  if (/雨|暴雨|雷|阵雨/.test(s)) return 'rain';
+  if (/雪/.test(s)) return 'snow';
+  if (/雾|霾/.test(s)) return 'fog';
+  if (/风/.test(s)) return 'wind';
+  if (/阴|多云/.test(s)) return 'cloudy';
+  if (/晴/.test(s)) return 'sunny';
+  return s.toLowerCase();
+}
+
+function estimateRevenueByHistory(historyRows, target) {
+  const rows = Array.isArray(historyRows) ? historyRows : [];
+  const dailyMap = new Map();
+  rows.forEach((row) => {
+    const date = safeDateOnly(row?.date);
+    const bizType = normalizeForecastBizType(row?.bizType);
+    if (!date || !bizType) return;
+    const key = `${date}||${bizType}`;
+    const prev = dailyMap.get(key) || {
+      date,
+      bizType,
+      weather: normalizeForecastWeather(row?.weather),
+      isHoliday: !!row?.isHoliday,
+      revenue: 0
+    };
+    prev.revenue += Number(row?.expectedRevenue || 0);
+    if (!prev.weather) prev.weather = normalizeForecastWeather(row?.weather);
+    if (row?.isHoliday) prev.isHoliday = true;
+    dailyMap.set(key, prev);
+  });
+
+  const targetDate = safeDateOnly(target?.date);
+  const targetWeatherTag = normalizeForecastWeatherTag(target?.weather);
+  const targetIsHoliday = !!target?.isHoliday;
+  let targetDow = -1;
+  try {
+    const td = new Date(String(targetDate || '') + 'T00:00:00');
+    if (Number.isFinite(td.getTime())) targetDow = td.getDay();
+  } catch (e) {}
+
+  const result = {
+    sampleCount: 0,
+    byBizType: {
+      takeaway: { enabled: false, estimatedRevenue: 0, sampleCount: 0, confidence: 0 },
+      dinein: { enabled: false, estimatedRevenue: 0, sampleCount: 0, confidence: 0 }
+    },
+    totalEstimatedRevenue: 0
+  };
+
+  ['takeaway', 'dinein'].forEach((bizType) => {
+    const list = Array.from(dailyMap.values())
+      .filter((x) => x.bizType === bizType)
+      .filter((x) => Number(x.revenue || 0) > 0)
+      .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')))
+      .slice(0, 400);
+    result.byBizType[bizType].enabled = list.length > 0;
+    result.byBizType[bizType].sampleCount = list.length;
+    result.sampleCount += list.length;
+    if (!list.length) return;
+
+    const scored = list.map((item) => {
+      let score = 1;
+      try {
+        const d1 = new Date(String(item.date || '') + 'T00:00:00');
+        if (Number.isFinite(d1.getTime()) && targetDow >= 0) {
+          // Day-of-week: exact match is the strongest signal (Mon≠Fri, weekday≠weekend)
+          if (d1.getDay() === targetDow) score += 2.0;
+          else {
+            const diff = Math.abs(d1.getDay() - targetDow);
+            const adj = Math.min(diff, 7 - diff);
+            if (adj === 1) score += 0.3; // adjacent day gets small bonus
+          }
+        }
+        // Recency bonus: recent data is more reliable
+        if (targetDate) {
+          const d2 = new Date(targetDate + 'T00:00:00');
+          if (Number.isFinite(d2.getTime())) {
+            const dayDiff = Math.abs(Math.round((d2.getTime() - d1.getTime()) / 86400000));
+            score += Math.max(0, 1.0 - Math.min(1.0, dayDiff / 60));
+          }
+        }
+      } catch (e) {}
+      // Holiday matching (separate dimension — some stores do better on holidays, some worse)
+      if (Boolean(item.isHoliday) === targetIsHoliday) score += 0.8;
+      // Weather match
+      const itemWeatherTag = normalizeForecastWeatherTag(item.weather);
+      if (itemWeatherTag && targetWeatherTag) {
+        if (itemWeatherTag === targetWeatherTag) score += 0.6;
+        else score += 0.1;
+      }
+      return { ...item, score: Number(score.toFixed(4)) };
+    });
+
+    const picked = scored
+      .sort((a, b) => Number(b.score || 0) - Number(a.score || 0))
+      .slice(0, Math.min(50, scored.length));
+    const scoreSum = picked.reduce((s, x) => s + Number(x.score || 0), 0);
+    const weightedRevenue = picked.reduce((s, x) => s + Number(x.revenue || 0) * Number(x.score || 0), 0);
+    let estimatedRevenue = scoreSum > 0 ? (weightedRevenue / scoreSum) : 0;
+
+    // Weather adjustment: rain/snow → takeaway up, dine-in down (differential correction)
+    // Only apply if the weather-matched samples are underrepresented in picked set
+    if (targetWeatherTag === 'rain' || targetWeatherTag === 'snow') {
+      const matchCount = picked.filter((x) => normalizeForecastWeatherTag(x.weather) === targetWeatherTag).length;
+      const coverage = picked.length > 0 ? matchCount / picked.length : 0;
+      const strength = Math.max(0, 1 - coverage * 2); // full strength if <50% weather-matched
+      if (bizType === 'takeaway') estimatedRevenue *= (1 + 0.20 * strength);
+      else if (bizType === 'dinein') estimatedRevenue *= (1 - 0.20 * strength);
+    }
+
+    const confidence = Math.max(0.2, Math.min(0.95, 0.35 + Math.min(0.5, list.length * 0.02)));
+    result.byBizType[bizType].estimatedRevenue = Number(Math.max(0, estimatedRevenue).toFixed(2));
+    result.byBizType[bizType].confidence = Number(confidence.toFixed(2));
+    result.totalEstimatedRevenue += Number(result.byBizType[bizType].estimatedRevenue || 0);
+  });
+
+  result.totalEstimatedRevenue = Number(result.totalEstimatedRevenue.toFixed(2));
+  return result;
+}
+
+function normalizeGrossProfitProfileItem(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const product = String(raw?.product || '').trim();
+  const bizType = normalizeForecastBizType(raw?.bizType) || '';
+  const costPerUnit = safeNumber(raw?.costPerUnit ?? raw?.cost);
+  const grossPerUnit = safeNumber(raw?.grossPerUnit ?? raw?.grossProfit ?? raw?.profitPerUnit);
+  if (!product) return null;
+  // Accept either costPerUnit or grossPerUnit
+  const hasCost = Number.isFinite(costPerUnit) && costPerUnit >= 0;
+  const hasGross = Number.isFinite(grossPerUnit) && grossPerUnit >= 0;
+  if (!hasCost && !hasGross) return null;
+  return {
+    product,
+    bizType,
+    costPerUnit: hasCost ? Number(costPerUnit.toFixed(4)) : undefined,
+    grossPerUnit: hasGross ? Number(grossPerUnit.toFixed(4)) : undefined
+  };
+}
+
+function computeAvgPricePerProduct(historyRows, storeScope, aliasLookup) {
+  const storeSet = new Set(
+    (Array.isArray(storeScope) ? storeScope : [storeScope])
+      .map((x) => String(x || '').trim())
+      .filter(Boolean)
+  );
+  const agg = new Map();
+  const rows = Array.isArray(historyRows) ? historyRows : [];
+  rows.filter((x) => {
+    if (!storeSet.size) return true;
+    return storeSet.has(String(x?.store || '').trim());
+  }).forEach((row) => {
+    const rev = Math.max(0, Number(row?.expectedRevenue || 0));
+    const products = row?.productQuantities && typeof row.productQuantities === 'object' ? row.productQuantities : {};
+    const entries = Object.entries(products)
+      .map(([p, q]) => ({ product: String(p || '').trim(), qty: Number(q || 0) }))
+      .filter((x) => x.product && x.qty > 0);
+    const totalQty = entries.reduce((s, x) => s + x.qty, 0);
+    entries.forEach(({ product, qty }) => {
+      const resolved = resolveForecastProductName(product, aliasLookup);
+      if (!resolved.key) return;
+      const allocRev = totalQty > 0 && rev > 0 ? (qty / totalQty) * rev : 0;
+      const prev = agg.get(resolved.key) || { totalRevenue: 0, totalQty: 0 };
+      prev.totalRevenue += allocRev;
+      prev.totalQty += qty;
+      agg.set(resolved.key, prev);
+    });
+  });
+  const result = new Map();
+  agg.forEach((v, k) => {
+    if (v.totalQty > 0) result.set(k, Number((v.totalRevenue / v.totalQty).toFixed(4)));
+  });
+  return result;
+}
+
+function canManageGrossProfitProfiles(role) {
+const r = String(role || '').trim();
+return r === 'admin' || r === 'hq_manager';
+}
+
+function estimateGrossMarginByHistory({ historyRows, profiles, startDate, endDate, bizType, storeScope, aliasLookup }) {
+const list = Array.isArray(historyRows) ? historyRows : [];
+const profileList = Array.isArray(profiles) ? profiles : [];
+// Build avg price map for cost→gross conversion
+const priceMap = storeScope ? computeAvgPricePerProduct(list, storeScope, aliasLookup) : new Map();
+const profileMap = new Map();
+  profileList.forEach((p) => {
+    const item = normalizeGrossProfitProfileItem(p);
+    if (!item) return;
+    let gpu = item.grossPerUnit;
+    // If only costPerUnit is set, compute grossPerUnit from avg price
+    const resolvedItem = resolveForecastProductName(item.product, aliasLookup);
+    if ((!Number.isFinite(gpu) || gpu === undefined) && Number.isFinite(item.costPerUnit)) {
+      const avgPrice = priceMap.get(resolvedItem.key) || 0;
+      gpu = avgPrice > item.costPerUnit ? Number((avgPrice - item.costPerUnit).toFixed(4)) : 0;
+    }
+    if (!Number.isFinite(gpu)) return;
+    // Store by both original and normalized name for matching
+    profileMap.set(`${item.bizType}||${resolvedItem.key}`, gpu);
+    const normName = resolvedItem.key;
+    if (normName && normName !== item.product) {
+      profileMap.set(`${item.bizType}||${normName}`, gpu);
+      profileMap.set(`||${normName}`, gpu);
+    }
+    profileMap.set(`||${resolvedItem.key}`, gpu);
+  });
+
+  let rows = list.filter((x) => inDateRange(String(x?.date || '').trim(), startDate, endDate));
+  if (bizType) rows = rows.filter((x) => normalizeForecastBizType(x?.bizType) === bizType);
+
+  const productAgg = new Map();
+  const byBizAgg = new Map();
+  const uncovered = new Map();
+  let totalRevenue = 0;
+  let totalGrossProfit = 0;
+  let totalActualRevenue = 0;
+
+  rows.forEach((row) => {
+    const rowBizType = normalizeForecastBizType(row?.bizType);
+    const products = row?.productQuantities && typeof row.productQuantities === 'object' ? row.productQuantities : {};
+    const rev = Math.max(0, Number(row?.expectedRevenue || 0));
+    const rowActualRevRaw = Math.max(0, Number(row?.actualRevenue || 0));
+    const rowDiscount = Math.max(0, Number(row?.totalDiscount || 0));
+    const rowActualRev = rowActualRevRaw > 0 ? rowActualRevRaw : Math.max(0, rev - rowDiscount);
+    totalActualRevenue += rowActualRev;
+    const validEntries = Object.entries(products)
+      .map(([product, qtyRaw]) => ({ product: String(product || '').trim(), qty: Number(qtyRaw || 0) }))
+      .filter((x) => x.product && !isExcludedForecastProduct(x.product) && Number.isFinite(x.qty) && x.qty > 0);
+    const rowTotalQty = validEntries.reduce((s, x) => s + Number(x.qty || 0), 0);
+    validEntries.forEach((it) => {
+      // Try exact name first, then normalized name for cross-matching (takeaway vs dine-in name variants)
+      const resolved = resolveForecastProductName(it.product, aliasLookup);
+      const normName = resolved.key;
+      const keyExact = `${rowBizType}||${normName}`;
+      const keyFallback = `||${normName}`;
+      const keyNormExact = `${rowBizType}||${normName}`;
+      const keyNormFallback = `||${normName}`;
+      const gpu = Number(
+        profileMap.has(keyExact) ? profileMap.get(keyExact) :
+        profileMap.has(keyFallback) ? profileMap.get(keyFallback) :
+        profileMap.has(keyNormExact) ? profileMap.get(keyNormExact) :
+        profileMap.has(keyNormFallback) ? profileMap.get(keyNormFallback) : NaN
+      );
+      const allocRevenue = rowTotalQty > 0 && rev > 0 ? (Number(it.qty || 0) / rowTotalQty) * rev : 0;
+      if (!Number.isFinite(gpu)) {
+        const miss = uncovered.get(resolved.display) || { product: resolved.display, qty: 0 };
+        miss.qty += Number(it.qty || 0);
+        uncovered.set(resolved.display, miss);
+        return;
+      }
+      const gross = Number(it.qty || 0) * gpu;
+      totalRevenue += allocRevenue;
+      totalGrossProfit += gross;
+
+      const p = productAgg.get(resolved.display) || { product: resolved.display, qty: 0, revenue: 0, grossProfit: 0 };
+      p.qty += Number(it.qty || 0);
+      p.revenue += allocRevenue;
+      p.grossProfit += gross;
+      productAgg.set(resolved.display, p);
+
+      const b = byBizAgg.get(rowBizType) || { bizType: rowBizType, revenue: 0, grossProfit: 0, marginRate: 0 };
+      b.revenue += allocRevenue;
+      b.grossProfit += gross;
+      byBizAgg.set(rowBizType, b);
+    });
+  });
+
+  const byBiz = Array.from(byBizAgg.values()).map((x) => ({
+    bizType: x.bizType,
+    revenue: Number(x.revenue.toFixed(2)),
+    grossProfit: Number(x.grossProfit.toFixed(2)),
+    marginRate: Number((x.revenue > 0 ? x.grossProfit / x.revenue : 0).toFixed(4))
+  }));
+  const products = Array.from(productAgg.values())
+    .map((x) => ({
+      product: x.product,
+      qty: Number(x.qty.toFixed(2)),
+      revenue: Number(x.revenue.toFixed(2)),
+      grossProfit: Number(x.grossProfit.toFixed(2)),
+      marginRate: Number((x.revenue > 0 ? x.grossProfit / x.revenue : 0).toFixed(4))
+    }))
+    .sort((a, b) => Number(b.grossProfit || 0) - Number(a.grossProfit || 0));
+
+  // 实收毛利率 = (1 - 成本/实际收到的营业额) × 100%
+  // Here: actualMarginRate = grossProfit / actualRevenue (when actualRevenue > 0)
+  const actualMarginRate = totalActualRevenue > 0 ? Number((totalGrossProfit / totalActualRevenue).toFixed(4)) : 0;
+
+  return {
+    sampleCount: rows.length,
+    revenue: Number(totalRevenue.toFixed(2)),
+    actualRevenue: Number(totalActualRevenue.toFixed(2)),
+    grossProfit: Number(totalGrossProfit.toFixed(2)),
+    marginRate: Number((totalRevenue > 0 ? totalGrossProfit / totalRevenue : 0).toFixed(4)),
+    actualMarginRate,
+    byBiz,
+    products,
+    uncoveredProducts: Array.from(uncovered.values())
+      .map((x) => ({ product: x.product, qty: Number(Number(x.qty || 0).toFixed(2)) }))
+      .sort((a, b) => Number(b.qty || 0) - Number(a.qty || 0))
+      .slice(0, 100)
+  };
+}
+
+function decodePdfLiteralText(token) {
+  let s = String(token || '');
+  if (s.startsWith('(') && s.endsWith(')')) s = s.slice(1, -1);
+  return s
+    .replace(/\\n/g, '\n')
+    .replace(/\\r/g, '\r')
+    .replace(/\\t/g, '\t')
+    .replace(/\\\(/g, '(')
+    .replace(/\\\)/g, ')')
+    .replace(/\\\\/g, '\\')
+    .replace(/\\([0-7]{1,3})/g, (_, oct) => {
+      const code = parseInt(oct, 8);
+      return Number.isFinite(code) ? String.fromCharCode(code) : '';
+    });
+}
+
+function decodeUtf16BeBuffer(buf) {
+  const src = Buffer.isBuffer(buf) ? buf : Buffer.from(buf || '');
+  if (!src.length) return '';
+  const len = src.length - (src.length % 2);
+  if (len <= 0) return '';
+  const swapped = Buffer.allocUnsafe(len);
+  for (let i = 0; i < len; i += 2) {
+    swapped[i] = src[i + 1];
+    swapped[i + 1] = src[i];
+  }
+  return swapped.toString('utf16le');
+}
+
+function decodePdfHexToken(hexRaw) {
+  const hex = String(hexRaw || '').replace(/\s+/g, '');
+  if (!hex || hex.length % 2 !== 0) return '';
+  let bytes;
+  try {
+    bytes = Buffer.from(hex, 'hex');
+  } catch (e) {
+    return '';
+  }
+  if (!bytes.length) return '';
+
+  if (bytes.length >= 2 && bytes[0] === 0xFE && bytes[1] === 0xFF) {
+    return decodeUtf16BeBuffer(bytes.subarray(2));
+  }
+  if (bytes.length >= 2 && bytes[0] === 0xFF && bytes[1] === 0xFE) {
+    return bytes.subarray(2).toString('utf16le');
+  }
+
+  let evenZero = 0;
+  let oddZero = 0;
+  const pairs = Math.floor(bytes.length / 2);
+  for (let i = 0; i + 1 < bytes.length; i += 2) {
+    if (bytes[i] === 0) evenZero += 1;
+    if (bytes[i + 1] === 0) oddZero += 1;
+  }
+  if (pairs > 2) {
+    const evenZeroRate = evenZero / pairs;
+    const oddZeroRate = oddZero / pairs;
+    if (evenZeroRate > 0.45 && oddZeroRate < 0.2) {
+      return decodeUtf16BeBuffer(bytes);
+    }
+    if (oddZeroRate > 0.45 && evenZeroRate < 0.2) {
+      return bytes.toString('utf16le');
+    }
+  }
+
+  const utf8 = bytes.toString('utf8');
+  const bad = (utf8.match(/�/g) || []).length;
+  if (bad <= Math.max(2, Math.floor(utf8.length * 0.1))) return utf8;
+  return bytes.toString('latin1');
+}
+
+function isMeaningfulPdfText(s) {
+  const t = String(s || '').replace(/\s+/g, ' ').trim();
+  if (!t) return false;
+  if (!/[\u4e00-\u9fa5A-Za-z0-9]/.test(t)) return false;
+  return true;
+}
+
+function extractPdfText(rawBuffer) {
+  const buf = Buffer.isBuffer(rawBuffer) ? rawBuffer : Buffer.from(rawBuffer || '');
+  const streams = [];
+  const text = buf.toString('latin1');
+  const streamRe = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
+  let m;
+  while ((m = streamRe.exec(text)) !== null) {
+    streams.push({ start: m.index, data: Buffer.from(m[1] || '', 'latin1') });
+  }
+
+  const decodedBlocks = [];
+  const pushDecoded = (b) => {
+    const s = Buffer.isBuffer(b) ? b.toString('latin1') : String(b || '');
+    if (s) decodedBlocks.push(s);
+  };
+
+  pushDecoded(buf);
+  for (const s of streams) {
+    const around = text.slice(Math.max(0, s.start - 220), s.start + 40);
+    const mayFlate = /FlateDecode/i.test(around);
+    if (mayFlate) {
+      try { pushDecoded(zlib.inflateSync(s.data)); continue; } catch (e) {}
+      try { pushDecoded(zlib.inflateRawSync(s.data)); continue; } catch (e) {}
+    }
+    pushDecoded(s.data);
+  }
+
+  const chunks = [];
+  const tokenRe = /\((?:\\.|[^\\()])*\)|<([0-9A-Fa-f\s]+)>/g;
+  decodedBlocks.forEach((blk) => {
+    let t;
+    while ((t = tokenRe.exec(blk)) !== null) {
+      if (t[0]?.startsWith('(')) {
+        const plain = decodePdfLiteralText(t[0]).trim();
+        if (isMeaningfulPdfText(plain)) chunks.push(plain);
+      } else if (t[1]) {
+        const plain = decodePdfHexToken(t[1]).trim();
+        if (isMeaningfulPdfText(plain)) chunks.push(plain);
+      }
+    }
+  });
+
+  return chunks.join('\n');
+}
+
+function parseInventoryForecastRowsFromPdfBuffer(rawBuffer, fallbackBizType = '') {
+  const text = nfkcNormalize(extractPdfText(rawBuffer));
+  if (!text) return [];
+
+  const lines = String(text)
+    .split(/\r?\n/)
+    .map((x) => String(x || '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+  if (!lines.length) return [];
+
+  const matrix = lines
+    .map((line) => {
+      if (/\t/.test(line)) return line.split(/\t+/).map((x) => x.trim());
+      if (/ {2,}/.test(line)) return line.split(/ {2,}/).map((x) => x.trim());
+      if (/,/.test(line)) return line.split(',').map((x) => x.trim());
+      return [line];
+    })
+    .filter((arr) => arr.some(Boolean));
+
+  let parsed = parseInventoryForecastRowsFromTableMatrix(matrix, fallbackBizType);
+  if (parsed.length) return parsed;
+
+  const dateMatch = text.match(/(20\d{2}[\-\/.年]\d{1,2}[\-\/.月]\d{1,2})/);
+  const date = normalizeForecastUploadDate(dateMatch ? dateMatch[1] : '');
+  const storeMatch = text.match(/(?:门店|店铺|商户|销售门店|门店名称)\s*[：:]\s*([^\n,，;；]+)/);
+  const parsedStore = normalizeForecastStoreName(storeMatch ? storeMatch[1] : '');
+  const weatherMatch = text.match(/(晴|阴|多云|小雨|中雨|大雨|暴雨|雨|雪|雾|风)/);
+  const weather = normalizeForecastWeather(weatherMatch ? weatherMatch[1] : '');
+  const bizRaw = /外卖|外送/.test(text) ? '外卖' : (/堂食|堂吃/.test(text) ? '堂食' : fallbackBizType);
+  const bizType = normalizeForecastBizType(bizRaw) || 'dinein';
+
+  const detailRows = [];
+  lines.forEach((line) => {
+    const m2 = line.match(/(\d{1,2}\s*[:：]\s*\d{1,2}\s*[~～\-—–至到]\s*\d{1,2}\s*[:：]\s*\d{1,2}).*?([^\d]{2,}?)\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)(?:\s|$)/);
+    if (!m2) return;
+    const slot = normalizeForecastSlotFromHourRange(m2[1]);
+    const product = String(m2[2] || '').trim();
+    const qty = Number(m2[3]);
+    const amount = Number(m2[4]);
+    if (!slot || !product || isExcludedForecastProduct(product) || !Number.isFinite(qty) || qty <= 0) return;
+    detailRows.push({ slot, product, qty, amount: Number.isFinite(amount) ? amount : 0 });
+  });
+  if (!detailRows.length || !date) return [];
+
+  const grouped = new Map();
+  detailRows.forEach((it) => {
+    const key = `${bizType}||${it.slot}||${date}`;
+    if (!grouped.has(key)) grouped.set(key, { store: parsedStore, bizType, slot: it.slot, date, weather, isHoliday: false, expectedRevenue: 0, productQuantities: {} });
+    const row = grouped.get(key);
+    if (!row.store && parsedStore) row.store = parsedStore;
+    row.expectedRevenue = Number((Number(row.expectedRevenue || 0) + Number(it.amount || 0)).toFixed(2));
+    row.productQuantities[it.product] = Number((Number(row.productQuantities[it.product] || 0) + Number(it.qty || 0)).toFixed(2));
+  });
+
+  parsed = Array.from(grouped.values()).filter((x) => x.bizType && x.slot && x.date && Object.keys(x.productQuantities || {}).length);
+  return parsed;
+}
+
+function nfkcNormalize(s) {
+  let out = String(s || '');
+  try { out = out.normalize('NFKC'); } catch (e) {}
+  // CJK Radicals Supplement chars that NFKC misses (pdftotext outputs these)
+  const radicalMap = {
+    '\u2E81': '丨', '\u2E84': '丶', '\u2E85': '丿', '\u2E86': '乀', '\u2E87': '乁',
+    '\u2E88': '亅', '\u2E8B': '冫', '\u2E8C': '冖', '\u2E97': '匕', '\u2E98': '匚',
+    '\u2E9C': '厂', '\u2E9F': '又', '\u2EA5': '女', '\u2EAA': '宀', '\u2EAB': '寸',
+    '\u2EAD': '尢', '\u2EB3': '巛', '\u2EB6': '干', '\u2EB7': '幺', '\u2EBB': '弓',
+    '\u2EBC': '彐', '\u2EBE': '彡', '\u2EC0': '彳', '\u2EC6': '戈', '\u2EC8': '手',
+    '\u2ECA': '支', '\u2ECC': '文', '\u2ECD': '斗', '\u2ECF': '方', '\u2ED1': '日',
+    '\u2ED4': '木', '\u2ED6': '欠', '\u2ED7': '止', '\u2ED8': '歹', '\u2EDA': '毋',
+    '\u2EDB': '比', '\u2EDC': '毛', '\u2EDD': '食', // ⻝ → 食 (critical for this PDF)
+    '\u2EDE': '氏', '\u2EDF': '气', '\u2EE0': '水', '\u2EE1': '火', '\u2EE2': '爪',
+    '\u2EE3': '父', '\u2EE4': '爻', '\u2EE5': '片', '\u2EE8': '犬', '\u2EEB': '玄',
+    '\u2EED': '瓜', '\u2EEF': '甘', '\u2EF0': '生', '\u2EF2': '疋', '\u2EF3': '疒',
+  };
+  out = out.replace(/[\u2E80-\u2EFF]/g, (ch) => radicalMap[ch] || ch);
+  return out;
+}
+
+function parseInventoryForecastRowsFromPdfPath(pdfPath, fallbackBizType = '') {
+  const p = String(pdfPath || '').trim();
+  if (!p) return [];
+  try {
+    const out = execFileSync('pdftotext', ['-layout', '-enc', 'UTF-8', p, '-'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 15000,
+      maxBuffer: 12 * 1024 * 1024
+    });
+    const text = nfkcNormalize(String(out || '')).trim();
+    if (!text) return [];
+    console.log('[pdf-parse] pdftotext output length:', text.length, 'first 300 chars:', text.slice(0, 300));
+    const lines = text.split(/\r?\n/).map((x) => String(x || '').trim()).filter(Boolean);
+    if (!lines.length) return [];
+    const matrix = lines.map((line) => {
+      if (/\t/.test(line)) return line.split(/\t+/).map((x) => x.trim());
+      if (/ {2,}/.test(line)) return line.split(/ {2,}/).map((x) => x.trim());
+      if (/,/.test(line)) return line.split(',').map((x) => x.trim());
+      return [line];
+    });
+    const parsed = parseInventoryForecastRowsFromTableMatrix(matrix, fallbackBizType);
+    if (parsed.length) return parsed;
+
+    const dateMatch = text.match(/(20\d{2}[\-\/.年]\d{1,2}[\-\/.月]\d{1,2})/);
+    const date = normalizeForecastUploadDate(dateMatch ? dateMatch[1] : '');
+    const storeMatch = text.match(/(?:门店|店铺|商户|销售门店|门店名称)\s*[：:]\s*([^\n,，;；]+)/);
+    const parsedStore = normalizeForecastStoreName(storeMatch ? storeMatch[1] : '');
+    const weatherMatch = text.match(/(晴|阴|多云|小雨|中雨|大雨|暴雨|雨|雪|雾|风)/);
+    const weather = normalizeForecastWeather(weatherMatch ? weatherMatch[1] : '');
+    const bizRaw = /外卖|外送/.test(text) ? '外卖' : (/堂食|堂吃/.test(text) ? '堂食' : fallbackBizType);
+    const bizType = normalizeForecastBizType(bizRaw) || 'dinein';
+
+    if (!date) return [];
+    const grouped = new Map();
+    lines.forEach((line) => {
+      const m2 = line.match(/(\d{1,2}\s*[:：]\s*\d{1,2}\s*[~～\-—–至到]\s*\d{1,2}\s*[:：]\s*\d{1,2}).*?([^\d]{2,}?)\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)(?:\s|$)/);
+      if (!m2) return;
+      const slot = normalizeForecastSlotFromHourRange(m2[1]);
+      const product = String(m2[2] || '').trim();
+      const qty = Number(m2[3]);
+      const amount = Number(m2[4]);
+      if (!slot || !product || isExcludedForecastProduct(product) || !Number.isFinite(qty) || qty <= 0) return;
+      const key = `${bizType}||${slot}||${date}`;
+      if (!grouped.has(key)) grouped.set(key, { store: parsedStore, bizType, slot, date, weather, isHoliday: false, expectedRevenue: 0, productQuantities: {} });
+      const row = grouped.get(key);
+      if (!row.store && parsedStore) row.store = parsedStore;
+      row.expectedRevenue = Number((Number(row.expectedRevenue || 0) + (Number.isFinite(amount) ? amount : 0)).toFixed(2));
+      row.productQuantities[product] = Number((Number(row.productQuantities[product] || 0) + qty).toFixed(2));
+    });
+
+    return Array.from(grouped.values()).filter((x) => x.bizType && x.slot && x.date && Object.keys(x.productQuantities || {}).length);
+  } catch (e) {
+    return [];
   }
 }
 try {
@@ -147,6 +1555,141 @@ app.get('/api/approvals', authRequired, async (req, res) => {
     return res.json({ items: r.rows || [] });
   } catch (e) {
     return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+// Bitable Management API
+app.get('/api/bitable/stats', authRequired, async (req, res) => {
+  const role = String(req.user?.role || '').trim();
+  if (!['admin', 'hr_manager', 'hq_manager'].includes(role)) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
+  
+  try {
+    const stats = await getBitableSubmissionStats();
+    res.json({ ok: true, data: stats });
+  } catch (e) {
+    console.error('[api] bitable stats error:', e?.message);
+    res.status(500).json({ error: 'internal_error', message: e?.message });
+  }
+});
+
+app.post('/api/bitable/archive', authRequired, async (req, res) => {
+  const role = String(req.user?.role || '').trim();
+  if (!['admin', 'hr_manager'].includes(role)) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
+  
+  try {
+    const result = await archiveOldBitableSubmissions();
+    res.json({ ok: true, data: result });
+  } catch (e) {
+    console.error('[api] bitable archive error:', e?.message);
+    res.status(500).json({ error: 'internal_error', message: e?.message });
+  }
+});
+
+// ─── Agent API - 通用查询飞书多维表数据（已落库的 generic records）
+// H1-FIX: 添加认证保护
+app.get('/api/agent/feishu-table-data', authRequired, async (req, res) => {
+  try {
+    const appToken = String(req.query?.appToken || '').trim();
+    const tableId = String(req.query?.tableId || '').trim();
+    const q = String(req.query?.q || '').trim();
+    const limit = Math.min(Math.max(Number(req.query?.limit) || 100, 1), 500);
+    const offset = Math.max(Number(req.query?.offset) || 0, 0);
+
+    if (!appToken || !tableId) {
+      return res.status(400).json({ error: 'missing_params', message: 'appToken/tableId required' });
+    }
+
+    const where = ['app_token = $1', 'table_id = $2'];
+    const params = [appToken, tableId];
+    if (q) {
+      params.push(`%${q}%`);
+      where.push(`fields::text ilike $${params.length}`);
+    }
+
+    const whereSql = where.length ? `where ${where.join(' and ')}` : '';
+
+    const countR = await pool.query(
+      `select count(*)::int as cnt from feishu_generic_records ${whereSql}`,
+      params
+    );
+    const total = Number(countR.rows?.[0]?.cnt || 0) || 0;
+
+    params.push(limit, offset);
+    const r = await pool.query(
+      `select app_token, table_id, record_id, fields, updated_at
+       from feishu_generic_records
+       ${whereSql}
+       order by updated_at desc
+       limit $${params.length - 1} offset $${params.length}`,
+      params
+    );
+
+    return res.json({
+      items: r.rows || [],
+      pagination: { limit, offset, total },
+      query: { appToken, tableId, q: q || '' }
+    });
+  } catch (e) {
+    console.error('[Agent Feishu Table Data] Error:', e);
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+app.post('/api/ai/chat-completions', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+
+  const baseUrl = normalizeOpenAiCompatibleBaseUrl(req.body?.baseUrl || req.body?.apiUrl || '');
+  const apiKey = String(req.body?.apiKey || '').trim();
+  const model = String(req.body?.model || '').trim();
+  const messages = Array.isArray(req.body?.messages) ? req.body.messages : [];
+  const maxTokens = Math.max(1, Math.min(4000, Number(req.body?.max_tokens || req.body?.maxTokens || 1024) || 1024));
+  const temperature = Number(req.body?.temperature);
+
+  if (!baseUrl) return res.status(400).json({ error: 'missing_base_url' });
+  if (!apiKey) return res.status(400).json({ error: 'missing_api_key' });
+  if (!model) return res.status(400).json({ error: 'missing_model' });
+  if (!messages.length) return res.status(400).json({ error: 'missing_messages' });
+
+  const payload = {
+    model,
+    messages,
+    max_tokens: maxTokens,
+    temperature: Number.isFinite(temperature) ? temperature : 0.2
+  };
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 25000);
+  try {
+    const upstream = await fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+    const text = await upstream.text();
+    let data = null;
+    try { data = JSON.parse(text); } catch (e) {}
+    if (!upstream.ok) {
+      return res.status(upstream.status).json({
+        error: 'upstream_error',
+        message: String(data?.error?.message || data?.message || text || `HTTP ${upstream.status}`),
+        upstreamStatus: upstream.status
+      });
+    }
+    if (data && typeof data === 'object') return res.json(data);
+    return res.json({ raw: text });
+  } catch (e) {
+    return res.status(502).json({ error: 'upstream_unreachable', message: String(e?.message || e) });
+  } finally {
+    clearTimeout(timer);
   }
 });
 
@@ -304,7 +1847,7 @@ app.post('/api/approvals', authRequired, async (req, res) => {
       }
     }
 
-    const state = (await getSharedState()) || {};
+    let state = (await getSharedState()) || {};
     const applicant = stateFindUserRecord(state, username) || {};
     const applicantManager = String(applicant?.managerUsername || '').trim();
     const adminUsername = await pickAdminUsername(state);
@@ -342,6 +1885,27 @@ app.post('/api/approvals', authRequired, async (req, res) => {
       const endDate = safeDateOnly(payload?.endDate || payload?.toDate || payload?.finishDate);
       if (!startDate || !endDate) {
         return res.status(400).json({ error: 'missing_leave_date' });
+      }
+    } else if (type === 'promotion') {
+      if (!applicantManager) {
+        return res.status(400).json({ error: 'missing_manager' });
+      }
+      const stage = String(payload?.promotionStage || 'qualification').trim().toLowerCase();
+      if (!['qualification', 'formal'].includes(stage)) {
+        return res.status(400).json({ error: 'invalid_promotion_stage' });
+      }
+      const reason = String(payload?.reason || '').trim();
+      if (!reason) return res.status(400).json({ error: 'missing_reason' });
+      payload.promotionStage = stage;
+      if (stage === 'formal') {
+        const trackId = String(payload?.promotionTrackId || '').trim();
+        if (!trackId) return res.status(400).json({ error: 'missing_promotion_track' });
+        const tracks = Array.isArray(state?.promotionTracks) ? state.promotionTracks : [];
+        const track = tracks.find(t => String(t?.id || '').trim() === trackId && String(t?.applicantUsername || '').trim().toLowerCase() === username.toLowerCase());
+        if (!track) return res.status(400).json({ error: 'invalid_promotion_track' });
+        if (String(track?.assessmentStatus || '').trim() !== 'passed') {
+          return res.status(400).json({ error: 'track_not_passed' });
+        }
       }
     } else {
       if (type === 'payment') {
@@ -413,6 +1977,16 @@ app.post('/api/approvals', authRequired, async (req, res) => {
       hrManagerUsername,
       cashierUsername
     };
+    const applicantRole = String(applicant?.role || role || '').trim().toLowerCase();
+    const applicantStoreLower = String(applicant?.store || '').trim().toLowerCase();
+    const isHeadquarterApplicant =
+      applicantRole === 'admin'
+      || applicantRole === 'hq_manager'
+      || applicantRole === 'hr_manager'
+      || applicantRole === 'cashier'
+      || applicantRole.startsWith('custom_')
+      || (applicantStoreLower.includes('总部') || applicantStoreLower.includes('headquarter') || applicantStoreLower.includes('hq'));
+
     if (type === 'payment') {
       // Priority: approvalFlows.payment config (流程设置) > paymentFlowByStore > default
       const configured = buildApprovalAssigneesFromConfig(state, type, ctx);
@@ -427,23 +2001,46 @@ app.post('/api/approvals', authRequired, async (req, res) => {
           assignees = [applicantManager, cashierUsername, adminUsername].filter(Boolean);
         }
       }
+    } else if (type === 'leave') {
+      // 休假审批按人员归属固定：
+      // 门店员工：直属上级 → 总部营运 → 总部人事
+      // 总部人员：直属上级 → 总部人事
+      assignees = isHeadquarterApplicant
+        ? [applicantManager, hrManagerUsername].filter(Boolean)
+        : [applicantManager, hqManagerUsername, hrManagerUsername].filter(Boolean);
+    } else if (type === 'promotion') {
+      const stage = String(payload?.promotionStage || 'qualification').trim().toLowerCase();
+      if (stage === 'qualification') {
+        const applicantPosition = String(applicant?.position || payload?.currentPosition || '').trim();
+        const applicantDepartment = String(applicant?.department || payload?.department || '').trim();
+        const kitchenApplicant = isKitchenByRoleOrPosition(applicantRole, applicantPosition, applicantDepartment);
+        const applicantStoreName = String(applicant?.store || payload?.store || '').trim();
+        const storeManagerByStore = pickStoreRoleUsernameByStore(state, applicantStoreName, ['store_manager']);
+        const productionManagerByStore = pickStoreRoleUsernameByStore(state, applicantStoreName, ['store_production_manager']);
+        if (kitchenApplicant) {
+          // 后厨：出品经理 → 店长
+          assignees = [productionManagerByStore, storeManagerByStore].filter(Boolean);
+        } else {
+          // 前厅：店长
+          assignees = [storeManagerByStore].filter(Boolean);
+        }
+      } else {
+        // 正式晋升：店长 → 总部营运 → 人事经理
+        const applicantStoreName = String(applicant?.store || payload?.store || '').trim();
+        const storeManagerByStore = pickStoreRoleUsernameByStore(state, applicantStoreName, ['store_manager']);
+        assignees = [storeManagerByStore, hqManagerUsername, hrManagerUsername].filter(Boolean);
+      }
     } else {
       const configured = buildApprovalAssigneesFromConfig(state, type, ctx);
       if (configured.length) {
         assignees = configured;
       } else {
         // default fallback per business flow specs
-        if (type === 'leave') {
-          // 休假: 直属上级 → 总部营运 → 人事经理
-          assignees = [applicantManager, hqManagerUsername, hrManagerUsername].filter(Boolean);
-        } else if (type === 'onboarding') {
+        if (type === 'onboarding') {
           // 入职: 直属上级 → 人事经理 → 管理员
           assignees = [applicantManager, hrManagerUsername, adminUsername].filter(Boolean);
         } else if (type === 'offboarding') {
           // 离职: 直属上级 → 总部营运 → 人事经理
-          assignees = [applicantManager, hqManagerUsername, hrManagerUsername].filter(Boolean);
-        } else if (type === 'promotion') {
-          // 晋升: 直属上级 → 总部营运 → 人事经理
           assignees = [applicantManager, hqManagerUsername, hrManagerUsername].filter(Boolean);
         } else if (type === 'reward_punishment') {
           // 奖惩: 直属上级 → 人事经理
@@ -484,6 +2081,28 @@ app.post('/api/approvals', authRequired, async (req, res) => {
       [type, 'pending', username, currentAssignee, JSON.stringify(chain), JSON.stringify(payload)]
     );
     const item = r.rows?.[0] || null;
+
+    // 正式晋升申请提交后，标记资格记录已进入正式晋升流程
+    try {
+      if (item && type === 'promotion') {
+        const stage = String(payload?.promotionStage || '').trim().toLowerCase();
+        const trackId = String(payload?.promotionTrackId || '').trim();
+        if (stage === 'formal' && trackId) {
+          const tracks = Array.isArray(state?.promotionTracks) ? state.promotionTracks.slice() : [];
+          const idxTrack = tracks.findIndex(t => String(t?.id || '').trim() === trackId);
+          if (idxTrack >= 0) {
+            tracks[idxTrack] = {
+              ...tracks[idxTrack],
+              formalApplied: true,
+              formalApprovalId: String(item?.id || ''),
+              updatedAt: hrmsNowISO()
+            };
+            state = { ...state, promotionTracks: tracks };
+            await saveSharedState(state);
+          }
+        }
+      }
+    } catch (e) {}
 
     try {
       if (item) {
@@ -573,11 +2192,18 @@ app.delete('/api/approvals/:id', authRequired, async (req, res) => {
 
 app.post('/api/approvals/:id/decide', authRequired, async (req, res) => {
   const username = String(req.user?.username || '').trim();
+  const role = String(req.user?.role || '').trim();
   const id = String(req.params?.id || '').trim();
   const approved = !!req.body?.approved;
   const note = String(req.body?.note || '').trim();
   const departureType = String(req.body?.departureType || '').trim(); // voluntary | involuntary
   const remainingLeaveDaysRaw = req.body?.remainingLeaveDays;
+  const mentorUsernameRaw = String(req.body?.mentorUsername || '').trim();
+  const mentorNameRaw = String(req.body?.mentorName || '').trim();
+  const trainingStartDateRaw = String(req.body?.trainingStartDate || '').trim();
+  const trainingDaysRaw = Number(req.body?.trainingDays || 0);
+  const trainingPeriodsRaw = Array.isArray(req.body?.trainingPeriods) ? req.body.trainingPeriods : [];
+  const promotedSalaryRaw = req.body?.promotedSalary;
   if (!username) return res.status(400).json({ error: 'missing_user' });
   if (!id) return res.status(400).json({ error: 'missing_id' });
 
@@ -606,12 +2232,53 @@ app.post('/api/approvals/:id/decide', authRequired, async (req, res) => {
       updatedPayload.departureType = departureType;
     }
 
-    // Save remainingLeaveDays into leave approval payload
+    // Save remainingLeaveDays into leave approval payload (can be negative: employee owes days)
     if (String(row.type || '') === 'leave' && remainingLeaveDaysRaw != null && remainingLeaveDaysRaw !== '') {
       const remDays = Number(remainingLeaveDaysRaw);
-      if (Number.isFinite(remDays) && remDays >= 0) {
+      if (Number.isFinite(remDays)) {
         updatedPayload.remainingLeaveDays = remDays;
         updatedPayload.remainingLeaveDaysFilledBy = username;
+      }
+    }
+
+    // Promotion qualification: store manager must assign mentor when approving
+    if (String(row.type || '') === 'promotion') {
+      const stage = String(updatedPayload?.promotionStage || '').trim().toLowerCase();
+      if (stage === 'qualification') {
+        const currentRole = String(role || '').trim().toLowerCase();
+        const isStoreManagerStep = currentRole === 'store_manager';
+        if (approved && isStoreManagerStep && !mentorUsernameRaw) {
+          return res.status(400).json({ error: 'missing_mentor', message: '店长审批时必须指定带教人' });
+        }
+        if (mentorUsernameRaw) {
+          updatedPayload.mentorUsername = mentorUsernameRaw;
+          if (mentorNameRaw) updatedPayload.mentorName = mentorNameRaw;
+          updatedPayload.mentorAssignedBy = username;
+          updatedPayload.mentorAssignedAt = nowIso;
+        }
+        const dt = safeDateOnly(trainingStartDateRaw);
+        if (dt) updatedPayload.trainingStartDate = dt;
+        if (Number.isFinite(trainingDaysRaw) && trainingDaysRaw > 0) {
+          updatedPayload.trainingDays = Math.max(1, Math.min(30, Math.floor(trainingDaysRaw)));
+        }
+        const normalizedPeriods = normalizePromotionTrainingPeriods(trainingPeriodsRaw);
+        if (normalizedPeriods.length) {
+          updatedPayload.trainingPeriods = normalizedPeriods;
+        }
+      }
+
+      if (stage === 'formal') {
+        const currentRole = String(role || '').trim().toLowerCase();
+        const isStoreManagerStep = currentRole === 'store_manager';
+        if (approved && isStoreManagerStep) {
+          const salaryVal = Number(promotedSalaryRaw);
+          if (!Number.isFinite(salaryVal) || salaryVal <= 0) {
+            return res.status(400).json({ error: 'missing_promoted_salary', message: '店长审批正式晋升时必须填写晋升后薪资' });
+          }
+          updatedPayload.promotedSalary = Number(salaryVal.toFixed(2));
+          updatedPayload.promotedSalarySetBy = username;
+          updatedPayload.promotedSalarySetAt = nowIso;
+        }
       }
     }
 
@@ -767,7 +2434,9 @@ app.post('/api/approvals/:id/decide', authRequired, async (req, res) => {
           const startDate = safeDateOnly(updated.payload?.startDate || updated.payload?.fromDate || updated.payload?.beginDate);
           const endDate = safeDateOnly(updated.payload?.endDate || updated.payload?.toDate || updated.payload?.finishDate);
           const reason = String(updated.payload?.reason || updated.payload?.leaveReason || '').trim();
-          const days = safeNumber(updated.payload?.days || updated.payload?.leaveDays);
+          const reqDays = safeNumber(updated.payload?.days || updated.payload?.leaveDays);
+          const autoDays = calcDateSpanDaysInclusive(startDate, endDate);
+          const days = (reqDays != null && reqDays > 0) ? reqDays : (autoDays != null ? autoDays : null);
 
           const rec = {
             id: randomUUID(),
@@ -880,14 +2549,22 @@ app.post('/api/approvals/:id/decide', authRequired, async (req, res) => {
         const applicant = stateFindUserRecord(state0, applicantUser) || {};
         const applicantName = String(applicant?.name || applicantUser).trim() || applicantUser;
         const applicantManager = String(applicant?.managerUsername || '').trim();
+        const applicantStore = String(applicant?.store || updated.payload?.store || '').trim();
+        const applicantRole = String(applicant?.role || '').trim();
+        const applicantPosition = String(applicant?.position || updated.payload?.currentPosition || '').trim();
+        const applicantDepartment = String(applicant?.department || updated.payload?.department || '').trim();
         const finalApproved = String(updated.status || '') === 'approved';
         const finalRejected = String(updated.status || '') === 'rejected';
+        const stage = String(updated.payload?.promotionStage || 'qualification').trim().toLowerCase();
         let state = state0;
 
-        if (finalApproved) {
+        if (finalApproved && stage === 'formal') {
           const newLevel = String(updated.payload?.newLevel || updated.payload?.level || '').trim();
           const newPosition = String(updated.payload?.newPosition || updated.payload?.position || '').trim();
           const promoReason = String(updated.payload?.reason || '').trim();
+          const promotedSalary = Number(updated.payload?.promotedSalary);
+          const hasPromotedSalary = Number.isFinite(promotedSalary) && promotedSalary > 0;
+          const oldSalary = findUserSalary(state, applicantUser);
 
           // Update employee level/position and add promotion record
           const employees = Array.isArray(state.employees) ? state.employees : [];
@@ -912,12 +2589,43 @@ app.post('/api/approvals/:id/decide', authRequired, async (req, res) => {
               ...nextEmployees[empIdx],
               level: newLevel || nextEmployees[empIdx].level,
               position: newPosition || nextEmployees[empIdx].position,
+              ...(hasPromotedSalary ? { salary: Number(promotedSalary.toFixed(2)) } : {}),
               promotionHistory: history
             };
             state = { ...state, employees: nextEmployees };
           }
 
-          // Notify applicant + direct supervisor
+          if (hasPromotedSalary) {
+            const newSalary = Number(promotedSalary.toFixed(2));
+            const oldSalaryNum = Number(oldSalary);
+            const rec = {
+              id: randomUUID(),
+              approvalId: String(updated.id || ''),
+              source: 'promotion_formal',
+              targetUsername: applicantUser,
+              targetName: applicantName,
+              store: applicantStore,
+              oldSalary: Number.isFinite(oldSalaryNum) ? Number(oldSalaryNum.toFixed(2)) : null,
+              newSalary,
+              delta: Number.isFinite(oldSalaryNum) ? Number((newSalary - oldSalaryNum).toFixed(2)) : null,
+              approvedBy: username,
+              approvedAt: hrmsNowISO(),
+              reason: promoReason,
+              chain: Array.isArray(updated.chain)
+                ? updated.chain.map((s) => ({
+                    step: Number(s?.step || 0) || 0,
+                    assignee: String(s?.assignee || '').trim(),
+                    status: String(s?.status || '').trim(),
+                    decidedAt: String(s?.decidedAt || '').trim()
+                  }))
+                : []
+            };
+            const historyRows = Array.isArray(state.salaryChangeHistory) ? state.salaryChangeHistory.slice() : [];
+            historyRows.unshift(rec);
+            state = { ...state, salaryChangeHistory: historyRows };
+          }
+
+          // Notify applicant + direct supervisor (正式晋升通过)
           const msg = `${applicantName}，恭喜，你的晋升已经审批通过。`;
           const recipients = uniqUsernames([applicantUser, applicantManager].filter(Boolean));
           for (const u of recipients) {
@@ -926,9 +2634,91 @@ app.post('/api/approvals/:id/decide', authRequired, async (req, res) => {
           await saveSharedState(state);
         }
 
+        if (finalApproved && stage === 'qualification') {
+          const targetPosition = String(updated.payload?.targetPosition || updated.payload?.newPosition || '').trim();
+          const targetLevel = String(updated.payload?.targetLevel || updated.payload?.newLevel || '').trim();
+          const mentorUsername = String(updated.payload?.mentorUsername || '').trim();
+          const mentorName = String(updated.payload?.mentorName || '').trim();
+          const trainingStartDate = safeDateOnly(updated.payload?.trainingStartDate) || new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+          const trainingDays = Math.max(1, Math.min(30, Number(updated.payload?.trainingDays || 3) || 3));
+          const trainingPeriods = normalizePromotionTrainingPeriods(updated.payload?.trainingPeriods);
+
+          const abilityMap = state.promotionAbilityRequirements && typeof state.promotionAbilityRequirements === 'object'
+            ? state.promotionAbilityRequirements
+            : {};
+          const reqList = Array.isArray(abilityMap[targetPosition])
+            ? abilityMap[targetPosition].map(x => String(x || '').trim()).filter(Boolean)
+            : [];
+          const fallbackReqText = String(updated.payload?.capabilityRequirements || '').trim();
+          const fallbackReqList = fallbackReqText
+            ? fallbackReqText.split(/\n|;|；|,/).map(x => String(x || '').trim()).filter(Boolean)
+            : [];
+          const requirements = reqList.length ? reqList : fallbackReqList;
+
+          const plan = trainingPeriods.length
+            ? calcPromotionTrainingPlanByPeriods(trainingPeriods, requirements)
+            : calcPromotionTrainingPlan(trainingStartDate, requirements, trainingDays);
+          const tracks = Array.isArray(state.promotionTracks) ? state.promotionTracks.slice() : [];
+          tracks.unshift({
+            id: randomUUID(),
+            approvalId: String(updated.id || ''),
+            applicantUsername: applicantUser,
+            applicantName,
+            applicantRole: applicantRole,
+            store: applicantStore,
+            department: applicantDepartment,
+            currentLevel: String(updated.payload?.currentLevel || applicant?.level || '').trim(),
+            currentPosition: String(updated.payload?.currentPosition || applicantPosition || '').trim(),
+            targetPosition,
+            targetLevel,
+            promotionType: String(updated.payload?.promotionType || '').trim(),
+            mentorUsername,
+            mentorName,
+            requirements,
+            trainingStartDate,
+            trainingDays,
+            trainingPeriods,
+            trainingSessions: plan,
+            assessmentStatus: 'pending',
+            formalApplied: false,
+            status: 'qualification_approved',
+            createdAt: hrmsNowISO(),
+            updatedAt: hrmsNowISO()
+          });
+          state = { ...state, promotionTracks: tracks };
+
+          const isKitchen = isKitchenByRoleOrPosition(applicantRole, applicantPosition, applicantDepartment);
+          const productionManagerByStore = pickStoreRoleUsernameByStore(state, applicantStore, ['store_production_manager']);
+          const storeManagerByStore = pickStoreRoleUsernameByStore(state, applicantStore, ['store_manager']);
+          const hqManager = await pickHqManagerUsername(state);
+          const mentorDisplay = mentorName || mentorUsername || '待指定带教人';
+
+          const title = '晋升资格申请已批准';
+          const msg = `${applicantName}的晋升资格申请已批准，指定带教人：${mentorDisplay}。请积极投入培训与考核，争取早日晋升成功！`;
+          const recipients = uniqUsernames([
+            applicantUser,
+            mentorUsername,
+            storeManagerByStore,
+            hqManager,
+            isKitchen ? productionManagerByStore : ''
+          ].filter(Boolean));
+          for (const u of recipients) {
+            state = addStateNotification(state, makeNotif(u, title, msg, { type: 'promotion_qualification_approved', approvalId: updated.id }));
+          }
+
+          if (plan.length) {
+            const planMsg = `系统已生成培训安排：${plan.map(s => `${s.date} ${s.title}`).join('；')}`;
+            for (const u of recipients) {
+              state = addStateNotification(state, makeNotif(u, '晋升培训安排已生成', planMsg, { type: 'promotion_training_plan', approvalId: updated.id }));
+            }
+          }
+          await saveSharedState(state);
+        }
+
         if (finalRejected) {
           // Notify applicant + direct supervisor
-          const msg = `${applicantName}，你的晋升因为${note || '相关原因'}没有审批通过。`;
+          const stageLabel = stage === 'formal' ? '正式晋升' : '晋升资格';
+          const msg = `${applicantName}，你的${stageLabel}申请因为${note || '相关原因'}没有审批通过。`;
           const recipients = uniqUsernames([applicantUser, applicantManager].filter(Boolean));
           for (const u of recipients) {
             state = addStateNotification(state, makeNotif(u, '晋升申请未通过', msg, { type: 'promotion_result', approvalId: updated.id }));
@@ -938,7 +2728,13 @@ app.post('/api/approvals/:id/decide', authRequired, async (req, res) => {
 
         // Intermediate step: notify next approver
         if (String(updated.status || '') === 'pending' && nextAssignee) {
-          const msg = `${applicantName} 提交了晋升申请，需要您审批。`;
+          const stageLabel = stage === 'formal' ? '正式晋升申请' : '晋升资格申请';
+          const nextAssigneeRec = stateFindUserRecord(state, nextAssignee) || {};
+          const nextRole = String(nextAssigneeRec?.role || '').trim();
+          const needAssignMentorTip = (stage === 'qualification' && nextRole === 'store_manager')
+            ? '（通过时请指定带教人并确认培训起始日期）'
+            : '';
+          const msg = `${applicantName} 提交了${stageLabel}，需要您审批${needAssignMentorTip}。`;
           state = addStateNotification(state, makeNotif(nextAssignee, '晋升申请待审批', msg, { type: 'promotion_request', approvalId: updated.id }));
           await saveSharedState(state);
         }
@@ -1512,7 +3308,22 @@ app.get('/api/unread-counts', authRequired, async (req, res) => {
       payment = pmR.rows?.[0]?.cnt || 0;
     } catch (e) {}
 
-    return res.json({ approvals, training, exam, dashboard, rewards, payment });
+    let opsTasks = 0;
+    try {
+      const opR = await pool.query(
+        `select count(*)::int as cnt
+         from ops_tasks t
+         left join user_reads ur
+           on ur.username = $1 and ur.module = 'ops_tasks' and ur.item_key = t.id::text
+         where t.status in ('open', 'overdue')
+           and lower(t.assignee_username) = lower($1)
+           and ur.item_key is null`,
+        [username]
+      );
+      opsTasks = opR.rows?.[0]?.cnt || 0;
+    } catch (e) {}
+
+    return res.json({ approvals, training, exam, dashboard, rewards, payment, opsTasks });
   } catch (e) {
     return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
   }
@@ -1533,6 +3344,31 @@ app.use(
     }
   })
 );
+
+app.get('/api/me', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const role = String(req.user?.role || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  try {
+    const state = (await getSharedState()) || {};
+    const employees = Array.isArray(state.employees) ? state.employees : [];
+    const users = Array.isArray(state.users) ? state.users : [];
+    const emp = employees.find(e => String(e?.username || '').trim() === username) || {};
+    const usr = users.find(u => String(u?.username || '').trim() === username) || {};
+    return res.json({
+      user: {
+        username,
+        name: emp.name || usr.name || username,
+        role: role || emp.role || usr.role || 'employee',
+        store: emp.store || usr.store || '',
+        position: emp.position || usr.position || '',
+        department: emp.department || usr.department || ''
+      }
+    });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
 
 app.get('/', (req, res) => {
   const p1 = path.join(webRootDir, 'working-fixed.html');
@@ -1572,12 +3408,12 @@ const knowledgeUpload = multer({
       cb(null, `${randomUUID()}${ext}`);
     }
   }),
-  limits: { fileSize: 300 * 1024 * 1024 }
+  limits: { fileSize: 50 * 1024 * 1024 } // M4-FIX: 从300MB降到50MB
 });
 
 app.post('/api/uploads/daily-report', authRequired, upload.array('files', 9), async (req, res) => {
   const role = String(req.user?.role || '').trim();
-  if (role !== 'admin') {
+  if (!canWriteDailyReports(role)) {
     return res.status(403).json({ error: 'forbidden' });
   }
   try {
@@ -1626,7 +3462,23 @@ app.post('/api/uploads/points-evidence', authRequired, upload.array('files', 6),
   }
 });
 
+app.post('/api/uploads/promotion-evidence', authRequired, upload.array('files', 9), async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  try {
+    const files = Array.isArray(req.files) ? req.files : [];
+    if (!files.length) return res.status(400).json({ error: 'missing_file' });
+    const urls = files
+      .map(f => (f && f.filename ? `/uploads/${f.filename}` : ''))
+      .filter(Boolean);
+    return res.json({ urls });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
 const pool = new Pool({ connectionString: DATABASE_URL });
+setAgentPool(pool);
 
 async function hasColumn(tableName, columnName) {
   const t = String(tableName || '').trim();
@@ -1904,6 +3756,127 @@ async function pickCashierUsername(state) {
   return '';
 }
 
+function pickStoreRoleUsernameByStore(state, storeName, roleList) {
+  const store = String(storeName || '').trim();
+  const roles = Array.isArray(roleList) ? roleList.map(r => String(r || '').trim()) : [];
+  if (!store || !roles.length) return '';
+  const users = Array.isArray(state?.users) ? state.users : [];
+  const employees = Array.isArray(state?.employees) ? state.employees : [];
+  const all = employees.concat(users);
+  const found = all.find(x => {
+    const st = String(x?.store || '').trim();
+    const rl = String(x?.role || '').trim();
+    const status = String(x?.status || '').trim();
+    return st === store && roles.includes(rl) && status !== '离职' && status !== 'inactive';
+  });
+  return found?.username ? String(found.username).trim() : '';
+}
+
+function isKitchenByRoleOrPosition(roleRaw, positionRaw, departmentRaw) {
+  const role = String(roleRaw || '').trim().toLowerCase();
+  if (role === 'store_production_manager') return true;
+  const txt = `${String(positionRaw || '')} ${String(departmentRaw || '')}`.toLowerCase();
+  return /(后厨|厨房|后堂|后场|出品|厨师|厨工)/.test(txt);
+}
+
+function calcPromotionTrainingPlan(startDateRaw, topics, daySpanRaw) {
+  const start = safeDateOnly(startDateRaw) || new Date().toISOString().slice(0, 10);
+  const daySpan = Math.max(1, Number(daySpanRaw || 3) || 3);
+  const baseTopics = Array.isArray(topics) ? topics.filter(Boolean) : [];
+  const content = baseTopics.length ? baseTopics : ['岗位认知与职责', '标准流程实操', '服务/出品质量标准', '应急与协作能力'];
+  const sessions = [];
+  const st = new Date(start + 'T00:00:00');
+  for (let i = 0; i < daySpan; i += 1) {
+    const d = new Date(st.getTime() + i * 86400000);
+    const ds = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    sessions.push({
+      id: randomUUID(),
+      date: ds,
+      title: `第${i + 1}天培训`,
+      content: content[i % content.length],
+      status: 'planned',
+      feedback: ''
+    });
+  }
+  return sessions;
+}
+
+function normalizePromotionTrainingPeriods(input) {
+  const list = Array.isArray(input) ? input : [];
+  const out = [];
+  const seen = new Set();
+  list.forEach((x, idx) => {
+    if (!x || typeof x !== 'object') return;
+    const startDate = safeDateOnly(x.startDate || x.date || '');
+    const endDate = safeDateOnly(x.endDate || x.date || startDate || '');
+    if (!startDate || !endDate) return;
+    const title = String(x.title || `培训周期${idx + 1}`).trim() || `培训周期${idx + 1}`;
+    const key = `${startDate}__${endDate}__${title}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({
+      id: String(x.id || randomUUID()),
+      title,
+      startDate,
+      endDate,
+      note: String(x.note || '').trim()
+    });
+  });
+  out.sort((a, b) => String(a.startDate).localeCompare(String(b.startDate)));
+  return out;
+}
+
+function calcPromotionTrainingPlanByPeriods(periodsInput, topics) {
+  const periods = normalizePromotionTrainingPeriods(periodsInput);
+  if (!periods.length) return [];
+  const baseTopics = Array.isArray(topics) ? topics.filter(Boolean) : [];
+  const content = baseTopics.length ? baseTopics : ['岗位认知与职责', '标准流程实操', '服务/出品质量标准', '应急与协作能力'];
+  const sessions = [];
+  let seq = 0;
+  periods.forEach((p) => {
+    const st = new Date(String(p.startDate) + 'T00:00:00').getTime();
+    const ed = new Date(String(p.endDate) + 'T00:00:00').getTime();
+    if (!Number.isFinite(st) || !Number.isFinite(ed) || ed < st) return;
+    for (let ts = st; ts <= ed; ts += 86400000) {
+      seq += 1;
+      const d = new Date(ts);
+      const ds = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      sessions.push({
+        id: randomUUID(),
+        periodId: String(p.id || ''),
+        periodTitle: String(p.title || ''),
+        date: ds,
+        title: `${String(p.title || '培训周期')} · 第${seq}课`,
+        content: content[(seq - 1) % content.length],
+        status: 'planned',
+        feedback: ''
+      });
+    }
+  });
+  return sessions;
+}
+
+async function getPromotionTrackRecipients(state, track) {
+  const applicantUsername = String(track?.applicantUsername || '').trim();
+  const mentorUsername = String(track?.mentorUsername || '').trim();
+  const store = String(track?.store || '').trim();
+  const currentPosition = String(track?.currentPosition || '').trim();
+  const department = String(track?.department || '').trim();
+  const applicantRec = stateFindUserRecord(state, applicantUsername) || {};
+  const applicantRole = String(track?.applicantRole || applicantRec?.role || '').trim();
+  const kitchen = isKitchenByRoleOrPosition(applicantRole, currentPosition, department);
+  const storeManager = pickStoreRoleUsernameByStore(state, store, ['store_manager']);
+  const productionManager = kitchen ? pickStoreRoleUsernameByStore(state, store, ['store_production_manager']) : '';
+  const hqManager = await pickHqManagerUsername(state);
+  return uniqUsernames([
+    applicantUsername,
+    mentorUsername,
+    storeManager,
+    hqManager,
+    productionManager
+  ].filter(Boolean));
+}
+
 function normalizeApprovalType(input) {
   const t = String(input || '').trim().toLowerCase();
   const allowed = ['onboarding', 'offboarding', 'leave', 'payment', 'reward_punishment', 'promotion', 'points'];
@@ -2075,6 +4048,311 @@ function makeNotif(targetUser, title, message, extra) {
   };
 }
 
+function upsertInventoryForecastHistoryInState(state0, { store, bizType, slot, rowsRaw, username }) {
+  const history = Array.isArray(state0.inventoryForecastHistory) ? state0.inventoryForecastHistory.slice() : [];
+  const predictionList = Array.isArray(state0.inventoryForecastPredictions) ? state0.inventoryForecastPredictions.slice() : [];
+  const evaluationList = Array.isArray(state0.inventoryForecastEvaluations) ? state0.inventoryForecastEvaluations.slice() : [];
+  const keyOf = (x) => `${String(x?.store || '').trim()}||${String(x?.bizType || '').trim()}||${String(x?.slot || '').trim()}||${String(x?.date || '').trim()}`;
+  const map = new Map();
+  history.forEach((x) => map.set(keyOf(x), x));
+  const predMap = new Map();
+  predictionList.forEach((x) => predMap.set(keyOf(x), x));
+  const evalMap = new Map();
+  evaluationList.forEach((x) => evalMap.set(keyOf(x), x));
+
+  const now = hrmsNowISO();
+  let inserted = 0;
+  let updated = 0;
+  let skipped = 0;
+  const touchedKeys = new Set();
+
+  (Array.isArray(rowsRaw) ? rowsRaw : []).forEach((raw) => {
+    const normalized = parseForecastHistoryRow(raw);
+    if (!normalized) {
+      skipped += 1;
+      return;
+    }
+    const k = `${store}||${bizType}||${slot}||${normalized.date}`;
+    const prev = map.get(k);
+    const nextItem = {
+      ...(prev || {}),
+      id: prev?.id || randomUUID(),
+      store,
+      bizType,
+      slot,
+      date: normalized.date,
+      weather: normalized.weather,
+      isHoliday: normalized.isHoliday,
+      expectedRevenue: normalized.expectedRevenue,
+      actualRevenue: normalized.actualRevenue || 0,
+      totalDiscount: normalized.totalDiscount || 0,
+      productQuantities: normalized.productQuantities,
+      createdAt: prev?.createdAt || now,
+      createdBy: prev?.createdBy || username,
+      updatedAt: now,
+      updatedBy: username
+    };
+    if (prev) updated += 1;
+    else inserted += 1;
+    map.set(k, nextItem);
+    touchedKeys.add(k);
+  });
+
+  let evaluated = 0;
+  touchedKeys.forEach((k) => {
+    const actualRow = map.get(k);
+    const predRow = predMap.get(k);
+    if (!actualRow || !predRow) return;
+    const metrics = calcForecastAccuracyMetrics(predRow?.predictions, actualRow?.productQuantities);
+    const prevEval = evalMap.get(k);
+    evalMap.set(k, {
+      ...(prevEval || {}),
+      id: prevEval?.id || randomUUID(),
+      predictionId: String(predRow?.id || '').trim(),
+      store,
+      bizType,
+      slot,
+      date: String(actualRow?.date || ''),
+      totalPredQty: metrics.totalPredQty,
+      totalActualQty: metrics.totalActualQty,
+      totalAbsError: metrics.totalAbsError,
+      totalAccuracy: metrics.totalAccuracy,
+      mape: metrics.mape,
+      hitRate20: metrics.hitRate20,
+      productCount: metrics.productCount,
+      perProduct: metrics.perProduct,
+      topDiffProducts: metrics.topDiffProducts,
+      evaluatedAt: now,
+      updatedAt: now,
+      updatedBy: username
+    });
+    evaluated += 1;
+  });
+
+  const nextHistory = Array.from(map.values()).sort((a, b) => {
+    const aDate = String(a?.date || '');
+    const bDate = String(b?.date || '');
+    if (aDate !== bDate) return bDate.localeCompare(aDate);
+    return String(b?.updatedAt || b?.createdAt || '').localeCompare(String(a?.updatedAt || a?.createdAt || ''));
+  });
+  const nextEvaluations = Array.from(evalMap.values())
+    .sort((a, b) => String(b?.date || '').localeCompare(String(a?.date || '')) || String(b?.updatedAt || '').localeCompare(String(a?.updatedAt || '')))
+    .slice(0, 6000);
+
+  return {
+    state: { ...state0, inventoryForecastHistory: nextHistory, inventoryForecastEvaluations: nextEvaluations },
+    inserted,
+    updated,
+    skipped,
+    accepted: inserted + updated,
+    evaluated
+  };
+}
+
+function normalizePredictionItems(input) {
+  const arr = Array.isArray(input) ? input : [];
+  return arr
+    .map((x) => ({
+      product: String(x?.product || '').trim(),
+      qty: Number(Number(x?.qty || 0).toFixed(2)),
+      reason: String(x?.reason || '').trim()
+    }))
+    .filter((x) => x.product && Number.isFinite(x.qty) && x.qty >= 0);
+}
+
+function forecastPredictionToProductMap(predictions) {
+  const map = {};
+  normalizePredictionItems(predictions).forEach((x) => {
+    map[x.product] = Number((Number(map[x.product] || 0) + Number(x.qty || 0)).toFixed(2));
+  });
+  return map;
+}
+
+function calcForecastAccuracyMetrics(predictions, actualProducts) {
+  const predMap = forecastPredictionToProductMap(predictions);
+  const actualMap = normalizeForecastProducts(actualProducts);
+  const names = Array.from(new Set([...Object.keys(predMap), ...Object.keys(actualMap)]));
+  let totalPredQty = 0;
+  let totalActualQty = 0;
+  let totalAbsError = 0;
+  const perProduct = names.map((name) => {
+    const predQty = Number(predMap[name] || 0);
+    const actualQty = Number(actualMap[name] || 0);
+    const absError = Math.abs(predQty - actualQty);
+    const ape = absError / Math.max(actualQty, 1);
+    const accuracy = Math.max(0, Math.min(1, 1 - ape));
+    totalPredQty += predQty;
+    totalActualQty += actualQty;
+    totalAbsError += absError;
+    return {
+      product: name,
+      predQty: Number(predQty.toFixed(2)),
+      actualQty: Number(actualQty.toFixed(2)),
+      absError: Number(absError.toFixed(2)),
+      ape: Number(ape.toFixed(4)),
+      accuracy: Number(accuracy.toFixed(4))
+    };
+  });
+
+  const count = perProduct.length;
+  const mape = count ? Number((perProduct.reduce((s, x) => s + Number(x.ape || 0), 0) / count).toFixed(4)) : 1;
+  const hitRate20 = count
+    ? Number((perProduct.filter((x) => Number(x.ape || 0) <= 0.2).length / count).toFixed(4))
+    : 0;
+  const totalAccuracy = Number(Math.max(0, Math.min(1, 1 - (totalAbsError / Math.max(totalActualQty, 1)))).toFixed(4));
+  const topDiffProducts = perProduct
+    .slice()
+    .sort((a, b) => Number(b.absError || 0) - Number(a.absError || 0))
+    .slice(0, 10);
+  return {
+    totalPredQty: Number(totalPredQty.toFixed(2)),
+    totalActualQty: Number(totalActualQty.toFixed(2)),
+    totalAbsError: Number(totalAbsError.toFixed(2)),
+    totalAccuracy,
+    mape,
+    hitRate20,
+    productCount: count,
+    perProduct,
+    topDiffProducts
+  };
+}
+
+function buildForecastCalibrationFactors(evaluations, asOfDate) {
+  const list = Array.isArray(evaluations) ? evaluations : [];
+  const productRatios = new Map();
+  let sumPred = 0;
+  let sumActual = 0;
+  let sampleCount = 0;
+  const cutoff = (() => {
+    const d = String(asOfDate || '').trim();
+    return /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : '';
+  })();
+
+  list.forEach((ev) => {
+    const d = String(ev?.date || '').trim();
+    if (cutoff && d && d >= cutoff) return;
+    const per = Array.isArray(ev?.perProduct) ? ev.perProduct : [];
+    per.forEach((x) => {
+      const predQty = Number(x?.predQty || 0);
+      const actualQty = Number(x?.actualQty || 0);
+      if (!(predQty > 0) || !(actualQty >= 0)) return;
+      const ratio = Math.max(0.2, Math.min(3, actualQty / Math.max(predQty, 0.0001)));
+      const name = String(x?.product || '').trim();
+      if (!name) return;
+      const prev = productRatios.get(name) || [];
+      prev.push(ratio);
+      productRatios.set(name, prev.slice(-20));
+      sumPred += predQty;
+      sumActual += actualQty;
+      sampleCount += 1;
+    });
+  });
+
+  const globalRaw = sumPred > 0 ? (sumActual / sumPred) : 1;
+  const globalFactor = Number(Math.max(0.65, Math.min(1.35, globalRaw)).toFixed(4));
+  const byProduct = {};
+  productRatios.forEach((ratios, name) => {
+    if (!Array.isArray(ratios) || ratios.length < 2) return;
+    const avg = ratios.reduce((s, x) => s + Number(x || 0), 0) / Math.max(1, ratios.length);
+    byProduct[name] = Number(Math.max(0.6, Math.min(1.45, avg)).toFixed(4));
+  });
+
+  return {
+    globalFactor,
+    byProduct,
+    sampleCount,
+    productSampleCount: Object.keys(byProduct).length
+  };
+}
+
+function applyForecastCalibration(predictions, calibration) {
+  const list = normalizePredictionItems(predictions);
+  const cal = calibration && typeof calibration === 'object' ? calibration : {};
+  const globalFactor = Number.isFinite(Number(cal.globalFactor)) ? Number(cal.globalFactor) : 1;
+  const byProduct = cal.byProduct && typeof cal.byProduct === 'object' ? cal.byProduct : {};
+  return list
+    .map((x) => {
+      const f = Number.isFinite(Number(byProduct[x.product])) ? Number(byProduct[x.product]) : globalFactor;
+      return {
+        ...x,
+        qty: Number((Number(x.qty || 0) * Math.max(0.5, Math.min(1.8, f))).toFixed(2))
+      };
+    })
+    .sort((a, b) => Number(b.qty || 0) - Number(a.qty || 0));
+}
+
+function summarizeForecastAccuracyRows(items) {
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length) {
+    return {
+      comparedCount: 0,
+      avgAccuracy: 0,
+      avgMape: 0,
+      avgHitRate20: 0,
+      totalPredQty: 0,
+      totalActualQty: 0,
+      totalAbsError: 0,
+      moduleStats: []
+    };
+  }
+  let sumAcc = 0;
+  let sumMape = 0;
+  let sumHit = 0;
+  let totalPredQty = 0;
+  let totalActualQty = 0;
+  let totalAbsError = 0;
+  const moduleMap = new Map();
+
+  list.forEach((x) => {
+    const acc = Number(x?.totalAccuracy || 0);
+    const mape = Number(x?.mape || 0);
+    const hit = Number(x?.hitRate20 || 0);
+    sumAcc += acc;
+    sumMape += mape;
+    sumHit += hit;
+    totalPredQty += Number(x?.totalPredQty || 0);
+    totalActualQty += Number(x?.totalActualQty || 0);
+    totalAbsError += Number(x?.totalAbsError || 0);
+    const key = `${String(x?.bizType || '').trim()}||${String(x?.slot || '').trim()}`;
+    const prev = moduleMap.get(key) || {
+      bizType: String(x?.bizType || '').trim(),
+      slot: String(x?.slot || '').trim(),
+      comparedCount: 0,
+      sumAcc: 0,
+      sumMape: 0,
+      sumHit: 0
+    };
+    prev.comparedCount += 1;
+    prev.sumAcc += acc;
+    prev.sumMape += mape;
+    prev.sumHit += hit;
+    moduleMap.set(key, prev);
+  });
+
+  const count = list.length;
+  const moduleStats = Array.from(moduleMap.values())
+    .map((m) => ({
+      bizType: m.bizType,
+      slot: m.slot,
+      comparedCount: m.comparedCount,
+      avgAccuracy: Number((m.sumAcc / Math.max(1, m.comparedCount)).toFixed(4)),
+      avgMape: Number((m.sumMape / Math.max(1, m.comparedCount)).toFixed(4)),
+      avgHitRate20: Number((m.sumHit / Math.max(1, m.comparedCount)).toFixed(4))
+    }))
+    .sort((a, b) => String(a.bizType).localeCompare(String(b.bizType)) || String(a.slot).localeCompare(String(b.slot)));
+
+  return {
+    comparedCount: count,
+    avgAccuracy: Number((sumAcc / Math.max(1, count)).toFixed(4)),
+    avgMape: Number((sumMape / Math.max(1, count)).toFixed(4)),
+    avgHitRate20: Number((sumHit / Math.max(1, count)).toFixed(4)),
+    totalPredQty: Number(totalPredQty.toFixed(2)),
+    totalActualQty: Number(totalActualQty.toFixed(2)),
+    totalAbsError: Number(totalAbsError.toFixed(2)),
+    moduleStats
+  };
+}
+
 app.post('/api/gm-mailbox', authRequired, async (req, res) => {
   const username = String(req.user?.username || '').trim();
   if (!username) return res.status(400).json({ error: 'missing_user' });
@@ -2115,12 +4393,17 @@ app.post('/api/gm-mailbox', authRequired, async (req, res) => {
 
 function canAccessDailyReports(role) {
   const r = String(role || '').trim();
-  return r === 'admin' || r === 'hq_manager' || r === 'store_manager';
+  return r === 'admin' || r === 'hq_manager' || r === 'store_manager' || r === 'store_production_manager';
 }
 
 function canWriteDailyReports(role) {
   const r = String(role || '').trim();
-  return r === 'admin';
+  return r === 'admin' || r === 'store_manager';
+}
+
+function canAccessOpsTasks(role) {
+  const r = String(role || '').trim();
+  return r === 'admin' || r === 'hq_manager' || r === 'hr_manager' || r === 'store_manager' || r === 'store_production_manager';
 }
 
 function isAdmin(role) {
@@ -2135,6 +4418,16 @@ function isHq(role) {
 function canAccessAnalyticsReports(role) {
   const r = String(role || '').trim();
   return r === 'admin' || r === 'hq_manager' || r === 'store_manager' || r === 'hr_manager' || r === 'store_production_manager';
+}
+
+function canAccessBusinessReports(role) {
+  const r = String(role || '').trim();
+  return r === 'admin' || r === 'hq_manager' || r === 'store_manager';
+}
+
+function isForecastStoreScopedRole(role) {
+  const r = String(role || '').trim();
+  return r === 'store_manager' || r === 'store_production_manager';
 }
 
 function inDateRange(date, start, end) {
@@ -2164,7 +4457,7 @@ app.get('/api/daily-reports', authRequired, async (req, res) => {
     const me = stateFindUserRecord(state0, username) || {};
     const myStore = String(me?.store || '').trim();
 
-    const store = role === 'store_manager' ? myStore : storeQ;
+    const store = (role === 'store_manager' || role === 'store_production_manager') ? myStore : storeQ;
     let items = Array.isArray(state0.dailyReports) ? state0.dailyReports.slice() : [];
     if (store) items = items.filter(r => String(r?.store || '').trim() === String(store).trim());
     if (date) {
@@ -2172,6 +4465,49 @@ app.get('/api/daily-reports', authRequired, async (req, res) => {
     } else if (start || end) {
       items = items.filter(r => inDateRange(String(r?.date || '').trim(), start, end));
     }
+    
+    // 从系统设置获取目标值并合并到数据中
+    const stSettings = state0.settings && typeof state0.settings === 'object' ? state0.settings : {};
+    const monthlyTargets = Array.isArray(stSettings.monthlyTargets) ? stSettings.monthlyTargets : [];
+    
+    // 从数据库获取点评星级
+    if (items.length > 0) {
+      const storeDatePairs = items.map(item => `('${item.store}','${item.date}')`).join(',');
+      const dbResult = await pool.query(`
+        SELECT store, date, dianping_rating
+        FROM daily_reports
+        WHERE (store, date) IN (${storeDatePairs})
+      `);
+      
+      const dbMap = new Map();
+      for (const row of dbResult.rows) {
+        dbMap.set(`${row.store}|${row.date}`, row);
+      }
+      
+      items = items.map(item => {
+        const key = `${item.store}|${item.date}`;
+        const dbData = dbMap.get(key);
+        
+        // 从monthlyTargets查找当月目标
+        const ym = String(item.date || '').slice(0, 7);
+        const targetConfig = monthlyTargets.find(t => 
+          String(t?.ym || t?.month || '').trim() === ym && 
+          String(t?.store || '').trim() === String(item.store || '').trim()
+        );
+        
+        return {
+          ...item,
+          data: {
+            ...(item.data || {}),
+            // 目标值从系统设置读取（只有毛利率目标，营业额目标使用本月目标实收营业额）
+            target_margin: targetConfig?.targets?.margin || null,
+            // 点评星级从日报表读取
+            dianping_rating: dbData?.dianping_rating || null
+          }
+        };
+      });
+    }
+    
     items.sort((a, b) => String(b?.date || '').localeCompare(String(a?.date || '')) || String(b?.updatedAt || b?.createdAt || '').localeCompare(String(a?.updatedAt || a?.createdAt || '')));
     items = items.slice(0, limit);
     return res.json({ items });
@@ -2195,7 +4531,7 @@ app.post('/api/daily-reports', authRequired, async (req, res) => {
     const myStore = String(me?.store || '').trim();
 
     let store = String(req.body?.store || '').trim();
-    if (role === 'store_manager') {
+    if (role === 'store_manager' || role === 'store_production_manager') {
       store = myStore;
     }
     if (!store) return res.status(400).json({ error: 'missing_store' });
@@ -2208,6 +4544,7 @@ app.post('/api/daily-reports', authRequired, async (req, res) => {
     const idx = list.findIndex(r => String(r?.store || '').trim() === store && String(r?.date || '').trim() === date);
 
     let item;
+    let shouldNotifySchedule = false;
     if (idx >= 0) {
       const prev = list[idx] || {};
 
@@ -2220,8 +4557,11 @@ app.post('/api/daily-reports', authRequired, async (req, res) => {
       const submittedBy = prev?.submittedBy || prev?.submitted_by || null;
       const nextSubmittedAt = (wantSubmit && !submittedAt) ? now : submittedAt;
       const nextSubmittedBy = (wantSubmit && !submittedBy) ? username : submittedBy;
+      shouldNotifySchedule = !!(wantSubmit && !submittedAt);
 
-      item = {
+      const brand = String(payload?.brand || '').trim();
+
+      const item = {
         ...prev,
         store,
         date,
@@ -2229,6 +4569,25 @@ app.post('/api/daily-reports', authRequired, async (req, res) => {
         updatedAt: now,
         updatedBy: username
       };
+
+      // 同时更新到daily_reports表（只保存实际数据，目标从系统设置读取）
+      await safeExecute('daily_report_update', async () => {
+        await pool.query(`
+          INSERT INTO daily_reports (store, brand, date, actual_revenue, actual_margin, dianping_rating, submitted, submitted_at)
+          VALUES ($1, $2, $3, $4, $5, $6, true, NOW())
+          ON CONFLICT (store, date)
+          DO UPDATE SET 
+            actual_revenue = EXCLUDED.actual_revenue,
+            actual_margin = EXCLUDED.actual_margin,
+            dianping_rating = EXCLUDED.dianping_rating,
+            updated_at = NOW()
+        `, [
+          store, brand, date, 
+          payload?.actual || 0,
+          payload?.margin || null, 
+          payload?.dianping_rating || null
+        ]);
+      });
 
       if (wantSubmit || submittedAt) {
         item.submittedAt = nextSubmittedAt;
@@ -2252,10 +4611,65 @@ app.post('/api/daily-reports', authRequired, async (req, res) => {
         item.submittedAt = now;
         item.submittedBy = username;
       }
+      shouldNotifySchedule = !!wantSubmit;
       list.unshift(item);
     }
 
-    await saveSharedState({ ...state0, dailyReports: list });
+    let nextState = { ...state0, dailyReports: list };
+
+    if (shouldNotifySchedule) {
+      const allUsers = [
+        ...(Array.isArray(state0.employees) ? state0.employees : []),
+        ...(Array.isArray(state0.users) ? state0.users : [])
+      ];
+      const byName = new Map();
+      allUsers.forEach((x) => {
+        const name = String(x?.name || '').trim();
+        if (!name) return;
+        byName.set(name.toLowerCase(), x);
+      });
+
+      const resolveRecipient = (raw) => {
+        const username0 = String(raw?.user || raw?.username || raw?.userName || '').trim();
+        const name0 = String(raw?.name || raw?.employeeName || '').trim();
+        if (username0) {
+          const rec = stateFindUserRecord(state0, username0) || {};
+          const displayName = String(rec?.name || name0 || username0).trim() || username0;
+          return { username: username0, name: displayName };
+        }
+        if (!name0) return null;
+        const rec = byName.get(name0.toLowerCase()) || null;
+        const username1 = String(rec?.username || '').trim();
+        if (!username1) return null;
+        const displayName = String(rec?.name || name0).trim() || username1;
+        return { username: username1, name: displayName };
+      };
+
+      const notifyShift = (arr, shiftLabel, shiftKey) => {
+        const seen = new Set();
+        (Array.isArray(arr) ? arr : []).forEach((x) => {
+          const rec = resolveRecipient(x);
+          if (!rec?.username) return;
+          const k = String(rec.username || '').trim().toLowerCase() + '||' + shiftKey;
+          if (seen.has(k)) return;
+          seen.add(k);
+          const msg = `亲爱的${rec.name}，你是明天${shiftLabel}，请准时到岗并准时完成打卡考勤。`;
+          nextState = addStateNotification(nextState, makeNotif(rec.username, '排班通知', msg, {
+            type: 'schedule_notice',
+            store,
+            date,
+            shift: shiftKey,
+            reportId: item?.id || ''
+          }));
+        });
+      };
+
+      const schedule = payload?.scheduleNextDay && typeof payload.scheduleNextDay === 'object' ? payload.scheduleNextDay : {};
+      notifyShift(schedule?.morningStaff, '早班', 'morning');
+      notifyShift(schedule?.afternoonStaff, '午班', 'afternoon');
+    }
+
+    await saveSharedState(nextState);
     return res.json({ item });
   } catch (e) {
     return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
@@ -2293,6 +4707,747 @@ function parseMonth(input) {
 function clampNum(n, d = 0) {
   const v = Number(n);
   return Number.isFinite(v) ? v : d;
+}
+
+function normalizeForecastBizType(input) {
+  const v = String(input || '').trim().toLowerCase();
+  if (!v) return '';
+  if (v === 'takeaway' || v === 'delivery' || v === '外卖') return 'takeaway';
+  if (v === 'dinein' || v === 'dine_in' || v === '堂食') return 'dinein';
+  return '';
+}
+
+function normalizeForecastSlot(input) {
+  const v = String(input || '').trim().toLowerCase();
+  if (!v) return '';
+  if (v === 'lunch' || v === 'noon' || v === '午市') return 'lunch';
+  if (v === 'afternoon' || v === 'tea' || v === 'afternoon_tea' || v === '下午茶') return 'afternoon';
+  if (v === 'dinner' || v === 'night' || v === '晚市') return 'dinner';
+  return '';
+}
+
+function normalizeForecastSlotFromHourRange(input) {
+  const raw = String(input || '').trim();
+  if (!raw) return '';
+  const byWord = normalizeForecastSlot(raw);
+  if (byWord) return byWord;
+  // Match HH:MM or HH：MM patterns
+  const m = raw.match(/(\d{1,2})\s*[:：]\s*\d{1,2}/);
+  if (m) {
+    const startHour = Number(m[1]);
+    if (Number.isFinite(startHour)) {
+      if (startHour >= 10 && startHour < 14) return 'lunch';
+      if (startHour >= 14 && startHour < 17) return 'afternoon';
+      if (startHour >= 17 && startHour < 22) return 'dinner';
+    }
+  }
+  // Match decimal time from Excel (e.g. 0.708333 = 17:00)
+  const dec = Number(raw);
+  if (Number.isFinite(dec) && dec > 0 && dec < 1) {
+    const hour = Math.floor(dec * 24);
+    if (hour >= 10 && hour < 14) return 'lunch';
+    if (hour >= 14 && hour < 17) return 'afternoon';
+    if (hour >= 17 && hour < 22) return 'dinner';
+  }
+  // Match AM/PM time (e.g. "5:00 PM", "5:00:00 PM")
+  const ampm = raw.match(/(\d{1,2})\s*[:：]\s*\d{1,2}(?:\s*[:：]\s*\d{1,2})?\s*(AM|PM|am|pm|上午|下午)/i);
+  if (ampm) {
+    let h = Number(ampm[1]);
+    const isPM = /pm|下午/i.test(ampm[2]);
+    if (isPM && h < 12) h += 12;
+    if (!isPM && h === 12) h = 0;
+    if (h >= 10 && h < 14) return 'lunch';
+    if (h >= 14 && h < 17) return 'afternoon';
+    if (h >= 17 && h < 22) return 'dinner';
+  }
+  // Match plain hour number (e.g. "17" or "17:00")
+  const plainHour = raw.match(/^(\d{1,2})$/);
+  if (plainHour) {
+    const h = Number(plainHour[1]);
+    if (h >= 10 && h < 14) return 'lunch';
+    if (h >= 14 && h < 17) return 'afternoon';
+    if (h >= 17 && h < 22) return 'dinner';
+  }
+  return '';
+}
+
+function normalizeForecastUploadDate(input) {
+  const v = String(input || '').trim();
+  if (!v) return '';
+  const date = safeDateOnly(v);
+  if (date) return date;
+  // Chinese: X月Y日
+  const cn = v.match(/^(\d{1,2})月(\d{1,2})日$/);
+  if (cn) {
+    const y = new Date().getFullYear();
+    const m = String(Math.max(1, Math.min(12, Number(cn[1] || 1)))).padStart(2, '0');
+    const d = String(Math.max(1, Math.min(31, Number(cn[2] || 1)))).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+  // M/D/YY or M/D/YYYY (XLSX date output format)
+  const mdy = v.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  if (mdy) {
+    let yr = Number(mdy[3]);
+    if (yr < 100) yr += yr < 50 ? 2000 : 1900;
+    const m = String(Math.max(1, Math.min(12, Number(mdy[1])))).padStart(2, '0');
+    const d = String(Math.max(1, Math.min(31, Number(mdy[2])))).padStart(2, '0');
+    return `${yr}-${m}-${d}`;
+  }
+  // D/M/YYYY or DD/MM/YYYY
+  const dmy = v.match(/^(\d{1,2})[\.\-](\d{1,2})[\.\-](\d{4})$/);
+  if (dmy) {
+    const a = Number(dmy[1]), b = Number(dmy[2]), yr = Number(dmy[3]);
+    if (a > 12 && b <= 12) {
+      return `${yr}-${String(b).padStart(2, '0')}-${String(a).padStart(2, '0')}`;
+    }
+    return `${yr}-${String(a).padStart(2, '0')}-${String(b).padStart(2, '0')}`;
+  }
+  // YYYY/M/D
+  const ymd = v.match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})$/);
+  if (ymd) {
+    return `${ymd[1]}-${String(ymd[2]).padStart(2, '0')}-${String(ymd[3]).padStart(2, '0')}`;
+  }
+  return '';
+}
+
+function parseInventoryForecastRowsFromTableMatrix(matrix, fallbackBizType = '') {
+  const rows = Array.isArray(matrix) ? matrix : [];
+  if (!rows.length) return [];
+  const norm = (x) => String(x || '').trim();
+  const normHead = (x) => norm(x).toLowerCase().replace(/\s+/g, '');
+  const cleanHead = (x) => normHead(x).replace(/[\/:：()（）\[\]【】_\-~～]/g, '');
+  const rowMetaValue = (line, keyReg) => {
+    const arr = Array.isArray(line) ? line.map(norm) : [];
+    for (let i = 0; i < arr.length; i += 1) {
+      const cell = String(arr[i] || '');
+      const compact = cell.replace(/\s+/g, '');
+      if (!keyReg.test(cell) && !keyReg.test(compact)) continue;
+      for (let j = i + 1; j < arr.length; j += 1) {
+        if (arr[j]) return arr[j];
+      }
+    }
+    return '';
+  };
+
+  let headerRowIndex = -1;
+  for (let i = 0; i < rows.length; i += 1) {
+    const line = Array.isArray(rows[i]) ? rows[i] : [];
+    const heads = line.map((x) => cleanHead(x));
+    const joined = heads.join('|');
+    const hasSlot = heads.some((h) => /餐时段名称|时段名称|餐时段|时段/.test(h));
+    const hasProduct = heads.some((h) => /菜品名称|商品名称|产品名称|产品|菜品|品名/.test(h));
+    const hasQty = heads.some((h) => /销售数量|数量|qty|quantity/.test(h));
+    const hasAmount = heads.some((h) => /销售金额|销售额|金额/.test(h));
+    const hasSeqNo = heads.some((h) => /^序号$/.test(h));
+    const hasDate = heads.some((h) => /营业日期|销售日期|日期/.test(h));
+    const hasActualRevenue = heads.some((h) => /实际收入|实收|实际营收|家品收入/.test(h));
+    const hasOrderTime = heads.some((h) => /下单时间|点单时间|订单时间/.test(h));
+    const hasCheckoutTime = heads.some((h) => /结账时间|结算时间/.test(h));
+    const hasDiscount = heads.some((h) => /优惠金额|优惠|折扣/.test(h));
+    const hasMenuPrice = heads.some((h) => /菜谱售价|售价|单价|菜品售价/.test(h));
+    // Accept if we have slot+product+qty, or slot+product+amount, or seqNo+slot+product
+    if ((hasSlot && hasProduct && hasQty) || (hasSlot && hasProduct && hasAmount) || (hasSeqNo && hasSlot && hasProduct)) {
+      headerRowIndex = i;
+      break;
+    }
+    // New format: 序号+营业日期+菜品名称+销售数量 (no slot column, derive from 下单时间/结账时间)
+    if (hasSeqNo && hasDate && hasProduct && hasQty) {
+      headerRowIndex = i;
+      break;
+    }
+    // New format variant: 营业日期+菜品名称+销售数量+实际收入
+    if (hasDate && hasProduct && hasQty && hasActualRevenue) {
+      headerRowIndex = i;
+      break;
+    }
+    // Fuzzy: if row has >=3 known header keywords, accept it
+    const knownCount = [hasSlot, hasProduct, hasQty, hasAmount, hasSeqNo, hasDate, hasActualRevenue, hasOrderTime].filter(Boolean).length;
+    if (knownCount >= 3) {
+      headerRowIndex = i;
+      break;
+    }
+  }
+  const dataStartIndex = headerRowIndex >= 0 ? (headerRowIndex + 1) : 0;
+
+  let defaultDate = '';
+  let defaultBizType = normalizeForecastBizType(fallbackBizType);
+  let defaultStore = '';
+  let defaultWeather = '';
+  for (let i = 0; i < (headerRowIndex >= 0 ? headerRowIndex : Math.min(rows.length, 12)); i += 1) {
+    const line = Array.isArray(rows[i]) ? rows[i] : [];
+    if (!defaultDate) {
+      const v = rowMetaValue(line, /营业日期|销售日期|日期/);
+      if (v) defaultDate = normalizeForecastUploadDate(v);
+    }
+    if (!defaultBizType) {
+      const v = rowMetaValue(line, /销售类型|类型/);
+      if (v) defaultBizType = normalizeForecastBizType(v);
+    }
+    if (!defaultStore) {
+      const v = rowMetaValue(line, /门店|店铺|商户|销售门店|门店名称/);
+      if (v) defaultStore = normalizeForecastStoreName(v);
+    }
+    if (!defaultWeather) {
+      const v = rowMetaValue(line, /天气|weather/i);
+      if (v) defaultWeather = normalizeForecastWeather(v);
+    }
+  }
+
+  const headersRaw = headerRowIndex >= 0 && Array.isArray(rows[headerRowIndex]) ? rows[headerRowIndex] : [];
+  const headers = headersRaw.map(cleanHead);
+  const idx = (names) => {
+    for (const n of names) {
+      const i = headers.indexOf(cleanHead(n));
+      if (i >= 0) return i;
+    }
+    return -1;
+  };
+
+  const iDate = idx(['销售日期', '日期', 'date', '营业日期']);
+  const iBizType = idx(['销售类型', '类型', 'biztype']);
+  const iSlot = idx(['餐/时段名称', '时段名称', '餐时段', '时段']);
+  const iProduct = idx(['菜品名称', '商品名称', '品名', '产品', 'product']);
+  const iQty = idx(['销售数量', '数量', 'qty', 'quantity']);
+  const iAmount = idx(['销售金额', '销售额', 'amount']);
+  const iStore = idx(['门店', '店铺', '商户', '销售门店', '门店名称', 'store']);
+  const iWeather = idx(['天气', 'weather']);
+  // New format columns
+  const iActualRevenue = idx(['实际收入', '实收', '实际营收', '实收金额', '实收营业额', '实收金额元', '家品收入']);
+  const iDiscount = idx(['优惠金额', '优惠', '折扣']);
+  const iMenuPrice = idx(['菜谱售价', '售价', '单价', '菜品售价']);
+  const iOrderTime = idx(['下单时间', '点单时间', '订单时间']);
+  const iCheckoutTime = idx(['结账时间', '结算时间']);
+  const iDept = idx(['出品部门', '部门']);
+  const iCategory = idx(['大类名称/编码', '大类名称', '大类', '类别']);
+
+  const grouped = new Map();
+  const parseNumCell = (v) => {
+    const s = String(v == null ? '' : v).replace(/[,，\s]/g, '').replace(/[¥￥]/g, '').trim();
+    if (!s) return NaN;
+    const n = Number(s);
+    return Number.isFinite(n) ? n : NaN;
+  };
+  const looksLikeTimeRange = (v) => {
+    const s = String(v || '').trim();
+    if (!s) return false;
+    // Standard: 17:00~18:00 or 17：00～18：00
+    if (/\d{1,2}\s*[:：]\s*\d{1,2}\s*[~～\-—–至到]\s*\d{1,2}\s*[:：]\s*\d{1,2}/.test(s)) return true;
+    // AM/PM: 5:00 PM - 6:00 PM
+    if (/\d{1,2}\s*[:：]\s*\d{1,2}.*(?:AM|PM|am|pm|上午|下午)/.test(s)) return true;
+    // Decimal time from Excel: 0.4166666 to 0.9166666
+    const dec = Number(s);
+    if (Number.isFinite(dec) && dec > 0 && dec < 1) return true;
+    // Single time: 17:00 or 17：00
+    if (/^\d{1,2}\s*[:：]\s*\d{1,2}(?:\s*[:：]\s*\d{1,2})?$/.test(s)) return true;
+    return false;
+  };
+  for (let r = dataStartIndex; r < rows.length; r += 1) {
+    const line = Array.isArray(rows[r]) ? rows[r] : [];
+    if (!line.length) continue;
+    const product = norm(iProduct >= 0 ? line[iProduct] : '');
+    const qty = parseNumCell(iQty >= 0 ? line[iQty] : 0);
+    if (!product || isExcludedForecastProduct(product) || !Number.isFinite(qty) || qty <= 0) continue;
+
+    const dateRaw = norm(iDate >= 0 ? line[iDate] : '');
+    const date = normalizeForecastUploadDate(dateRaw) || defaultDate;
+    if (!date) continue;
+
+    const bizRaw = norm(iBizType >= 0 ? line[iBizType] : '');
+    const bizType = normalizeForecastBizType(bizRaw) || defaultBizType || 'dinein';
+    const store = normalizeForecastStoreName(iStore >= 0 ? line[iStore] : '') || defaultStore;
+
+    // Derive slot: prefer explicit slot column, then 下单时间, then 结账时间
+    let slotRaw = norm(iSlot >= 0 ? line[iSlot] : '');
+    let slot = slotRaw ? normalizeForecastSlotFromHourRange(slotRaw) : '';
+    if (!slot && iOrderTime >= 0) {
+      slot = normalizeForecastSlotFromHourRange(norm(line[iOrderTime]));
+    }
+    if (!slot && iCheckoutTime >= 0) {
+      slot = normalizeForecastSlotFromHourRange(norm(line[iCheckoutTime]));
+    }
+    // If still no slot and we have a datetime in the date column, try extracting time from it
+    if (!slot && dateRaw && /\d{1,2}[:：]\d{1,2}/.test(dateRaw)) {
+      slot = normalizeForecastSlotFromHourRange(dateRaw);
+    }
+    if (!slot) continue;
+    const weather = normalizeForecastWeather(iWeather >= 0 ? line[iWeather] : '') || defaultWeather;
+
+    const amount = parseNumCell(iAmount >= 0 ? line[iAmount] : 0);
+    const expectedRevenueInc = Number.isFinite(amount) && amount > 0 ? amount : 0;
+    // Track actual revenue (实际收入) for 实收毛利率 calculation
+    const actualRevenueRaw = parseNumCell(iActualRevenue >= 0 ? line[iActualRevenue] : 0);
+    const discountRaw = parseNumCell(iDiscount >= 0 ? line[iDiscount] : 0);
+    const discountInc = Number.isFinite(discountRaw) ? Math.abs(discountRaw) : 0;
+    const derivedActualRevenue = Math.max(0, expectedRevenueInc - discountInc);
+    const actualRevenueInc = Number.isFinite(actualRevenueRaw) && actualRevenueRaw > 0
+      ? actualRevenueRaw
+      : derivedActualRevenue;
+
+    const key = `${bizType}||${slot}||${date}`;
+    if (!grouped.has(key)) {
+      grouped.set(key, {
+        store,
+        bizType,
+        slot,
+        date,
+        weather: weather || '',
+        isHoliday: false,
+        expectedRevenue: 0,
+        actualRevenue: 0,
+        totalDiscount: 0,
+        productQuantities: {}
+      });
+    }
+    const row = grouped.get(key);
+    if (!row.store && store) row.store = store;
+    if (!row.weather && weather) row.weather = weather;
+    row.expectedRevenue = Number((Number(row.expectedRevenue || 0) + expectedRevenueInc).toFixed(2));
+    row.actualRevenue = Number((Number(row.actualRevenue || 0) + actualRevenueInc).toFixed(2));
+    row.totalDiscount = Number((Number(row.totalDiscount || 0) + discountInc).toFixed(2));
+    row.productQuantities[product] = Number((Number(row.productQuantities[product] || 0) + qty).toFixed(2));
+  }
+
+  // Fallback: for complex/merged templates from Excel export, infer columns by row shape.
+  if (!grouped.size) {
+    for (let r = dataStartIndex; r < rows.length; r += 1) {
+      const line = Array.isArray(rows[r]) ? rows[r].map(norm) : [];
+      if (!line.length) continue;
+      let slotIdx = -1;
+      for (let i = 0; i < line.length; i += 1) {
+        if (looksLikeTimeRange(line[i])) {
+          slotIdx = i;
+          break;
+        }
+      }
+      if (slotIdx < 0) continue;
+      const slot = normalizeForecastSlotFromHourRange(line[slotIdx]);
+      if (!slot) continue;
+
+      const numericCells = [];
+      for (let i = 0; i < line.length; i += 1) {
+        const n = parseNumCell(line[i]);
+        if (Number.isFinite(n)) numericCells.push({ i, n });
+      }
+      if (!numericCells.length) continue;
+
+      const amountCell = numericCells[numericCells.length - 1];
+      const qtyCell = numericCells
+        .filter((x) => x.i < amountCell.i)
+        .sort((a, b) => b.i - a.i)[0] || null;
+      const qty = qtyCell ? qtyCell.n : NaN;
+      if (!Number.isFinite(qty) || qty <= 0) continue;
+      const amount = Number.isFinite(amountCell?.n) ? amountCell.n : 0;
+
+      let product = '';
+      for (let i = (qtyCell ? qtyCell.i : amountCell.i) - 1; i >= 0; i -= 1) {
+        const cell = line[i];
+        if (!cell) continue;
+        if (looksLikeTimeRange(cell)) continue;
+        if (Number.isFinite(parseNumCell(cell))) continue;
+        if (cell === '-' || cell === '—' || cell === '–' || cell === '一') continue;
+        if (/(^序号$|^菜品大类$|^菜品中类$|^餐时段名称$|^时段名称$|^销售数量$|^销售金额$)/.test(cell.replace(/\s+/g, ''))) continue;
+        product = cell;
+        break;
+      }
+      if (!product) continue;
+
+      let date = '';
+      for (let i = 0; i < line.length; i += 1) {
+        date = normalizeForecastUploadDate(line[i]);
+        if (date) break;
+      }
+      date = date || defaultDate;
+      if (!date) continue;
+
+      let bizType = '';
+      for (let i = 0; i < line.length; i += 1) {
+        bizType = normalizeForecastBizType(line[i]);
+        if (bizType) break;
+      }
+      bizType = bizType || defaultBizType || 'dinein';
+
+      let weather = '';
+      for (let i = 0; i < line.length; i += 1) {
+        const s = normalizeForecastWeather(line[i]);
+        if (!s) continue;
+        if (/(晴|阴|雨|雪|风|雾|多云|weather)/i.test(s)) {
+          weather = s;
+          break;
+        }
+      }
+      weather = weather || defaultWeather;
+
+      let store = '';
+      for (let i = 0; i < line.length; i += 1) {
+        const s = normalizeForecastStoreName(line[i]);
+        if (!s) continue;
+        if (/(门店|店铺|广场店|久光店|万象城|商场|mall|store)/i.test(s)) {
+          store = s;
+          break;
+        }
+      }
+      store = store || defaultStore;
+
+      const key = `${bizType}||${slot}||${date}`;
+      if (!grouped.has(key)) {
+        grouped.set(key, {
+          store,
+          bizType,
+          slot,
+          date,
+          weather: weather || '',
+          isHoliday: false,
+          expectedRevenue: 0,
+          productQuantities: {}
+        });
+      }
+      const row = grouped.get(key);
+      if (!row.store && store) row.store = store;
+      if (!row.weather && weather) row.weather = weather;
+      row.expectedRevenue = Number((Number(row.expectedRevenue || 0) + (amount > 0 ? amount : 0)).toFixed(2));
+      row.productQuantities[product] = Number((Number(row.productQuantities[product] || 0) + qty).toFixed(2));
+    }
+  }
+  return Array.from(grouped.values()).filter((x) => x.bizType && x.slot && x.date && Object.keys(x.productQuantities || {}).length);
+}
+
+function normalizeForecastWeather(input) {
+  return String(input || '').trim().slice(0, 40);
+}
+
+function normalizeForecastStoreName(input) {
+  return String(input || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+}
+
+function normalizeForecastStoreKey(input) {
+  return normalizeForecastStoreName(input).replace(/\s+/g, '').toLowerCase();
+}
+
+const FORECAST_EXCLUDED_PRODUCTS = ['打包盒', '特色米饭', '年夜饭', '五常大米饭'];
+
+function isExcludedForecastProduct(name) {
+  const n = String(name || '').trim();
+  if (!n) return true;
+  return FORECAST_EXCLUDED_PRODUCTS.some((kw) => n.includes(kw));
+}
+
+function normalizeArkBaseUrl(input) {
+  const raw = String(input || '').trim();
+  if (!raw) return 'https://ark.cn-beijing.volces.com/api/v3';
+  const noSlash = raw.replace(/\/$/, '');
+  if (/ark\.cn-beijing\.volces\.com/i.test(noSlash)) {
+    if (/\/api\/v3$/i.test(noSlash)) return noSlash;
+    return `${noSlash}/api/v3`;
+  }
+  return noSlash;
+}
+
+function normalizeOpenAiCompatibleBaseUrl(input) {
+  const raw = String(input || '').trim();
+  if (!raw) return '';
+  const noSlash = raw.replace(/\/+$/, '');
+  if (/ark\.cn-beijing\.volces\.com/i.test(noSlash)) {
+    if (/\/api\/v3$/i.test(noSlash)) return noSlash;
+    if (/\/v1$/i.test(noSlash)) return noSlash.replace(/\/v1$/i, '/api/v3');
+    return `${noSlash}/api/v3`;
+  }
+  if (/\/v1$/i.test(noSlash)) return noSlash;
+  return `${noSlash}/v1`;
+}
+
+function resolveForecastArkConfig(state0, opts = {}) {
+  const preferVision = !!opts.preferVision;
+  const llm = state0?.settings?.llm && typeof state0.settings.llm === 'object' ? state0.settings.llm : {};
+  const aiConfig = state0?.aiConfig && typeof state0.aiConfig === 'object' ? state0.aiConfig : {};
+  const endpointId = String(
+    process.env.ARK_ENDPOINT_ID
+      || process.env.INVENTORY_FORECAST_ENDPOINT_ID
+      || llm.endpointId
+      || aiConfig.endpointId
+      || ''
+  ).trim();
+  const modelRaw = String(
+    (preferVision ? process.env.ARK_VISION_MODEL : '')
+      || process.env.INVENTORY_FORECAST_MODEL
+      || process.env.ARK_MODEL
+      || llm.model
+      || aiConfig.model
+      || ''
+  ).trim();
+  const model = /^ep-/i.test(endpointId)
+    ? endpointId
+    : (/^ep-/i.test(modelRaw) ? modelRaw : 'ep-20260217191023-bjlrn');
+  const apiKey = String(
+    process.env.ARK_API_KEY
+      || process.env.INVENTORY_FORECAST_API_KEY
+      || process.env.FORECAST_API_KEY
+      || process.env.OPENAI_API_KEY
+      || llm.apiKey
+      || aiConfig.apiKey
+      || ''
+  ).trim();
+  const baseUrl = normalizeArkBaseUrl(
+    process.env.INVENTORY_FORECAST_API_BASE
+      || process.env.ARK_API_BASE
+      || llm.baseUrl
+      || aiConfig.apiUrl
+      || 'https://ark.cn-beijing.volces.com'
+  );
+  return { apiKey, baseUrl, model };
+}
+
+function normalizeForecastProducts(input) {
+  const out = {};
+  if (Array.isArray(input)) {
+    input.forEach((it) => {
+      const name = String(it?.name || it?.product || '').trim();
+      if (isExcludedForecastProduct(name)) return;
+      if (!name) return;
+      const qty = safeNumber(it?.qty ?? it?.quantity ?? it?.count);
+      if (!Number.isFinite(qty) || qty < 0) return;
+      out[name] = Number((Number(out[name] || 0) + qty).toFixed(2));
+    });
+    return out;
+  }
+  if (input && typeof input === 'object') {
+    Object.keys(input).forEach((k) => {
+      const name = String(k || '').trim();
+      if (isExcludedForecastProduct(name)) return;
+      if (!name) return;
+      const qty = safeNumber(input[k]);
+      if (!Number.isFinite(qty) || qty < 0) return;
+      out[name] = Number(qty.toFixed(2));
+    });
+  }
+  return out;
+}
+
+function parseForecastHistoryRow(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const date = safeDateOnly(raw?.date);
+  if (!date) return null;
+  const weather = normalizeForecastWeather(raw?.weather);
+  const isHoliday = !!(raw?.isHoliday === true || raw?.isHoliday === 1 || raw?.isHoliday === '1' || String(raw?.isHoliday || '').trim().toLowerCase() === 'true' || String(raw?.isHoliday || '').trim() === '是');
+  const expectedRevenue = safeNumber(raw?.expectedRevenue ?? raw?.forecastRevenue ?? raw?.revenue);
+  const actualRevenue = safeNumber(raw?.actualRevenue);
+  const totalDiscount = safeNumber(raw?.totalDiscount);
+  const productQuantities = normalizeForecastProducts(raw?.productQuantities ?? raw?.products);
+  if (!Object.keys(productQuantities).length) return null;
+  return {
+    date,
+    weather,
+    isHoliday,
+    expectedRevenue: Number.isFinite(expectedRevenue) ? Number(expectedRevenue.toFixed(2)) : 0,
+    actualRevenue: Number.isFinite(actualRevenue) ? Number(actualRevenue.toFixed(2)) : 0,
+    totalDiscount: Number.isFinite(totalDiscount) ? Number(totalDiscount.toFixed(2)) : 0,
+    productQuantities
+  };
+}
+
+function scoreForecastRow(item, target) {
+  const date = String(item?.date || '').trim();
+  const weather = String(item?.weather || '').trim().toLowerCase();
+  const targetWeather = String(target?.weather || '').trim().toLowerCase();
+  let score = 1;
+  let dayDiff = null;
+  try {
+    const d1 = new Date(date + 'T00:00:00');
+    const d2 = new Date(String(target?.date || '') + 'T00:00:00');
+    if (Number.isFinite(d1.getTime()) && Number.isFinite(d2.getTime())) {
+      dayDiff = Math.abs(Math.round((d2.getTime() - d1.getTime()) / 86400000));
+      // Day-of-week: exact match is the strongest signal (Mon≠Fri≠Sat)
+      if (d1.getDay() === d2.getDay()) score += 1.8;
+      else {
+        const diff = Math.abs(d1.getDay() - d2.getDay());
+        const adj = Math.min(diff, 7 - diff);
+        if (adj === 1) score += 0.3;
+      }
+      // Recency bonus: closer dates are more reliable for food demand.
+      const recencyBonus = Math.max(0, 1.0 - Math.min(1.0, Number(dayDiff || 0) / 60));
+      score += recencyBonus;
+    }
+  } catch (e) {}
+  // Holiday matching as separate dimension (some stores busy on holidays, some not)
+  if (Boolean(item?.isHoliday) === Boolean(target?.isHoliday)) score += 0.7;
+  // Weather match
+  const itemWeatherTag = normalizeForecastWeatherTag(weather);
+  const targetWeatherTag = normalizeForecastWeatherTag(targetWeather);
+  if (itemWeatherTag && targetWeatherTag) {
+    if (itemWeatherTag === targetWeatherTag) score += 0.6;
+    else score += 0.1;
+  }
+  const rev = Number(item?.expectedRevenue || 0);
+  const targetRev = Number(target?.expectedRevenue || 0);
+  if (targetRev > 0 && rev > 0) {
+    const diffRate = Math.abs(rev - targetRev) / Math.max(targetRev, 1);
+    score += Math.max(0, 0.8 - diffRate);
+  }
+  return Math.max(0.2, Number(score.toFixed(4)));
+}
+
+function buildForecastByHeuristic(historyRows, target, topN) {
+  const list = Array.isArray(historyRows) ? historyRows : [];
+  if (!list.length) return { predictions: [], confidence: 0.1, summary: '暂无历史数据，无法生成稳定预测。' };
+
+  const sumByProduct = new Map();
+  let totalScore = 0;
+  let strongMatchCount = 0;
+  let weightedRevenueSum = 0;
+  let revenueScoreSum = 0;
+
+  list.forEach((row) => {
+    const score = scoreForecastRow(row, target);
+    totalScore += score;
+    if (score >= 2.4) strongMatchCount += 1;
+    const rowRev = Number(row?.expectedRevenue || row?.revenue || row?.totalAmount || 0);
+    if (rowRev > 0) {
+      weightedRevenueSum += rowRev * score;
+      revenueScoreSum += score;
+    }
+    const products = row?.productQuantities && typeof row.productQuantities === 'object' ? row.productQuantities : {};
+    Object.entries(products).forEach(([name, qtyRaw]) => {
+      const nameSafe = String(name || '').trim();
+      if (isExcludedForecastProduct(nameSafe)) return;
+      if (!nameSafe) return;
+      const qty = Number(qtyRaw || 0);
+      if (!Number.isFinite(qty) || qty < 0) return;
+      const prev = sumByProduct.get(nameSafe) || 0;
+      sumByProduct.set(nameSafe, prev + qty * score);
+    });
+  });
+
+  const divider = totalScore > 0 ? totalScore : list.length;
+
+  // CRITICAL: Calculate revenue scaling factor
+  // If target revenue is 20000 but historical average is 10000, scale predictions by ~2x
+  const targetRev = Number(target?.expectedRevenue || 0);
+  const avgHistoricalRevenue = revenueScoreSum > 0 ? (weightedRevenueSum / revenueScoreSum) : 0;
+  let revenueScale = 1;
+  if (targetRev > 0 && avgHistoricalRevenue > 0) {
+    const ratio = targetRev / avgHistoricalRevenue;
+    // Small sample size is very noisy. Use stronger damping to avoid runaway qty inflation.
+    const exp = list.length < 8 ? 0.45 : (list.length < 20 ? 0.6 : 0.72);
+    revenueScale = Math.pow(Math.max(0.01, ratio), exp);
+    if (revenueScale > 1.9) revenueScale = 1.9;
+    if (revenueScale < 0.6) revenueScale = 0.6;
+  }
+
+  const sorted = Array.from(sumByProduct.entries())
+    .map(([product, weightedQty]) => ({
+      product,
+      qty: Number(((weightedQty / Math.max(1, divider)) * revenueScale).toFixed(1)),
+      reason: revenueScale !== 1 ? `营收比例${(revenueScale * 100).toFixed(0)}%调整` : ''
+    }))
+    .filter((x) => Number(x.qty) > 0)
+    .sort((a, b) => Number(b.qty || 0) - Number(a.qty || 0));
+
+  const limit = Math.max(5, Math.min(80, Number(topN || 20) || 20));
+  const predictions = sorted.slice(0, limit);
+  const baseConfidence = 0.35 + Math.min(0.35, list.length * 0.015) + Math.min(0.2, strongMatchCount * 0.03);
+  const confidence = Number(Math.max(0.1, Math.min(0.95, baseConfidence)).toFixed(2));
+  const revNote = (targetRev > 0 && avgHistoricalRevenue > 0)
+    ? `预计营收¥${targetRev}（历史均值¥${Math.round(avgHistoricalRevenue)}，缩放${(revenueScale * 100).toFixed(0)}%）。`
+    : '';
+  const summary = `基于${list.length}条历史记录进行相似度加权，匹配度较高样本${strongMatchCount}条。${revNote}`;
+  return { predictions, confidence, summary };
+}
+
+function extractHistoryProductUniverse(historyRows) {
+  const out = new Set();
+  (Array.isArray(historyRows) ? historyRows : []).forEach((row) => {
+    const products = row?.productQuantities && typeof row.productQuantities === 'object' ? row.productQuantities : {};
+    Object.keys(products).forEach((name) => {
+      const n = String(name || '').trim();
+      if (!n || isExcludedForecastProduct(n)) return;
+      out.add(n);
+    });
+  });
+  return out;
+}
+
+function constrainPredictionsToHistory(predictions, historyRows, topN) {
+  const universe = extractHistoryProductUniverse(historyRows);
+  if (!universe.size) return [];
+  return normalizePredictionItems(predictions)
+    .filter((x) => universe.has(String(x?.product || '').trim()))
+    .sort((a, b) => Number(b.qty || 0) - Number(a.qty || 0))
+    .slice(0, Math.max(5, Math.min(80, Number(topN || 20) || 20)));
+}
+
+async function buildForecastByAI({ historyRows, target, topN, state0 }) {
+  const cfg = resolveForecastArkConfig(state0 || {}, { preferVision: false });
+  const apiKey = cfg.apiKey;
+  if (!apiKey) return null;
+
+  const baseUrl = cfg.baseUrl;
+  const model = cfg.model;
+  const rows = (Array.isArray(historyRows) ? historyRows : []).slice(0, 200);
+  if (!rows.length) return null;
+
+  const prompt = [
+    '你是专业的餐饮门店备货预测AI助手。',
+    '请仅输出 JSON，不要输出任何额外解释文字。',
+    'JSON 格式：',
+    '{"predictions":[{"product":"产品名","qty":12.3,"reason":"简短原因"}],"summary":"一句话总结","confidence":0.78}',
+    '',
+    '规则：',
+    '1) predictions 只包含具体菜品产品，qty 为预测销售数量（非负数字），按 qty 降序排列；',
+    '2) 【最重要】预计营收金额是核心参数：营收越高则各菜品销量越大，营收翻倍则销量应接近翻倍。必须对比目标营收与历史营收，按比例调整每个菜品的预测销量；',
+    '3) 同时分析：目标日期是星期几、天气状况、是否假日，与历史同类条件下的销售数据对比；天气不能直接做固定比例加减，销量应主要由目标营收和历史样本决定；',
+    `4) 只输出销量排名前 ${Math.min(topN || 20, 20)} 名的产品；`,
+    '5) qty 必须是合理的整数或一位小数，不能为0；',
+    '',
+    '目标条件：',
+    JSON.stringify(target),
+    '',
+    `历史销售样本（共${rows.length}条）：`,
+    JSON.stringify(rows)
+  ].filter(Boolean).join('\n');
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 18000);
+  try {
+    const resp = await fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model,
+        temperature: 0.2,
+        messages: [{ role: 'user', content: prompt }]
+      }),
+      signal: controller.signal
+    });
+    if (!resp.ok) {
+      const tx = await resp.text().catch(() => '');
+      throw new Error(`forecast_ai_http_${resp.status}:${tx.slice(0, 240)}`);
+    }
+    const data = await resp.json();
+    const content = String(data?.choices?.[0]?.message?.content || '').trim();
+    if (!content) throw new Error('forecast_ai_empty');
+    const jsonTextMatch = content.match(/\{[\s\S]*\}/);
+    const parsed = JSON.parse(jsonTextMatch ? jsonTextMatch[0] : content);
+    const arr = Array.isArray(parsed?.predictions) ? parsed.predictions : [];
+    const predictions = arr
+      .map((x) => ({
+        product: String(x?.product || '').trim(),
+        qty: Number(Number(x?.qty || 0).toFixed(2)),
+        reason: String(x?.reason || '').trim()
+      }))
+      .filter((x) => x.product && Number.isFinite(x.qty) && x.qty >= 0 && !isExcludedForecastProduct(x.product))
+      .sort((a, b) => Number(b.qty || 0) - Number(a.qty || 0))
+      .slice(0, Math.max(5, Math.min(80, Number(topN || 20) || 20)));
+    const confidenceRaw = Number(parsed?.confidence);
+    const confidence = Number.isFinite(confidenceRaw)
+      ? Number(Math.max(0.05, Math.min(0.99, confidenceRaw)).toFixed(2))
+      : 0.72;
+    const summary = String(parsed?.summary || '').trim();
+    return { predictions, confidence, summary };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function getStateUsers(state) {
@@ -2362,11 +5517,396 @@ function pickMyStoreFromState(state, username) {
   return st;
 }
 
+const OPS_BRAND_STORE_MAP = {
+  '洪潮大宁久光店': '洪潮传统潮汕菜',
+  '马己仙上海音乐广场店': '马己仙广东小馆'
+};
+
+const OPS_BRAND_RULES = {
+  '洪潮传统潮汕菜': {
+    lunchDeadline: '11:00',
+    dinnerDeadline: '17:00',
+    reviewDeadline: '22:30',
+    tableVisitDeadline: '22:00'
+  },
+  '马己仙广东小馆': {
+    lunchDeadline: '11:00',
+    dinnerDeadline: '17:00',
+    reviewDeadline: '22:30',
+    tableVisitDeadline: '22:00'
+  }
+};
+
+const OPS_ROLE_ALIASES = {
+  store_product_manager: 'store_production_manager'
+};
+
+function normalizeOpsRole(input) {
+  const raw = String(input || '').trim();
+  return OPS_ROLE_ALIASES[raw] || raw;
+}
+
+function opsDateOnly(d = new Date()) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function opsDateAt(dateStr, hm) {
+  const date = safeDateOnly(dateStr);
+  const time = String(hm || '').trim();
+  if (!date || !/^\d{2}:\d{2}$/.test(time)) return null;
+  const v = new Date(`${date}T${time}:00`);
+  return Number.isFinite(v.getTime()) ? v : null;
+}
+
+function resolveOpsStoreBrand(state, storeName) {
+  const store = String(storeName || '').trim();
+  if (!store) return '';
+  const stores = Array.isArray(state?.stores) ? state.stores : [];
+  const row = stores.find(s => String(s?.name || '').trim() === store) || null;
+  const fromState = String(row?.brand || row?.brandName || '').trim();
+  if (fromState) return fromState;
+  return String(OPS_BRAND_STORE_MAP[store] || '').trim();
+}
+
+function getOpsManagedStores(state) {
+  const inState = Array.isArray(state?.stores)
+    ? state.stores.map(s => String(s?.name || '').trim()).filter(Boolean)
+    : [];
+  const mapped = Object.keys(OPS_BRAND_STORE_MAP);
+  return Array.from(new Set(inState.concat(mapped))).filter(Boolean);
+}
+
+function getOpsStoreAssignee(state, store, role) {
+  const r = normalizeOpsRole(role);
+  return pickStoreRoleUsernameByStore(state, store, [r]);
+}
+
+function buildOpsTaskTemplates(store, brand, bizDate) {
+  const rules = OPS_BRAND_RULES[brand] || OPS_BRAND_RULES['洪潮传统潮汕菜'];
+  if (!rules) return [];
+  return [
+    {
+      taskType: 'opening_lunch',
+      scheduleKey: 'opening_lunch',
+      assigneeRole: 'store_manager',
+      title: '午市开档检查（11:00前）',
+      dueAt: opsDateAt(bizDate, rules.lunchDeadline),
+      requiredPhotos: 3,
+      checklist: ['门店前场与后厨开档状态完整', '关键岗位到岗确认', '收银及开档准备完成']
+    },
+    {
+      taskType: 'prep_lunch',
+      scheduleKey: 'prep_lunch',
+      assigneeRole: 'store_production_manager',
+      title: '午市出品与备货巡查（11:00前）',
+      dueAt: opsDateAt(bizDate, rules.lunchDeadline),
+      requiredPhotos: 3,
+      checklist: ['备货台全景', '重点SKU备货近景', '出品工位卫生与标准']
+    },
+    {
+      taskType: 'opening_dinner',
+      scheduleKey: 'opening_dinner',
+      assigneeRole: 'store_manager',
+      title: '晚市开档检查（17:00前）',
+      dueAt: opsDateAt(bizDate, rules.dinnerDeadline),
+      requiredPhotos: 3,
+      checklist: ['晚市排班到岗确认', '服务区与后厨开档完成', '晚市物料状态确认']
+    },
+    {
+      taskType: 'prep_dinner',
+      scheduleKey: 'prep_dinner',
+      assigneeRole: 'store_production_manager',
+      title: '晚市出品与备货巡查（17:00前）',
+      dueAt: opsDateAt(bizDate, rules.dinnerDeadline),
+      requiredPhotos: 3,
+      checklist: ['晚市备货全景', '热销菜品备货细节', '出品台状态与风险点']
+    },
+    {
+      taskType: 'bad_review_followup',
+      scheduleKey: 'bad_review_followup',
+      assigneeRole: 'store_manager',
+      title: '堂食/外卖差评跟踪处理（当日）',
+      dueAt: opsDateAt(bizDate, rules.reviewDeadline),
+      requiredPhotos: 2,
+      checklist: ['上传差评截图（堂食/外卖）', '上传处理结果或沟通记录截图']
+    },
+    {
+      taskType: 'table_visit_tracking',
+      scheduleKey: 'table_visit_tracking',
+      assigneeRole: 'store_manager',
+      title: '桌访达成记录同步确认（当日）',
+      dueAt: opsDateAt(bizDate, rules.tableVisitDeadline),
+      requiredPhotos: 1,
+      checklist: ['上传桌访记录截图（飞书或内部表）', '备注当日关键反馈与跟进项']
+    }
+  ].filter(t => t.dueAt instanceof Date);
+}
+
+async function createOpsTaskIfAbsent(input) {
+  const dedupeKey = String(input?.dedupeKey || '').trim();
+  if (!dedupeKey) return;
+  await pool.query(
+    `insert into ops_tasks (
+      biz_date, store, brand, task_type, schedule_key, dedupe_key,
+      title, instructions, checklist, required_photos,
+      assignee_username, assignee_role, due_at, source
+    )
+    values ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,$13,$14)
+    on conflict (dedupe_key) do nothing`,
+    [
+      input.bizDate,
+      input.store,
+      input.brand || null,
+      input.taskType,
+      input.scheduleKey,
+      dedupeKey,
+      input.title,
+      input.instructions || null,
+      JSON.stringify(Array.isArray(input.checklist) ? input.checklist : []),
+      Math.max(1, Number(input.requiredPhotos || 1)),
+      input.assigneeUsername,
+      normalizeOpsRole(input.assigneeRole),
+      input.dueAt,
+      'ops_agent'
+    ]
+  );
+}
+
+async function ensureOpsTasksForDate(dateStr) {
+  const bizDate = safeDateOnly(dateStr);
+  if (!bizDate) return;
+  const state = (await getSharedState()) || {};
+  const stores = getOpsManagedStores(state);
+  for (const store of stores) {
+    const brand = resolveOpsStoreBrand(state, store);
+    if (!brand) continue;
+    const templates = buildOpsTaskTemplates(store, brand, bizDate);
+    for (const t of templates) {
+      const assigneeUsername = getOpsStoreAssignee(state, store, t.assigneeRole);
+      if (!assigneeUsername) continue;
+      const dedupeKey = `${bizDate}||${store}||${t.scheduleKey}||${assigneeUsername}`;
+      await createOpsTaskIfAbsent({
+        bizDate,
+        store,
+        brand,
+        taskType: t.taskType,
+        scheduleKey: t.scheduleKey,
+        dedupeKey,
+        title: t.title,
+        checklist: t.checklist,
+        requiredPhotos: t.requiredPhotos,
+        assigneeUsername,
+        assigneeRole: t.assigneeRole,
+        dueAt: t.dueAt,
+        instructions: `${brand} · ${store}：请按检查项完成并上传照片。`
+      });
+    }
+  }
+}
+
+function buildOpsFeedback(task, completedAt, photoCount, options) {
+  const opts = options && typeof options === 'object' ? options : {};
+  const contentVerified = !!opts.contentVerified;
+
+  let score = contentVerified ? 5 : 3;
+  const dueAt = new Date(task?.due_at || 0);
+  const required = Math.max(1, Number(task?.required_photos || 1));
+  if (Number.isFinite(dueAt.getTime()) && completedAt > dueAt) score -= 1;
+  if (photoCount < required) score -= 2;
+  if (photoCount === required) score -= 0;
+  if (photoCount > required) score += 0;
+  score = Math.max(1, Math.min(5, score));
+
+  const lateText = Number.isFinite(dueAt.getTime()) && completedAt > dueAt ? '本次提交晚于计划时间，' : '';
+  const photoText = photoCount < required
+    ? `照片不足（需${required}张，实传${photoCount}张），`
+    : '照片数量达标，';
+
+  if (!contentVerified) {
+    const feedback = `${lateText}${photoText}系统当前仅校验“时间与照片张数”，尚未校验图片内容与任务是否匹配。该结果仅供提醒，请由值班经理人工复核后再做评价。`;
+    return { score, feedback, verificationStatus: 'unverified' };
+  }
+
+  const feedback = `${lateText}${photoText}图片内容与任务匹配，执行情况良好。下一次请按检查项逐条拍摄并备注异常点。`;
+  return { score, feedback, verificationStatus: 'verified' };
+}
+
+let __OPS_TASK_SCHEDULER_STARTED = false;
+async function runOpsTaskSchedulerTick() {
+  try {
+    await ensureOpsTasksTable();
+    const today = opsDateOnly(new Date());
+    await ensureOpsTasksForDate(today);
+    await pool.query(
+      `update ops_tasks
+       set status = 'overdue', updated_at = now()
+       where status = 'open'
+         and due_at < now()`
+    );
+  } catch (e) {
+    console.error('[ops scheduler] tick failed:', e?.message || e);
+  }
+}
+
+function startOpsTaskScheduler() {
+  if (__OPS_TASK_SCHEDULER_STARTED) return;
+  __OPS_TASK_SCHEDULER_STARTED = true;
+  runOpsTaskSchedulerTick();
+  setInterval(runOpsTaskSchedulerTick, 60 * 1000);
+}
+
+app.get('/api/ops/tasks', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const role = normalizeOpsRole(req.user?.role);
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  if (!canAccessOpsTasks(role)) return res.status(403).json({ error: 'forbidden' });
+
+  const status = String(req.query?.status || 'open').trim();
+  const bizDate = safeDateOnly(req.query?.date);
+  const storeQ = String(req.query?.store || '').trim();
+  const limit = Math.max(1, Math.min(200, Number(req.query?.limit) || 80));
+
+  try {
+    let where = ['1=1'];
+    const params = [];
+    const push = (v) => {
+      params.push(v);
+      return `$${params.length}`;
+    };
+
+    if (status && status !== 'all') {
+      if (status === 'todo') {
+        where.push(`status in ('open','overdue')`);
+      } else {
+        where.push(`status = ${push(status)}`);
+      }
+    }
+    if (bizDate) where.push(`biz_date = ${push(bizDate)}::date`);
+
+    if (role === 'store_manager' || role === 'store_production_manager') {
+      where.push(`lower(assignee_username) = lower(${push(username)})`);
+    } else if (storeQ) {
+      where.push(`store = ${push(storeQ)}`);
+    }
+
+    const r = await pool.query(
+      `select id, biz_date, store, brand, task_type, schedule_key, title, instructions,
+              checklist, required_photos, assignee_username, assignee_role,
+              status, due_at, completed_at, evidence_urls, evidence_note,
+              feedback_score, feedback_text, source, created_at, updated_at
+       from ops_tasks
+       where ${where.join(' and ')}
+       order by biz_date desc, due_at asc
+       limit ${push(limit)}`,
+      params
+    );
+    return res.json({ items: r.rows || [] });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+app.post('/api/ops/tasks/:id/read', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const id = String(req.params?.id || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  if (!id) return res.status(400).json({ error: 'missing_id' });
+  try {
+    await pool.query(
+      `insert into user_reads (username, module, item_key, read_at)
+       values ($1, 'ops_tasks', $2, now())
+       on conflict (username, module, item_key)
+       do update set read_at = excluded.read_at`,
+      [username, id]
+    );
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+app.post('/api/uploads/ops-task-evidence', authRequired, upload.array('files', 9), async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  try {
+    const files = Array.isArray(req.files) ? req.files : [];
+    if (!files.length) return res.status(400).json({ error: 'missing_file' });
+    const urls = files.map(f => (f && f.filename ? `/uploads/${f.filename}` : '')).filter(Boolean);
+    return res.json({ urls });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+app.post('/api/ops/tasks/:id/complete', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const role = normalizeOpsRole(req.user?.role);
+  const id = String(req.params?.id || '').trim();
+  const evidenceUrls = Array.isArray(req.body?.evidenceUrls)
+    ? req.body.evidenceUrls.map(x => String(x || '').trim()).filter(Boolean)
+    : [];
+  const note = String(req.body?.note || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  if (!id) return res.status(400).json({ error: 'missing_id' });
+  if (!evidenceUrls.length) return res.status(400).json({ error: 'missing_evidence' });
+
+  try {
+    const r0 = await pool.query(
+      `select id, assignee_username, status, required_photos, due_at
+       from ops_tasks where id = $1 limit 1`,
+      [id]
+    );
+    const task = r0.rows?.[0] || null;
+    if (!task) return res.status(404).json({ error: 'not_found' });
+    const assignee = String(task.assignee_username || '').trim();
+    const privileged = role === 'admin' || role === 'hq_manager' || role === 'hr_manager';
+    if (!privileged && assignee.toLowerCase() !== username.toLowerCase()) {
+      return res.status(403).json({ error: 'forbidden' });
+    }
+    if (String(task.status || '').trim() === 'done') {
+      return res.status(400).json({ error: 'already_done' });
+    }
+
+    const completedAt = new Date();
+    // 当前版本尚未接入图像内容识别，先按“未验证内容”生成保守反馈，避免误导性表扬。
+    const fb = buildOpsFeedback(task, completedAt, evidenceUrls.length, { contentVerified: false });
+
+    const r = await pool.query(
+      `update ops_tasks
+       set status = 'done',
+           completed_at = now(),
+           evidence_urls = $2::jsonb,
+           evidence_note = $3,
+           feedback_score = $4,
+           feedback_text = $5,
+           updated_at = now()
+       where id = $1
+       returning id, status, completed_at, feedback_score, feedback_text, evidence_urls`,
+      [id, JSON.stringify(evidenceUrls), note || null, fb.score, fb.feedback]
+    );
+
+    await pool.query(
+      `insert into user_reads (username, module, item_key, read_at)
+       values ($1, 'ops_tasks', $2, now())
+       on conflict (username, module, item_key)
+       do update set read_at = excluded.read_at`,
+      [username, id]
+    );
+
+    return res.json({ item: r.rows?.[0] || null });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
 app.get('/api/reports/business', authRequired, async (req, res) => {
   const username = String(req.user?.username || '').trim();
   const role = String(req.user?.role || '').trim();
   if (!username) return res.status(400).json({ error: 'missing_user' });
-  if (!canAccessDailyReports(role)) return res.status(403).json({ error: 'forbidden' });
+  if (!canAccessBusinessReports(role)) return res.status(403).json({ error: 'forbidden' });
 
   const start = safeDateOnly(req.query?.start);
   const end = safeDateOnly(req.query?.end);
@@ -2725,6 +6265,113 @@ app.get('/api/reports/turnover', authRequired, async (req, res) => {
   }
 });
 
+app.get('/api/reports/leave-owed', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const role = String(req.user?.role || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  if (!canAccessAnalyticsReports(role)) return res.status(403).json({ error: 'forbidden' });
+
+  const month = safeMonthOnly(req.query?.month || '') || new Date().toISOString().slice(0, 7);
+  const filterStore = String(req.query?.store || '').trim();
+  const includeInactive = String(req.query?.includeInactive || '').trim() === '1';
+
+  try {
+    const state0 = (await getSharedState()) || {};
+    const myStore = pickMyStoreFromState(state0, username);
+    const store = role === 'store_manager' ? myStore : filterStore;
+
+    const emps = Array.isArray(state0?.employees) ? state0.employees : [];
+    const users = Array.isArray(state0?.users) ? state0.users : [];
+    const map = new Map();
+    users.forEach((u) => {
+      const k = String(u?.username || '').trim().toLowerCase();
+      if (!k || isLegacyTestUsername(k)) return;
+      if (!map.has(k)) map.set(k, { ...u, username: String(u?.username || '').trim() });
+    });
+    emps.forEach((e) => {
+      const k = String(e?.username || '').trim().toLowerCase();
+      if (!k || isLegacyTestUsername(k)) return;
+      map.set(k, { ...(map.get(k) || {}), ...e, username: String(e?.username || '').trim() });
+    });
+
+    let people = Array.from(map.values());
+    if (store) people = people.filter(p => String(p?.store || '').trim() === store);
+    if (!includeInactive) {
+      people = people.filter(p => {
+        const st = String(p?.status || '').trim().toLowerCase();
+        return st !== 'inactive' && st !== '离职';
+      });
+    }
+
+    const rows = people.map((p) => {
+      const bal = calcEmployeeMonthlyLeaveBalance(state0, p, month) || {
+        baseLeave: 0, annualLeave: 0, usedLeave: 0, totalLeave: 0, computedRemaining: 0, remaining: 0, overridden: false, weeklyDetails: [], lastAdjustment: null
+      };
+      const remaining = Number(bal?.remaining || 0);
+      const joinDate = String(p?.joinDate || p?.hireDate || p?.startDate || p?.entryDate || p?.onboardDate || p?.joiningDate || p?.createdAt || '').trim();
+      return {
+        username: String(p?.username || '').trim(),
+        name: String(p?.name || p?.username || '').trim(),
+        role: String(p?.role || '').trim(),
+        store: String(p?.store || '').trim(),
+        department: String(p?.department || '').trim(),
+        position: String(p?.position || '').trim(),
+        status: String(p?.status || 'active').trim() || 'active',
+        baseLeave: bal.baseLeave,
+        annualLeave: bal.annualLeave,
+        usedLeave: bal.usedLeave,
+        totalLeave: bal.totalLeave,
+        actualRestDays: bal.usedLeave,
+        holidayDays: bal.totalLeave,
+        cumulativeLeaveDays: calcCumulativeLeaveDaysByJoinDate(joinDate),
+        computedRemaining: bal.computedRemaining,
+        remaining,
+        isOwed: remaining > 0,
+        owedDays: remaining > 0 ? Number(remaining.toFixed(2)) : 0,
+        overridden: !!bal.overridden,
+        weeklyDetails: Array.isArray(bal.weeklyDetails) ? bal.weeklyDetails : [],
+        lastAdjustment: bal.lastAdjustment || null
+      };
+    }).sort((a, b) => {
+      if (Number(a.isOwed) !== Number(b.isOwed)) return Number(b.isOwed) - Number(a.isOwed);
+      const ra = Number(a.remaining || 0);
+      const rb = Number(b.remaining || 0);
+      if (ra !== rb) return rb - ra;
+      return String(a.name || a.username || '').localeCompare(String(b.name || b.username || ''), 'zh-Hans-CN');
+    });
+
+    const totals = rows.reduce((acc, r) => {
+      acc.people += 1;
+      acc.totalLeave = Number((acc.totalLeave + Number(r.totalLeave || 0)).toFixed(2));
+      acc.usedLeave = Number((acc.usedLeave + Number(r.usedLeave || 0)).toFixed(2));
+      acc.remaining = Number((acc.remaining + Number(r.remaining || 0)).toFixed(2));
+      if (r.isOwed) {
+        acc.owedPeople += 1;
+        acc.owedDays = Number((acc.owedDays + Number(r.owedDays || 0)).toFixed(2));
+      }
+      return acc;
+    }, { people: 0, owedPeople: 0, owedDays: 0, totalLeave: 0, usedLeave: 0, remaining: 0 });
+
+    const adjustments = Array.isArray(state0?.leaveBalanceAdjustments) ? state0.leaveBalanceAdjustments : [];
+    const monthAdjustments = adjustments
+      .filter(a => String(a?.month || '') === month)
+      .filter(a => !store || String(a?.store || '') === store)
+      .slice(0, 200);
+
+    return res.json({
+      month,
+      store: store || '',
+      includeInactive,
+      canAdjust: role === 'admin' || role === 'hr_manager',
+      totals,
+      rows,
+      adjustments: monthAdjustments
+    });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
 app.get('/api/reports/attendance', authRequired, async (req, res) => {
   const username = String(req.user?.username || '').trim();
   const role = String(req.user?.role || '').trim();
@@ -2811,26 +6458,45 @@ app.get('/api/reports/payroll', authRequired, async (req, res) => {
       pointSubsidyByUserStore.set(subsidyKey, Number((prevSubsidy + subsidyAmount).toFixed(2)));
     });
     const knownUsers = new Set();
-    const allPeople = []
-      .concat(Array.isArray(state0?.employees) ? state0.employees : [])
-      .concat(Array.isArray(state0?.users) ? state0.users : []);
-    allPeople.forEach(p => {
-      const u = String(p?.username || '').trim().toLowerCase();
-      if (u && !isLegacyTestUsername(u)) knownUsers.add(u);
+    const peopleByLower = new Map();
+    const employeesList = Array.isArray(state0?.employees) ? state0.employees : [];
+    const usersList = Array.isArray(state0?.users) ? state0.users : [];
+    // employees first: treat employee records as authoritative when duplicates exist
+    employeesList.forEach((p) => {
+      const uRaw = String(p?.username || '').trim();
+      const u = uRaw.toLowerCase();
+      if (!u || isLegacyTestUsername(u)) return;
+      if (!peopleByLower.has(u)) peopleByLower.set(u, { ...p, username: uRaw });
+    });
+    usersList.forEach((p) => {
+      const uRaw = String(p?.username || '').trim();
+      const u = uRaw.toLowerCase();
+      if (!u || isLegacyTestUsername(u)) return;
+      if (!peopleByLower.has(u)) peopleByLower.set(u, { ...p, username: uRaw });
+    });
+    const allPeople = Array.from(peopleByLower.values());
+    const canonicalUsernameByLower = new Map();
+    peopleByLower.forEach((p, u) => {
+      knownUsers.add(u);
+      canonicalUsernameByLower.set(u, String(p?.username || u).trim() || u);
     });
     const [yearNum, monthNum] = month.split('-').map(Number);
     const monthDays = new Date(yearNum, monthNum, 0).getDate();
     // Business rule: daily rate uses salary / (days in month - 4 fixed weekly offs)
     const workDaysPerMonth = Math.max(1, monthDays - 4);
 
+    const payrollRowKey = (st, userLower) => `${String(st || '').trim()}||${String(userLower || '').trim()}`;
+
     const sumMap = new Map();
     for (const r of attendanceRows) {
       const st = String(r?.store || '').trim();
-      const u = String(r?.username || '').trim();
+      const uRaw = String(r?.username || '').trim();
+      const u = uRaw.toLowerCase();
       if (!st || !u) continue;
-      if (!knownUsers.has(u.toLowerCase())) continue;
-      const key = `${st}||${u}`;
-      const prev = sumMap.get(key) || { store: st, username: u, name: String(r?.name || '').trim(), days: 0 };
+      if (!knownUsers.has(u)) continue;
+      const canonicalUser = canonicalUsernameByLower.get(u) || uRaw;
+      const key = payrollRowKey(st, u);
+      const prev = sumMap.get(key) || { store: st, username: canonicalUser, name: String(r?.name || '').trim(), days: 0 };
       prev.days += clampNum(r?.days, 0);
       if (!prev.name) prev.name = String(r?.name || '').trim();
       sumMap.set(key, prev);
@@ -2860,13 +6526,14 @@ app.get('/api/reports/payroll', authRequired, async (req, res) => {
       // Ensure people with salary adjustments still appear in payroll rows even with zero attendance
       const rec = stateFindUserRecord(state0, target) || {};
       const recStore = String(rec?.store || '').trim();
+      const canonicalTarget = canonicalUsernameByLower.get(key) || target;
       if (!store || recStore === store) {
-        const attKey = `${recStore}||${target}`;
+        const attKey = payrollRowKey(recStore, key);
         if (!sumMap.has(attKey)) {
           sumMap.set(attKey, {
             store: recStore,
-            username: target,
-            name: String(rec?.name || target).trim(),
+            username: canonicalTarget,
+            name: String(rec?.name || canonicalTarget).trim(),
             days: 0
           });
         }
@@ -2883,19 +6550,21 @@ app.get('/api/reports/payroll', authRequired, async (req, res) => {
       const keyMonth = String(m[1] || '').trim();
       const keyStore = String(m[2] || '').trim();
       const keyUser = String(m[3] || '').trim();
+      const keyUserLower = keyUser.toLowerCase();
       if (keyMonth !== month || !keyUser) return;
       if (isLegacyTestUsername(keyUser)) return;
       const subsidy = safeNumber(v?.subsidy ?? v?.amount) || 0;
       if (!subsidy) return;
       const rec = stateFindUserRecord(state0, keyUser) || {};
-      const recStore = String(keyStore && keyStore !== 'ALL' ? keyStore : (rec?.store || pointStoreByUser.get(keyUser.toLowerCase()) || '')).trim();
+      const recStore = String(keyStore && keyStore !== 'ALL' ? keyStore : (rec?.store || pointStoreByUser.get(keyUserLower) || '')).trim();
       if (store && recStore !== store) return;
-      const attKey = `${recStore}||${keyUser}`;
+      const canonicalUser = canonicalUsernameByLower.get(keyUserLower) || keyUser;
+      const attKey = payrollRowKey(recStore, keyUserLower);
       if (!sumMap.has(attKey)) {
         sumMap.set(attKey, {
           store: recStore,
-          username: keyUser,
-          name: String(rec?.name || keyUser).trim(),
+          username: canonicalUser,
+          name: String(rec?.name || canonicalUser).trim(),
           days: 0
         });
       }
@@ -2918,11 +6587,12 @@ app.get('/api/reports/payroll', authRequired, async (req, res) => {
       const hasPointSubsidy = (pointSubsidyByStore + pointSubsidyAllStore) > 0;
       if (!hasSalary && !hasAdjustment && !hasPointSubsidy) return;
 
-      const attKey = `${rowStore}||${rowUser}`;
+      const canonicalUser = canonicalUsernameByLower.get(rowUserLower) || rowUser;
+      const attKey = payrollRowKey(rowStore, rowUserLower);
       if (!sumMap.has(attKey)) {
         sumMap.set(attKey, {
           store: rowStore,
-          username: rowUser,
+          username: canonicalUser,
           name: String(p?.name || rowUser).trim(),
           days: 0
         });
@@ -3034,6 +6704,1445 @@ app.post('/api/reports/payroll/adjustment', authRequired, async (req, res) => {
     };
     await saveSharedState({ ...state0, payrollAdjustments });
     return res.json({ ok: true, item: payrollAdjustments[key] });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+app.get('/api/reports/salary-changes', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const role = String(req.user?.role || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+
+  const qUser = String(req.query?.username || '').trim();
+  const qStore = String(req.query?.store || '').trim();
+  const qMonth = parseMonth(req.query?.month);
+  const limit = Math.max(1, Math.min(500, Number(req.query?.limit || 200) || 200));
+
+  try {
+    const state = (await getSharedState()) || {};
+    const mine = stateFindUserRecord(state, username) || {};
+    const mineStore = String(mine?.store || '').trim();
+    const targetUser = qUser || username;
+
+    const isPrivileged = isAdmin(role) || isHq(role) || role === 'hr_manager';
+    if (!isPrivileged) {
+      if (role === 'store_manager') {
+        const targetRec = stateFindUserRecord(state, targetUser) || {};
+        const targetStore = String(targetRec?.store || '').trim();
+        if (targetUser !== username && (!mineStore || !targetStore || mineStore !== targetStore)) {
+          return res.status(403).json({ error: 'forbidden' });
+        }
+      } else if (targetUser !== username) {
+        return res.status(403).json({ error: 'forbidden' });
+      }
+    }
+
+    let rows = Array.isArray(state.salaryChangeHistory) ? state.salaryChangeHistory.slice() : [];
+    const seenApprovalIds = new Set(rows.map((x) => String(x?.approvalId || '').trim()).filter(Boolean));
+
+    // Backfill from historical formal promotion approvals (for records created before salaryChangeHistory was introduced)
+    const legacyR = await pool.query(
+      `select id, applicant_username, payload, chain, updated_at, created_at
+       from approval_requests
+       where type = 'promotion'
+         and status = 'approved'
+         and lower(coalesce(payload->>'promotionStage','')) = 'formal'
+       order by updated_at desc
+       limit 2000`
+    );
+    const legacyRows = (legacyR.rows || []).map((r) => {
+      const payload = r?.payload && typeof r.payload === 'object' ? r.payload : {};
+      const promotedSalary = Number(payload?.promotedSalary);
+      if (!Number.isFinite(promotedSalary) || promotedSalary <= 0) return null;
+      const applicantUser = String(r?.applicant_username || '').trim();
+      const applicantRec = stateFindUserRecord(state, applicantUser) || {};
+      const chain = Array.isArray(r?.chain) ? r.chain : [];
+      let approvedBy = '';
+      let approvedAt = '';
+      for (let i = chain.length - 1; i >= 0; i -= 1) {
+        const step = chain[i] || {};
+        if (String(step?.status || '').trim() === 'approved') {
+          approvedBy = String(step?.assignee || '').trim();
+          approvedAt = String(step?.decidedAt || '').trim();
+          break;
+        }
+      }
+      const fallbackApprovedAt = String(r?.updated_at || r?.created_at || '');
+      return {
+        id: randomUUID(),
+        approvalId: String(r?.id || ''),
+        source: 'promotion_formal_legacy',
+        targetUsername: applicantUser,
+        targetName: String(applicantRec?.name || applicantUser).trim() || applicantUser,
+        store: String(payload?.store || applicantRec?.store || '').trim(),
+        oldSalary: null,
+        newSalary: Number(promotedSalary.toFixed(2)),
+        delta: null,
+        approvedBy,
+        approvedAt: approvedAt || fallbackApprovedAt,
+        reason: String(payload?.reason || '').trim(),
+        chain
+      };
+    }).filter(Boolean);
+    legacyRows.forEach((x) => {
+      const aid = String(x?.approvalId || '').trim();
+      if (!aid || seenApprovalIds.has(aid)) return;
+      rows.push(x);
+      seenApprovalIds.add(aid);
+    });
+
+    if (targetUser) {
+      const t = targetUser.toLowerCase();
+      rows = rows.filter((x) => String(x?.targetUsername || '').trim().toLowerCase() === t);
+    }
+    if (qStore) rows = rows.filter((x) => String(x?.store || '').trim() === qStore);
+    if (qMonth) rows = rows.filter((x) => String(x?.approvedAt || x?.createdAt || '').slice(0, 7) === qMonth);
+
+    rows.sort((a, b) => String(b?.approvedAt || b?.createdAt || '').localeCompare(String(a?.approvedAt || a?.createdAt || '')));
+    rows = rows.slice(0, limit);
+    return res.json({ items: rows });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+app.get('/api/reports/promotion-records', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const role = String(req.user?.role || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  if (!(isAdmin(role) || role === 'hr_manager' || isHq(role))) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
+
+  const qStore = String(req.query?.store || '').trim();
+  const qMonth = parseMonth(req.query?.month);
+  const limit = Math.max(1, Math.min(1000, Number(req.query?.limit || 300) || 300));
+
+  try {
+    const state = (await getSharedState()) || {};
+    const r = await pool.query(
+      `select id, applicant_username, payload, chain, created_at, updated_at
+       from approval_requests
+       where type = 'promotion'
+         and status = 'approved'
+         and lower(coalesce(payload->>'promotionStage','')) = 'formal'
+       order by updated_at desc
+       limit $1`,
+      [limit]
+    );
+
+    let items = (r.rows || []).map((row) => {
+      const payload = row?.payload && typeof row.payload === 'object' ? row.payload : {};
+      const applicantUser = String(row?.applicant_username || '').trim();
+      const applicant = stateFindUserRecord(state, applicantUser) || {};
+      const chain = Array.isArray(row?.chain) ? row.chain : [];
+      let approvedBy = '';
+      let approvedAt = '';
+      for (let i = chain.length - 1; i >= 0; i -= 1) {
+        const s = chain[i] || {};
+        if (String(s?.status || '').trim() === 'approved') {
+          approvedBy = String(s?.assignee || '').trim();
+          approvedAt = String(s?.decidedAt || '').trim();
+          break;
+        }
+      }
+      return {
+        approvalId: String(row?.id || ''),
+        applicantUsername: applicantUser,
+        applicantName: String(applicant?.name || applicantUser).trim() || applicantUser,
+        store: String(payload?.store || applicant?.store || '').trim(),
+        department: String(payload?.department || applicant?.department || '').trim(),
+        fromPosition: String(payload?.currentPosition || applicant?.position || '').trim(),
+        fromLevel: String(payload?.currentLevel || applicant?.level || '').trim(),
+        toPosition: String(payload?.targetPosition || payload?.newPosition || '').trim(),
+        toLevel: String(payload?.targetLevel || payload?.newLevel || '').trim(),
+        promotedSalary: Number(payload?.promotedSalary || 0) || null,
+        reason: String(payload?.reason || '').trim(),
+        approvedBy,
+        approvedAt: approvedAt || String(row?.updated_at || row?.created_at || ''),
+        createdAt: String(row?.created_at || '')
+      };
+    });
+
+    if (qStore) items = items.filter((x) => String(x?.store || '').trim() === qStore);
+    if (qMonth) items = items.filter((x) => String(x?.approvedAt || '').slice(0, 7) === qMonth);
+    items.sort((a, b) => String(b?.approvedAt || '').localeCompare(String(a?.approvedAt || '')));
+    return res.json({ items });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+app.get('/api/reports/inventory-forecast/history', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const role = String(req.user?.role || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  if (!canAccessAnalyticsReports(role)) return res.status(403).json({ error: 'forbidden' });
+
+  const bizType = normalizeForecastBizType(req.query?.bizType);
+  const slot = normalizeForecastSlot(req.query?.slot);
+  const start = safeDateOnly(req.query?.start);
+  const end = safeDateOnly(req.query?.end);
+  const qStore = String(req.query?.store || '').trim();
+  const limit = Math.max(1, Math.min(1000, Number(req.query?.limit || 300) || 300));
+
+  try {
+    const state0 = (await getSharedState()) || {};
+    const myStore = pickMyStoreFromState(state0, username);
+    const store = isForecastStoreScopedRole(role) ? myStore : qStore;
+    if (!store) return res.status(400).json({ error: 'missing_store' });
+
+    let items = Array.isArray(state0.inventoryForecastHistory) ? state0.inventoryForecastHistory.slice() : [];
+    items = items.filter((x) => String(x?.store || '').trim() === store);
+    if (bizType) items = items.filter((x) => String(x?.bizType || '').trim() === bizType);
+    if (slot) items = items.filter((x) => String(x?.slot || '').trim() === slot);
+    if (start || end) {
+      items = items.filter((x) => inDateRange(String(x?.date || '').trim(), start, end));
+    }
+    items.sort((a, b) => {
+      const aDate = String(a?.date || '');
+      const bDate = String(b?.date || '');
+      if (aDate !== bDate) return bDate.localeCompare(aDate);
+      return String(b?.updatedAt || b?.createdAt || '').localeCompare(String(a?.updatedAt || a?.createdAt || ''));
+    });
+    return res.json({ store, bizType: bizType || '', slot: slot || '', items: items.slice(0, limit) });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+app.delete('/api/reports/inventory-forecast/history/clear', authRequired, async (req, res) => {
+  const role = String(req.user?.role || '').trim();
+  if (role !== 'admin') return res.status(403).json({ error: 'admin_only' });
+  try {
+    const state0 = (await getSharedState()) || {};
+    const qStore = String(req.query?.store || req.body?.store || '').trim();
+    const prevCount = Array.isArray(state0.inventoryForecastHistory) ? state0.inventoryForecastHistory.length : 0;
+    if (qStore) {
+      state0.inventoryForecastHistory = (state0.inventoryForecastHistory || []).filter((x) => String(x?.store || '').trim() !== qStore);
+      state0.inventoryForecastPredictions = (state0.inventoryForecastPredictions || []).filter((x) => String(x?.store || '').trim() !== qStore);
+      state0.inventoryForecastEvaluations = (state0.inventoryForecastEvaluations || []).filter((x) => String(x?.store || '').trim() !== qStore);
+    } else {
+      state0.inventoryForecastHistory = [];
+      state0.inventoryForecastPredictions = [];
+      state0.inventoryForecastEvaluations = [];
+    }
+    await saveSharedState(state0);
+    const afterCount = Array.isArray(state0.inventoryForecastHistory) ? state0.inventoryForecastHistory.length : 0;
+    return res.json({ ok: true, cleared: prevCount - afterCount, remaining: afterCount, store: qStore || '(all)' });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+app.post('/api/reports/inventory-forecast/history/batch', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const role = String(req.user?.role || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  if (!canAccessAnalyticsReports(role)) return res.status(403).json({ error: 'forbidden' });
+
+  const bizType = normalizeForecastBizType(req.body?.bizType);
+  const slot = normalizeForecastSlot(req.body?.slot);
+  if (!bizType) return res.status(400).json({ error: 'invalid_biz_type' });
+  if (!slot) return res.status(400).json({ error: 'invalid_slot' });
+  const rowsRaw = Array.isArray(req.body?.rows) ? req.body.rows : [];
+  if (!rowsRaw.length) return res.status(400).json({ error: 'missing_rows' });
+
+  try {
+    const state0 = (await getSharedState()) || {};
+    const myStore = pickMyStoreFromState(state0, username);
+    const storeBody = String(req.body?.store || '').trim();
+    const store = isForecastStoreScopedRole(role) ? myStore : storeBody;
+    if (!store) return res.status(400).json({ error: 'missing_store' });
+    const ret = upsertInventoryForecastHistoryInState(state0, { store, bizType, slot, rowsRaw, username });
+    await saveSharedState(ret.state);
+
+    return res.json({
+      ok: true,
+      store,
+      bizType,
+      slot,
+      inserted: ret.inserted,
+      updated: ret.updated,
+      skipped: ret.skipped,
+      accepted: ret.accepted,
+      evaluated: ret.evaluated
+    });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+app.post('/api/reports/inventory-forecast/history/upload-file', authRequired, upload.single('file'), async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const role = String(req.user?.role || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  if (!canAccessAnalyticsReports(role)) return res.status(403).json({ error: 'forbidden' });
+
+  try {
+    const state0 = (await getSharedState()) || {};
+    const myStore = pickMyStoreFromState(state0, username);
+    const qStore = String(req.body?.store || '').trim();
+    const store = isForecastStoreScopedRole(role) ? myStore : qStore;
+    if (!store) return res.status(400).json({ error: 'missing_store' });
+
+    const file = req.file || null;
+    if (!file?.path) return res.status(400).json({ error: 'missing_file' });
+    const ext = String(path.extname(String(file.originalname || file.path || '')).toLowerCase()).trim();
+    const mime = String(file.mimetype || '').toLowerCase();
+    const selectedBizType = normalizeForecastBizType(req.body?.bizType) || '';
+    if (!selectedBizType) return res.status(400).json({ error: 'invalid_biz_type', message: '请选择业务类型（外卖/堂食）后再上传。' });
+    // Strict mode: do not inject selected bizType as parser fallback, otherwise we cannot detect wrong-file uploads.
+    const fallbackBizType = '';
+    let parsedRows = [];
+    let parseMode = '';
+    const parseErrors = [];
+    let __debugMatrixSample = [];
+    // Save a copy for debugging
+    try { fs.copyFileSync(file.path, path.join(uploadsDir, '__last_inventory_upload' + ext)); } catch (e) {}
+    const tryParseExcel = () => {
+      const wb = XLSX.readFile(file.path, { raw: false });
+      const sheetNames = Array.isArray(wb.SheetNames) ? wb.SheetNames : [];
+      if (!sheetNames.length) throw new Error('empty_sheets');
+      for (let si = 0; si < sheetNames.length; si += 1) {
+        const sn = String(sheetNames[si] || '').trim();
+        if (!sn) continue;
+        const ws = wb.Sheets[sn];
+        if (!ws) continue;
+        const matrix = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' });
+        if (!__debugMatrixSample.length && matrix.length) {
+          __debugMatrixSample = matrix.slice(0, 12).map(r => Array.isArray(r) ? r.map(c => String(c ?? '').slice(0, 40)) : []);
+          console.log('[inventory-upload] Excel matrix sample (first 12 rows):', JSON.stringify(__debugMatrixSample));
+        }
+        const out = parseInventoryForecastRowsFromTableMatrix(matrix, fallbackBizType);
+        if (out.length) return out;
+      }
+      return [];
+    };
+    const tryParseCsv = () => {
+      const rawText = fs.readFileSync(file.path, 'utf8');
+      const matrix = String(rawText || '')
+        .replace(/^\uFEFF/, '')
+        .split(/\r?\n/)
+        .map((line) => String(line || '').trim())
+        .filter(Boolean)
+        .map((line) => String(line).split(','));
+      return parseInventoryForecastRowsFromTableMatrix(matrix, fallbackBizType);
+    };
+
+    const extLooksExcel = ext === '.xlsx' || ext === '.xls';
+    const extLooksPdf = ext === '.pdf';
+    const mimeLooksExcel = mime.includes('spreadsheet') || mime.includes('excel') || mime.includes('sheet');
+    const mimeLooksPdf = mime.includes('application/pdf') || mime.includes('/pdf');
+    const unknownType = !ext;
+
+    if (extLooksExcel || mimeLooksExcel || unknownType) {
+      parseMode = parseMode ? `${parseMode}|excel_attempt` : 'excel_attempt';
+      try {
+        parsedRows = tryParseExcel();
+        if (parsedRows.length) parseMode = 'excel';
+      } catch (e) {
+        parseErrors.push(`excel:${String(e?.message || e)}`);
+      }
+    }
+    if (!parsedRows.length) {
+      if (extLooksPdf || mimeLooksPdf) {
+        parseMode = parseMode ? `${parseMode}|pdf_attempt` : 'pdf_attempt';
+        try {
+          console.log('[inventory-upload] Trying pdftotext path for:', file.path);
+          parsedRows = parseInventoryForecastRowsFromPdfPath(file.path, fallbackBizType);
+          console.log('[inventory-upload] pdftotext result rows:', parsedRows.length);
+          if (!parsedRows.length) {
+            console.log('[inventory-upload] Trying built-in PDF buffer parser');
+            const pdfBuffer = fs.readFileSync(file.path);
+            parsedRows = parseInventoryForecastRowsFromPdfBuffer(pdfBuffer, fallbackBizType);
+            console.log('[inventory-upload] buffer parser result rows:', parsedRows.length);
+          }
+          if (parsedRows.length) parseMode = 'pdf';
+        } catch (e) {
+          console.log('[inventory-upload] PDF parse error:', String(e?.message || e));
+          parseErrors.push(`pdf:${String(e?.message || e)}`);
+        }
+      }
+    }
+    if (!parsedRows.length) {
+      parseMode = parseMode ? `${parseMode}|csv_attempt` : 'csv_attempt';
+      try {
+        parsedRows = tryParseCsv();
+        if (parsedRows.length) parseMode = 'csv';
+      } catch (e) {
+        parseErrors.push(`csv:${String(e?.message || e)}`);
+      }
+    }
+    if (!parsedRows.length && !(extLooksExcel || mimeLooksExcel || unknownType)) {
+      // For explicit non-excel extensions, still give Excel parser one last chance.
+      parseMode = parseMode ? `${parseMode}|excel_fallback_attempt` : 'excel_fallback_attempt';
+      try {
+        parsedRows = tryParseExcel();
+        if (parsedRows.length) parseMode = 'excel_fallback';
+      } catch (e) {
+        parseErrors.push(`excel_fallback:${String(e?.message || e)}`);
+      }
+    }
+    if (!parsedRows.length) {
+      const debugMsg = `文件:${String(file.originalname || 'unknown')} ext:${ext || 'none'} mime:${mime || 'none'} 模式:${parseMode || 'none'}${parseErrors.length ? ` 错误:${String(parseErrors[0] || '').slice(0, 80)}` : ''}`;
+      return res.status(400).json({
+        error: 'invalid_rows',
+        message: `未识别到有效明细，请确认模板包含【菜品名称、销售数量】以及【餐/时段名称 或 下单时间/结账时间】并有有效数据行；${debugMsg}`,
+        hint: {
+          slotRule: '10-14午市,14-17下午茶,17-22晚市（可由下单时间/结账时间自动推导）',
+          requiredHeaders: ['菜品名称', '销售数量'],
+          optionalHeaders: ['销售金额', '实际收入', '优惠金额', '销售类型', '营业日期', '下单时间', '结账时间', '天气']
+        },
+        debug: {
+          originalName: String(file.originalname || ''),
+          ext,
+          mime,
+          size: Number(file.size || 0),
+          parseMode: parseMode || 'none',
+          parseErrors: parseErrors.slice(0, 3),
+          matrixSample: __debugMatrixSample.slice(0, 8)
+        }
+      });
+    }
+
+    // Always use user-selected bizType — user controls store & bizType, system only validates field structure
+    console.log(`[inventory-upload] Applying user-selected bizType: ${selectedBizType} to all ${parsedRows.length} rows`);
+    parsedRows.forEach((row) => { row.bizType = selectedBizType; });
+
+    // Store validation: also trust user selection, just log if file has different store info
+    const fileStores = Array.from(new Set(parsedRows
+      .map((row) => normalizeForecastStoreName(row?.store))
+      .filter(Boolean)));
+    if (fileStores.length) {
+      const selectedStoreKey = normalizeForecastStoreKey(store);
+      const fileStoreKeys = Array.from(new Set(fileStores.map((x) => normalizeForecastStoreKey(x)).filter(Boolean)));
+      if (fileStoreKeys.length && fileStoreKeys[0] !== selectedStoreKey) {
+        console.log(`[inventory-upload] File store(s) [${fileStores.join(',')}] differ from selected [${store}], using user selection`);
+      }
+      // No longer reject — trust user selection for store too
+    }
+
+    const existingDateSet = new Set(
+      (Array.isArray(state0.inventoryForecastHistory) ? state0.inventoryForecastHistory : [])
+        .filter((x) => String(x?.store || '').trim() === store)
+        .filter((x) => String(x?.bizType || '').trim() === selectedBizType)
+        .map((x) => String(x?.date || '').trim())
+        .filter(Boolean)
+    );
+    const uploadDateSet = new Set(parsedRows.map((x) => String(x?.date || '').trim()).filter(Boolean));
+    const duplicatedDates = Array.from(uploadDateSet).filter((d) => existingDateSet.has(d)).sort();
+    if (duplicatedDates.length) {
+      const label = selectedBizType === 'takeaway' ? '外卖' : '堂食';
+      return res.status(409).json({
+        error: 'date_already_exists',
+        message: `${label}历史中已存在以下营业日期，已阻止重复上传：${duplicatedDates.slice(0, 8).join('、')}${duplicatedDates.length > 8 ? ' 等' : ''}`,
+        duplicatedDates
+      });
+    }
+
+    const byGroup = new Map();
+    parsedRows.forEach((row) => {
+      const bizType = normalizeForecastBizType(row?.bizType);
+      const slot = normalizeForecastSlot(row?.slot);
+      if (!bizType || !slot) return;
+      const key = `${bizType}||${slot}`;
+      const list = byGroup.get(key) || [];
+      list.push({
+        date: row?.date,
+        weather: row?.weather,
+        isHoliday: row?.isHoliday,
+        expectedRevenue: row?.expectedRevenue,
+        actualRevenue: row?.actualRevenue || 0,
+        totalDiscount: row?.totalDiscount || 0,
+        productQuantities: row?.productQuantities
+      });
+      byGroup.set(key, list);
+    });
+    if (!byGroup.size) return res.status(400).json({ error: 'no_valid_group' });
+
+    const groupedBreakdown = Array.from(byGroup.entries()).map(([key, list]) => {
+      const [bizType, slot] = String(key || '').split('||');
+      return { bizType: bizType || '', slot: slot || '', rows: Array.isArray(list) ? list.length : 0 };
+    });
+
+    let nextState = state0;
+    let inserted = 0;
+    let updated = 0;
+    let skipped = 0;
+    let accepted = 0;
+    let evaluated = 0;
+    for (const [key, list] of byGroup.entries()) {
+      const [bizType, slot] = String(key || '').split('||');
+      const ret = upsertInventoryForecastHistoryInState(nextState, { store, bizType, slot, rowsRaw: list, username });
+      nextState = ret.state;
+      inserted += Number(ret.inserted || 0);
+      updated += Number(ret.updated || 0);
+      skipped += Number(ret.skipped || 0);
+      accepted += Number(ret.accepted || 0);
+      evaluated += Number(ret.evaluated || 0);
+    }
+    await saveSharedState(nextState);
+    return res.json({
+      ok: true,
+      store,
+      parsedRows: parsedRows.length,
+      grouped: byGroup.size,
+      groupedBreakdown,
+      inserted,
+      updated,
+      skipped,
+      accepted,
+      evaluated
+    });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  } finally {
+    try {
+      const p = String(req.file?.path || '').trim();
+      if (p) fs.unlinkSync(p);
+    } catch (e) {}
+  }
+});
+
+app.post('/api/reports/inventory-forecast/history/upload-image', authRequired, upload.single('file'), async (req, res) => {
+  return res.status(410).json({
+    error: 'image_upload_disabled',
+    message: '图片上传功能已下线，请使用 Excel 或 PDF 上传历史数据。'
+  });
+});
+
+// ─── Core Products Management ───
+app.get('/api/reports/inventory-forecast/core-products', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const role = String(req.user?.role || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  if (!canAccessAnalyticsReports(role)) return res.status(403).json({ error: 'forbidden' });
+
+  try {
+    const state0 = (await getSharedState()) || {};
+    const myStore = pickMyStoreFromState(state0, username);
+    const qStore = String(req.query?.store || '').trim();
+    const store = isForecastStoreScopedRole(role) ? myStore : qStore;
+    if (!store) return res.status(400).json({ error: 'missing_store' });
+
+    const all = Array.isArray(state0.forecastCoreProducts) ? state0.forecastCoreProducts : [];
+    const items = all.filter(x => String(x?.store || '').trim() === store);
+    return res.json({ store, items });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+app.post('/api/reports/inventory-forecast/core-products', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const role = String(req.user?.role || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  if (!canAccessAnalyticsReports(role)) return res.status(403).json({ error: 'forbidden' });
+
+  const product = String(req.body?.product || '').trim();
+  const targetQty = Number(req.body?.targetQty || 0);
+  if (!product) return res.status(400).json({ error: 'missing_product' });
+  if (!Number.isFinite(targetQty) || targetQty <= 0) return res.status(400).json({ error: 'invalid_target_qty' });
+
+  try {
+    const state0 = (await getSharedState()) || {};
+    const myStore = pickMyStoreFromState(state0, username);
+    const qStore = String(req.body?.store || '').trim();
+    const store = isForecastStoreScopedRole(role) ? myStore : qStore;
+    if (!store) return res.status(400).json({ error: 'missing_store' });
+
+    const all = Array.isArray(state0.forecastCoreProducts) ? state0.forecastCoreProducts.slice() : [];
+    const key = `${store}||${product}`;
+    const keyOf = (x) => `${String(x?.store || '').trim()}||${String(x?.product || '').trim()}`;
+    const idx = all.findIndex(x => keyOf(x) === key);
+    const now = hrmsNowISO();
+    const item = {
+      id: idx >= 0 ? (all[idx]?.id || randomUUID()) : randomUUID(),
+      store,
+      product,
+      targetQty: Number(targetQty.toFixed(1)),
+      createdAt: idx >= 0 ? (all[idx]?.createdAt || now) : now,
+      createdBy: idx >= 0 ? (all[idx]?.createdBy || username) : username,
+      updatedAt: now,
+      updatedBy: username
+    };
+    if (idx >= 0) all.splice(idx, 1, item);
+    else all.unshift(item);
+
+    await saveSharedState({ ...state0, forecastCoreProducts: all.slice(0, 2000) });
+    return res.json({ ok: true, item });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+app.delete('/api/reports/inventory-forecast/core-products/:id', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const role = String(req.user?.role || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  if (!canAccessAnalyticsReports(role)) return res.status(403).json({ error: 'forbidden' });
+
+  const id = String(req.params?.id || '').trim();
+  if (!id) return res.status(400).json({ error: 'missing_id' });
+
+  try {
+    const state0 = (await getSharedState()) || {};
+    const all = Array.isArray(state0.forecastCoreProducts) ? state0.forecastCoreProducts.slice() : [];
+    const idx = all.findIndex(x => String(x?.id || '').trim() === id);
+    if (idx < 0) return res.status(404).json({ error: 'not_found' });
+    all.splice(idx, 1);
+    await saveSharedState({ ...state0, forecastCoreProducts: all });
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+// ─── Product Alias Rules (admin only) ───
+app.get('/api/reports/inventory-forecast/product-aliases', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const role = String(req.user?.role || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  if (!canManageGrossProfitProfiles(role)) return res.status(403).json({ error: 'forbidden', message: '仅管理员可查看别名规则' });
+  try {
+    const state0 = (await getSharedState()) || {};
+    const scope = resolveForecastScope(state0, username, role, req.query?.store, req.query?.brandId);
+    if (!scope.brandId) return res.status(400).json({ error: 'missing_brand' });
+    let items = Array.isArray(state0.forecastProductAliasRules) ? state0.forecastProductAliasRules.slice() : [];
+    items = items.filter((x) => {
+      const rid = normalizeBrandId(x?.brandId || resolveStoreBrandContext(state0, String(x?.store || '').trim()).brandId);
+      return rid === scope.brandId;
+    });
+    items.sort((a, b) => String(a?.canonical || '').localeCompare(String(b?.canonical || ''), 'zh-Hans-CN'));
+    return res.json({ brandId: scope.brandId, brandName: scope.brandName, items });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+app.post('/api/reports/inventory-forecast/product-aliases', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const role = String(req.user?.role || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  if (!canManageGrossProfitProfiles(role)) return res.status(403).json({ error: 'forbidden', message: '仅管理员可配置别名规则' });
+  const canonical = String(req.body?.canonical || '').trim();
+  const aliases = Array.isArray(req.body?.aliases) ? req.body.aliases : [];
+  if (!canonical) return res.status(400).json({ error: 'missing_canonical' });
+  try {
+    const state0 = (await getSharedState()) || {};
+    const scope = resolveForecastScope(state0, username, role, req.body?.store, req.body?.brandId);
+    if (!scope.brandId) return res.status(400).json({ error: 'missing_brand' });
+
+    const now = hrmsNowISO();
+    const all = Array.isArray(state0.forecastProductAliasRules) ? state0.forecastProductAliasRules.slice() : [];
+    const normalizedTokens = [canonical, ...aliases]
+      .map((x) => String(x || '').trim())
+      .filter(Boolean)
+      .map((x) => ({ raw: x, norm: normalizeProductName(x) }))
+      .filter((x) => x.norm);
+    if (!normalizedTokens.length) return res.status(400).json({ error: 'invalid_aliases' });
+
+    const storeItems = all.filter((x) => {
+      const rid = normalizeBrandId(x?.brandId || resolveStoreBrandContext(state0, String(x?.store || '').trim()).brandId);
+      return rid === scope.brandId;
+    });
+    const used = new Map();
+    storeItems.forEach((it) => {
+      const names = [String(it?.canonical || '').trim(), ...(Array.isArray(it?.aliases) ? it.aliases : [])];
+      names.forEach((name) => {
+        const norm = normalizeProductName(name);
+        if (!norm) return;
+        used.set(norm, String(it?.id || ''));
+      });
+    });
+    const conflict = normalizedTokens.find((x) => used.has(x.norm));
+    if (conflict) return res.status(400).json({ error: 'duplicate_alias', message: `名称「${conflict.raw}」已被其他规则使用` });
+
+    const item = {
+      id: randomUUID(),
+      brandId: scope.brandId,
+      brandName: scope.brandName,
+      store: scope.storeScope[0] || scope.store || '',
+      canonical,
+      aliases: Array.from(new Set(aliases.map((x) => String(x || '').trim()).filter(Boolean))),
+      createdAt: now,
+      createdBy: username,
+      updatedAt: now,
+      updatedBy: username
+    };
+    all.unshift(item);
+    await saveSharedState({ ...state0, forecastProductAliasRules: all.slice(0, 4000) });
+    return res.json({ ok: true, item });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+app.put('/api/reports/inventory-forecast/product-aliases/:id', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const role = String(req.user?.role || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  if (!canManageGrossProfitProfiles(role)) return res.status(403).json({ error: 'forbidden', message: '仅管理员可修改别名规则' });
+  const id = String(req.params?.id || '').trim();
+  const canonical = String(req.body?.canonical || '').trim();
+  const aliases = Array.isArray(req.body?.aliases) ? req.body.aliases : [];
+  if (!id) return res.status(400).json({ error: 'missing_id' });
+  if (!canonical) return res.status(400).json({ error: 'missing_canonical' });
+  try {
+    const state0 = (await getSharedState()) || {};
+    const all = Array.isArray(state0.forecastProductAliasRules) ? state0.forecastProductAliasRules.slice() : [];
+    const idx = all.findIndex((x) => String(x?.id || '').trim() === id);
+    if (idx < 0) return res.status(404).json({ error: 'not_found' });
+
+    const existing = all[idx];
+    const store = String(existing?.store || '').trim();
+    const brandId = normalizeBrandId(existing?.brandId || resolveStoreBrandContext(state0, store).brandId);
+    const brandName = String(existing?.brandName || resolveStoreBrandContext(state0, store).brandName || '').trim();
+    const now = hrmsNowISO();
+    const normalizedTokens = [canonical, ...aliases]
+      .map((x) => String(x || '').trim())
+      .filter(Boolean)
+      .map((x) => ({ raw: x, norm: normalizeProductName(x) }))
+      .filter((x) => x.norm);
+    if (!normalizedTokens.length) return res.status(400).json({ error: 'invalid_aliases' });
+
+    const used = new Map();
+    all
+      .filter((x) => String(x?.id || '').trim() !== id)
+      .filter((x) => normalizeBrandId(x?.brandId || resolveStoreBrandContext(state0, String(x?.store || '').trim()).brandId) === brandId)
+      .forEach((it) => {
+        const names = [String(it?.canonical || '').trim(), ...(Array.isArray(it?.aliases) ? it.aliases : [])];
+        names.forEach((name) => {
+          const norm = normalizeProductName(name);
+          if (!norm) return;
+          used.set(norm, String(it?.id || ''));
+        });
+      });
+    const conflict = normalizedTokens.find((x) => used.has(x.norm));
+    if (conflict) return res.status(400).json({ error: 'duplicate_alias', message: `名称「${conflict.raw}」已被其他规则使用` });
+
+    all[idx] = {
+      ...existing,
+      brandId,
+      brandName,
+      canonical,
+      aliases: Array.from(new Set(aliases.map((x) => String(x || '').trim()).filter(Boolean))),
+      updatedAt: now,
+      updatedBy: username
+    };
+    await saveSharedState({ ...state0, forecastProductAliasRules: all });
+    return res.json({ ok: true, item: all[idx] });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+app.delete('/api/reports/inventory-forecast/product-aliases/:id', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const role = String(req.user?.role || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  if (!canManageGrossProfitProfiles(role)) return res.status(403).json({ error: 'forbidden', message: '仅管理员可删除别名规则' });
+  const id = String(req.params?.id || '').trim();
+  if (!id) return res.status(400).json({ error: 'missing_id' });
+  try {
+    const state0 = (await getSharedState()) || {};
+    const all = Array.isArray(state0.forecastProductAliasRules) ? state0.forecastProductAliasRules.slice() : [];
+    const idx = all.findIndex((x) => String(x?.id || '').trim() === id);
+    if (idx < 0) return res.status(404).json({ error: 'not_found' });
+    all.splice(idx, 1);
+    await saveSharedState({ ...state0, forecastProductAliasRules: all });
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+// ─── Core Product Sales Query (with product name normalization) ───
+app.get('/api/reports/inventory-forecast/core-products/sales', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const role = String(req.user?.role || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  if (!canAccessAnalyticsReports(role)) return res.status(403).json({ error: 'forbidden' });
+
+  const startDate = safeDateOnly(req.query?.startDate || req.query?.start);
+  const endDate = safeDateOnly(req.query?.endDate || req.query?.end);
+  if (!startDate || !endDate) return res.status(400).json({ error: 'missing_date_range' });
+
+  try {
+    const state0 = (await getSharedState()) || {};
+    const myStore = pickMyStoreFromState(state0, username);
+    const qStore = String(req.query?.store || '').trim();
+    const store = isForecastStoreScopedRole(role) ? myStore : qStore;
+    if (!store) return res.status(400).json({ error: 'missing_store' });
+
+    // Get core products for this store
+    const coreProducts = (Array.isArray(state0.forecastCoreProducts) ? state0.forecastCoreProducts : [])
+      .filter(x => String(x?.store || '').trim() === store);
+    if (!coreProducts.length) return res.json({ store, startDate, endDate, items: [], message: '暂无核心产品配置' });
+
+    const aliasLookup = buildForecastProductAliasLookup(state0, store);
+
+    // Build normalized name → core product mapping
+    const coreMap = new Map();
+    coreProducts.forEach(cp => {
+      const resolved = resolveForecastProductName(cp.product, aliasLookup);
+      if (resolved.key) coreMap.set(resolved.key, cp);
+    });
+
+    // Aggregate actual sales from history within date range
+    const historyRows = (Array.isArray(state0.inventoryForecastHistory) ? state0.inventoryForecastHistory : [])
+      .filter(x => String(x?.store || '').trim() === store)
+      .filter(x => inDateRange(String(x?.date || '').trim(), startDate, endDate));
+
+    // Count unique dates in range for daily target calculation
+    const uniqueDates = new Set();
+    historyRows.forEach(x => { const d = safeDateOnly(x?.date); if (d) uniqueDates.add(d); });
+    const dayCount = uniqueDates.size || 1;
+
+    // Aggregate quantities by normalized product name
+    const salesAgg = new Map();
+    historyRows.forEach(row => {
+      const products = row?.productQuantities && typeof row.productQuantities === 'object' ? row.productQuantities : {};
+      Object.entries(products).forEach(([product, qtyRaw]) => {
+        const qty = Number(qtyRaw || 0);
+        if (qty <= 0) return;
+        const resolved = resolveForecastProductName(product, aliasLookup);
+        if (!resolved.key) return;
+        // Only count if it matches a core product
+        if (!coreMap.has(resolved.key)) return;
+        salesAgg.set(resolved.key, (salesAgg.get(resolved.key) || 0) + qty);
+      });
+    });
+
+    // Build result items
+    const items = coreProducts.map(cp => {
+      const resolved = resolveForecastProductName(cp.product, aliasLookup);
+      const actualQty = salesAgg.get(resolved.key) || 0;
+      const dailyTarget = Number(cp.targetQty || 0);
+      const totalTarget = dailyTarget * dayCount;
+      const achievementRate = totalTarget > 0 ? Number((actualQty / totalTarget).toFixed(4)) : 0;
+      return {
+        id: cp.id,
+        product: cp.product,
+        normalizedName: resolved.key,
+        dailyTarget,
+        totalTarget: Number(totalTarget.toFixed(1)),
+        actualQty: Number(actualQty.toFixed(1)),
+        achievementRate,
+        achievementPct: Number((achievementRate * 100).toFixed(1)),
+        dayCount
+      };
+    });
+
+    items.sort((a, b) => b.achievementRate - a.achievementRate);
+    return res.json({ store, startDate, endDate, dayCount, items });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+// ─── Sales Analytics ───
+app.get('/api/reports/inventory-forecast/analytics', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const role = String(req.user?.role || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  if (!canAccessAnalyticsReports(role)) return res.status(403).json({ error: 'forbidden' });
+
+  try {
+    const state0 = (await getSharedState()) || {};
+    const myStore = pickMyStoreFromState(state0, username);
+    const qStore = String(req.query?.store || '').trim();
+    const store = isForecastStoreScopedRole(role) ? myStore : qStore;
+    if (!store) return res.status(400).json({ error: 'missing_store' });
+
+    const bizType = normalizeForecastBizType(req.query?.bizType);
+    const startDate = safeDateOnly(req.query?.startDate);
+    const endDate = safeDateOnly(req.query?.endDate);
+
+    const all = Array.isArray(state0.inventoryForecastHistory) ? state0.inventoryForecastHistory : [];
+    let filtered = all.filter(x => String(x?.store || '').trim() === store);
+    if (bizType) filtered = filtered.filter(x => String(x?.bizType || '').trim() === bizType);
+    if (startDate) filtered = filtered.filter(x => String(x?.date || '').trim() >= startDate);
+    if (endDate) filtered = filtered.filter(x => String(x?.date || '').trim() <= endDate);
+
+    const aliasLookup = buildForecastProductAliasLookup(state0, store);
+    const productStats = new Map();
+    filtered.forEach(row => {
+      const pqs = row?.productQuantities || {};
+      const rev = Number(row?.expectedRevenue || 0);
+      const totalQtyOfRow = Object.entries(pqs)
+        .filter(([name]) => !isExcludedForecastProduct(name))
+        .reduce((a, [, q]) => a + Number(q || 0), 0);
+      Object.entries(pqs).forEach(([product, qty]) => {
+        if (isExcludedForecastProduct(product)) return;
+        const resolved = resolveForecastProductName(product, aliasLookup);
+        if (!resolved.key) return;
+        if (!productStats.has(resolved.key)) {
+          productStats.set(resolved.key, { product: resolved.display, totalQty: 0, totalRevenue: 0, occurrences: 0 });
+        }
+        const st = productStats.get(resolved.key);
+        st.totalQty += Number(qty || 0);
+        st.totalRevenue += rev > 0 && totalQtyOfRow > 0 ? (Number(qty || 0) / totalQtyOfRow) * rev : 0;
+        st.occurrences += 1;
+      });
+    });
+
+    const stats = Array.from(productStats.values()).map(s => ({
+      product: s.product,
+      totalQty: Number(s.totalQty.toFixed(1)),
+      totalRevenue: Number(s.totalRevenue.toFixed(2)),
+      avgQty: Number((s.totalQty / s.occurrences).toFixed(1)),
+      occurrences: s.occurrences
+    }));
+
+    const top20ByQty = stats.slice().sort((a, b) => b.totalQty - a.totalQty).slice(0, 20);
+    const top20ByRevenue = stats.slice().sort((a, b) => b.totalRevenue - a.totalRevenue).slice(0, 20);
+    const bottom10ByRevenue = stats.filter(s => s.totalRevenue > 0).sort((a, b) => a.totalRevenue - b.totalRevenue).slice(0, 10);
+    const coreTargets = (Array.isArray(state0.forecastCoreProducts) ? state0.forecastCoreProducts : [])
+      .filter((x) => String(x?.store || '').trim() === store)
+      .filter((x) => !isExcludedForecastProduct(x?.product));
+    const statByProduct = new Map(stats.map((x) => [normalizeProductName(x.product), x]));
+    const coreTargetStats = coreTargets.map((t) => {
+      const product = String(t?.product || '').trim();
+      const targetQty = Number(t?.targetQty || 0);
+      const actualQty = Number(statByProduct.get(normalizeProductName(product))?.totalQty || 0);
+      const completionRate = targetQty > 0 ? Math.max(0, Number((actualQty / targetQty).toFixed(4))) : 0;
+      return {
+        product,
+        targetQty: Number(targetQty.toFixed(1)),
+        actualQty: Number(actualQty.toFixed(1)),
+        gapQty: Number((targetQty - actualQty).toFixed(1)),
+        completionRate: Number((completionRate * 100).toFixed(1))
+      };
+    }).sort((a, b) => b.completionRate - a.completionRate);
+
+    return res.json({
+      store,
+      bizType: bizType || 'all',
+      startDate: startDate || '',
+      endDate: endDate || '',
+      sampleCount: filtered.length,
+      top20ByQty,
+      top20ByRevenue,
+      bottom10ByRevenue,
+      coreTargetStats
+    });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+app.post('/api/reports/inventory-forecast/revenue-estimate', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const role = String(req.user?.role || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  if (!canAccessAnalyticsReports(role)) return res.status(403).json({ error: 'forbidden' });
+
+  const date = safeDateOnly(req.body?.date);
+  const weather = normalizeForecastWeather(req.body?.weather);
+  const isHoliday = !!(req.body?.isHoliday === true || req.body?.isHoliday === 1 || req.body?.isHoliday === '1' || String(req.body?.isHoliday || '').trim().toLowerCase() === 'true' || String(req.body?.isHoliday || '').trim() === '是');
+  if (!date) return res.status(400).json({ error: 'missing_date' });
+
+  try {
+    const state0 = (await getSharedState()) || {};
+    const myStore = pickMyStoreFromState(state0, username);
+    const qStore = String(req.body?.store || '').trim();
+    const store = isForecastStoreScopedRole(role) ? myStore : qStore;
+    if (!store) return res.status(400).json({ error: 'missing_store' });
+
+    const all = Array.isArray(state0.inventoryForecastHistory) ? state0.inventoryForecastHistory : [];
+    const historyRows = all
+      .filter((x) => String(x?.store || '').trim() === store)
+      .filter((x) => {
+        const d = String(x?.date || '').trim();
+        return !d || d <= date;
+      })
+      .slice(0, 1200);
+
+    const target = { date, weather, isHoliday };
+    const estimate = estimateRevenueByHistory(historyRows, target);
+    return res.json({ store, target, estimate });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+app.get('/api/reports/inventory-forecast/gross-profit-profiles', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const role = String(req.user?.role || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  if (!canAccessAnalyticsReports(role)) return res.status(403).json({ error: 'forbidden' });
+
+  const qBizType = normalizeForecastBizType(req.query?.bizType);
+  try {
+    const state0 = (await getSharedState()) || {};
+    const scope = resolveForecastScope(state0, username, role, req.query?.store, req.query?.brandId);
+    if (!scope.brandId || !scope.storeScope.length) return res.status(400).json({ error: 'missing_brand_or_store_scope' });
+
+    let items = Array.isArray(state0.forecastGrossProfitProfiles) ? state0.forecastGrossProfitProfiles.slice() : [];
+    items = items.filter((x) => {
+      const rid = normalizeBrandId(x?.brandId || resolveStoreBrandContext(state0, String(x?.store || '').trim()).brandId);
+      return rid === scope.brandId;
+    });
+    if (qBizType) items = items.filter((x) => String(x?.bizType || '').trim() === qBizType || !String(x?.bizType || '').trim());
+    items.sort((a, b) => String(a?.product || '').localeCompare(String(b?.product || ''), 'zh-Hans-CN'));
+
+    // Enrich with avg price from history for margin rate computation
+    const historyRows = Array.isArray(state0.inventoryForecastHistory) ? state0.inventoryForecastHistory : [];
+    const aliasLookup = buildForecastProductAliasLookup(state0, { store: scope.store, brandId: scope.brandId });
+    const priceMap = computeAvgPricePerProduct(historyRows, scope.storeScope, aliasLookup);
+    const enriched = items.map((x) => {
+      const avgPrice = priceMap.get(resolveForecastProductName(String(x?.product || '').trim(), aliasLookup).key) || 0;
+      const cost = Number(x?.costPerUnit || 0);
+      const gpu = Number.isFinite(x?.grossPerUnit) ? x.grossPerUnit : (avgPrice > cost && cost > 0 ? avgPrice - cost : 0);
+      const marginRate = avgPrice > 0 && cost > 0 ? Number((1 - cost / avgPrice).toFixed(4)) : (gpu > 0 && avgPrice > 0 ? Number((gpu / avgPrice).toFixed(4)) : 0);
+      return { ...x, avgPrice: Number(avgPrice.toFixed(2)), marginRate };
+    });
+    return res.json({ store: scope.store || '', brandId: scope.brandId, brandName: scope.brandName, bizType: qBizType || '', items: enriched });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+app.post('/api/reports/inventory-forecast/gross-profit-profiles', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const role = String(req.user?.role || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  if (!canManageGrossProfitProfiles(role)) return res.status(403).json({ error: 'forbidden', message: '仅管理员可配置产品毛利' });
+
+  // Support single item add: {store, product, costPerUnit} or batch: {store, items:[...]}
+  const singleProduct = String(req.body?.product || '').trim();
+  const itemsRaw = singleProduct
+    ? [{ product: singleProduct, costPerUnit: req.body?.costPerUnit, grossPerUnit: req.body?.grossPerUnit, bizType: req.body?.bizType }]
+    : (Array.isArray(req.body?.items) ? req.body.items : []);
+  const replace = !!req.body?.replace;
+  if (!itemsRaw.length) return res.status(400).json({ error: 'missing_items' });
+  try {
+    const state0 = (await getSharedState()) || {};
+    const scope = resolveForecastScope(state0, username, role, req.body?.store, req.body?.brandId);
+    if (!scope.brandId || !scope.storeScope.length) return res.status(400).json({ error: 'missing_brand_or_store_scope' });
+
+    const now = hrmsNowISO();
+    const normalizedItems = itemsRaw.map(normalizeGrossProfitProfileItem).filter(Boolean);
+    if (!normalizedItems.length) return res.status(400).json({ error: 'invalid_items' });
+
+    // Compute avg prices for cost→gross conversion
+    const historyRows = Array.isArray(state0.inventoryForecastHistory) ? state0.inventoryForecastHistory : [];
+    const aliasLookup = buildForecastProductAliasLookup(state0, { store: scope.store, brandId: scope.brandId });
+    const priceMap = computeAvgPricePerProduct(historyRows, scope.storeScope, aliasLookup);
+
+    let all = Array.isArray(state0.forecastGrossProfitProfiles) ? state0.forecastGrossProfitProfiles.slice() : [];
+    if (replace) {
+      all = all.filter((x) => {
+        const rid = normalizeBrandId(x?.brandId || resolveStoreBrandContext(state0, String(x?.store || '').trim()).brandId);
+        return rid !== scope.brandId;
+      });
+    }
+
+    // Check product uniqueness within this store (product name must be unique)
+    const existingProducts = new Map();
+    all
+      .filter((x) => normalizeBrandId(x?.brandId || resolveStoreBrandContext(state0, String(x?.store || '').trim()).brandId) === scope.brandId)
+      .forEach((x) => existingProducts.set(String(x?.product || '').trim(), x));
+
+    const keyOf = (x) => `${normalizeBrandId(x?.brandId || resolveStoreBrandContext(state0, String(x?.store || '').trim()).brandId)}||${String(x?.product || '').trim()}`;
+    const map = new Map(all.map((x) => [keyOf(x), x]));
+
+    normalizedItems.forEach((it) => {
+      const canonicalProduct = resolveForecastProductName(it.product, aliasLookup).display;
+      const key = `${scope.brandId}||${canonicalProduct}`;
+      const prev = map.get(key);
+      const avgPrice = priceMap.get(resolveForecastProductName(canonicalProduct, aliasLookup).key) || 0;
+      let gpu = it.grossPerUnit;
+      if ((!Number.isFinite(gpu) || gpu === undefined) && Number.isFinite(it.costPerUnit)) {
+        gpu = avgPrice > it.costPerUnit ? Number((avgPrice - it.costPerUnit).toFixed(4)) : 0;
+      }
+      map.set(key, {
+        ...(prev || {}),
+        id: prev?.id || randomUUID(),
+        store: prev?.store || scope.storeScope[0] || scope.store || '',
+        brandId: scope.brandId,
+        brandName: scope.brandName,
+        bizType: it.bizType || '',
+        product: canonicalProduct,
+        costPerUnit: Number.isFinite(it.costPerUnit) ? it.costPerUnit : (prev?.costPerUnit || undefined),
+        grossPerUnit: Number.isFinite(gpu) ? Number(gpu.toFixed(4)) : (prev?.grossPerUnit || 0),
+        createdAt: prev?.createdAt || now,
+        createdBy: prev?.createdBy || username,
+        updatedAt: now,
+        updatedBy: username
+      });
+    });
+
+    const nextItems = Array.from(map.values()).slice(0, 8000);
+    await saveSharedState({ ...state0, forecastGrossProfitProfiles: nextItems });
+    return res.json({ ok: true, brandId: scope.brandId, brandName: scope.brandName, count: normalizedItems.length, total: nextItems.filter((x) => normalizeBrandId(x?.brandId || resolveStoreBrandContext(state0, String(x?.store || '').trim()).brandId) === scope.brandId).length });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+app.put('/api/reports/inventory-forecast/gross-profit-profiles/:id', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const role = String(req.user?.role || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  if (!canManageGrossProfitProfiles(role)) return res.status(403).json({ error: 'forbidden', message: '仅管理员可修改产品毛利' });
+
+  const id = String(req.params?.id || '').trim();
+  if (!id) return res.status(400).json({ error: 'missing_id' });
+
+  try {
+    const state0 = (await getSharedState()) || {};
+    let all = Array.isArray(state0.forecastGrossProfitProfiles) ? state0.forecastGrossProfitProfiles.slice() : [];
+    const idx = all.findIndex((x) => String(x?.id || '').trim() === id);
+    if (idx < 0) return res.status(404).json({ error: 'not_found' });
+
+    const existing = all[idx];
+    const store = String(existing?.store || '').trim();
+    const brandId = normalizeBrandId(existing?.brandId || resolveStoreBrandContext(state0, store).brandId);
+    const brandName = String(existing?.brandName || resolveStoreBrandContext(state0, store).brandName || '').trim();
+    const storeScope = getStoreNamesByBrand(state0, brandId);
+    const now = hrmsNowISO();
+
+    // Updatable fields
+    const aliasLookup = buildForecastProductAliasLookup(state0, { store, brandId });
+    const newProductRaw = String(req.body?.product || '').trim() || existing.product;
+    const newProduct = resolveForecastProductName(newProductRaw, aliasLookup).display;
+    const newCost = req.body?.costPerUnit !== undefined ? safeNumber(req.body.costPerUnit) : existing.costPerUnit;
+    const newBizType = req.body?.bizType !== undefined ? (normalizeForecastBizType(req.body.bizType) || '') : (existing.bizType || '');
+
+    // Check uniqueness if product name changed
+    if (newProduct !== existing.product) {
+      const dup = all.find((x) => normalizeBrandId(x?.brandId || resolveStoreBrandContext(state0, String(x?.store || '').trim()).brandId) === brandId && String(x?.product || '').trim() === newProduct && String(x?.id || '') !== id);
+      if (dup) return res.status(400).json({ error: 'duplicate_product', message: `产品「${newProduct}」已存在` });
+    }
+
+    // Compute grossPerUnit from cost + avg price
+    const historyRows = Array.isArray(state0.inventoryForecastHistory) ? state0.inventoryForecastHistory : [];
+    const priceMap = computeAvgPricePerProduct(historyRows, storeScope.length ? storeScope : [store], aliasLookup);
+    const avgPrice = priceMap.get(resolveForecastProductName(newProduct, aliasLookup).key) || 0;
+    let gpu = existing.grossPerUnit || 0;
+    if (Number.isFinite(newCost) && newCost >= 0) {
+      gpu = avgPrice > newCost ? Number((avgPrice - newCost).toFixed(4)) : 0;
+    }
+
+    all[idx] = {
+      ...existing,
+      brandId,
+      brandName,
+      product: newProduct,
+      bizType: newBizType,
+      costPerUnit: Number.isFinite(newCost) ? newCost : existing.costPerUnit,
+      grossPerUnit: Number.isFinite(gpu) ? Number(gpu.toFixed(4)) : 0,
+      updatedAt: now,
+      updatedBy: username
+    };
+
+    await saveSharedState({ ...state0, forecastGrossProfitProfiles: all });
+    return res.json({ ok: true, item: all[idx] });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+app.delete('/api/reports/inventory-forecast/gross-profit-profiles/:id', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const role = String(req.user?.role || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  if (!canManageGrossProfitProfiles(role)) return res.status(403).json({ error: 'forbidden', message: '仅管理员可删除产品毛利' });
+
+  const id = String(req.params?.id || '').trim();
+  if (!id) return res.status(400).json({ error: 'missing_id' });
+
+  try {
+    const state0 = (await getSharedState()) || {};
+    let all = Array.isArray(state0.forecastGrossProfitProfiles) ? state0.forecastGrossProfitProfiles.slice() : [];
+    const before = all.length;
+    all = all.filter((x) => String(x?.id || '').trim() !== id);
+    if (all.length === before) return res.status(404).json({ error: 'not_found' });
+    await saveSharedState({ ...state0, forecastGrossProfitProfiles: all });
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+app.post('/api/reports/inventory-forecast/gross-margin-estimate', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const role = String(req.user?.role || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  if (!canAccessAnalyticsReports(role)) return res.status(403).json({ error: 'forbidden' });
+
+  const date = safeDateOnly(req.body?.date);
+  const startDate = safeDateOnly(req.body?.startDate || date);
+  const endDate = safeDateOnly(req.body?.endDate || date || req.body?.startDate);
+  const bizType = normalizeForecastBizType(req.body?.bizType);
+  if (!startDate || !endDate) return res.status(400).json({ error: 'missing_date_range' });
+
+  try {
+    const state0 = (await getSharedState()) || {};
+    const scope = resolveForecastScope(state0, username, role, req.body?.store, req.body?.brandId);
+    if (!scope.brandId || !scope.storeScope.length) return res.status(400).json({ error: 'missing_brand_or_store_scope' });
+
+    const historyRows = (Array.isArray(state0.inventoryForecastHistory) ? state0.inventoryForecastHistory : [])
+      .filter((x) => scope.storeScope.includes(String(x?.store || '').trim()))
+      .slice(0, 5000);
+    const profiles = (Array.isArray(state0.forecastGrossProfitProfiles) ? state0.forecastGrossProfitProfiles : [])
+      .filter((x) => normalizeBrandId(x?.brandId || resolveStoreBrandContext(state0, String(x?.store || '').trim()).brandId) === scope.brandId)
+      .slice(0, 5000);
+    const aliasLookup = buildForecastProductAliasLookup(state0, { store: scope.store, brandId: scope.brandId });
+
+    const estimate = estimateGrossMarginByHistory({
+      historyRows,
+      profiles,
+      startDate,
+      endDate,
+      bizType,
+      storeScope: scope.storeScope,
+      aliasLookup
+    });
+    return res.json({
+      store: scope.store || '',
+      brandId: scope.brandId,
+      brandName: scope.brandName,
+      bizType: bizType || '',
+      startDate,
+      endDate,
+      estimate
+    });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+app.get('/api/reports/inventory-forecast/accuracy', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const role = String(req.user?.role || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  if (!canAccessAnalyticsReports(role)) return res.status(403).json({ error: 'forbidden' });
+
+  const qStore = String(req.query?.store || '').trim();
+  const bizType = normalizeForecastBizType(req.query?.bizType);
+  const slot = normalizeForecastSlot(req.query?.slot);
+  const start = safeDateOnly(req.query?.start);
+  const end = safeDateOnly(req.query?.end);
+  const limit = Math.max(1, Math.min(1200, Number(req.query?.limit || 300) || 300));
+
+  try {
+    const state0 = (await getSharedState()) || {};
+    const myStore = pickMyStoreFromState(state0, username);
+    const store = isForecastStoreScopedRole(role) ? myStore : qStore;
+    if (!store) return res.status(400).json({ error: 'missing_store' });
+
+    let items = Array.isArray(state0.inventoryForecastEvaluations) ? state0.inventoryForecastEvaluations.slice() : [];
+    items = items.filter((x) => String(x?.store || '').trim() === store);
+    if (bizType) items = items.filter((x) => String(x?.bizType || '').trim() === bizType);
+    if (slot) items = items.filter((x) => String(x?.slot || '').trim() === slot);
+    if (start || end) {
+      items = items.filter((x) => inDateRange(String(x?.date || '').trim(), start, end));
+    }
+    items.sort((a, b) => String(b?.date || '').localeCompare(String(a?.date || '')) || String(b?.updatedAt || '').localeCompare(String(a?.updatedAt || '')));
+    items = items.slice(0, limit);
+    const summary = summarizeForecastAccuracyRows(items);
+    return res.json({ store, bizType: bizType || '', slot: slot || '', summary, items });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+app.post('/api/reports/inventory-forecast/predict', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const role = String(req.user?.role || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  if (!canAccessAnalyticsReports(role)) return res.status(403).json({ error: 'forbidden' });
+
+  const bizType = normalizeForecastBizType(req.body?.bizType);
+  const slot = normalizeForecastSlot(req.body?.slot);
+  const date = safeDateOnly(req.body?.date);
+  const weather = normalizeForecastWeather(req.body?.weather);
+  const isHoliday = !!(req.body?.isHoliday === true || req.body?.isHoliday === 1 || req.body?.isHoliday === '1' || String(req.body?.isHoliday || '').trim().toLowerCase() === 'true' || String(req.body?.isHoliday || '').trim() === '是');
+  const expectedRevenue = safeNumber(req.body?.expectedRevenue);
+  const topN = Math.max(5, Math.min(80, Number(req.body?.topN || 20) || 20));
+
+  if (!bizType) return res.status(400).json({ error: 'invalid_biz_type' });
+  if (!slot) return res.status(400).json({ error: 'invalid_slot' });
+  if (!date) return res.status(400).json({ error: 'missing_date' });
+  if (!Number.isFinite(expectedRevenue) || expectedRevenue < 0) return res.status(400).json({ error: 'invalid_expected_revenue' });
+
+  try {
+    const state0 = (await getSharedState()) || {};
+    const myStore = pickMyStoreFromState(state0, username);
+    const qStore = String(req.body?.store || '').trim();
+    const store = isForecastStoreScopedRole(role) ? myStore : qStore;
+    if (!store) return res.status(400).json({ error: 'missing_store' });
+
+    const all = Array.isArray(state0.inventoryForecastHistory) ? state0.inventoryForecastHistory : [];
+    const aliasLookup = buildForecastProductAliasLookup(state0, store);
+    const historyRowsRaw = all
+      .filter((x) => String(x?.store || '').trim() === store)
+      .filter((x) => String(x?.bizType || '').trim() === bizType)
+      .filter((x) => String(x?.slot || '').trim() === slot)
+      .filter((x) => {
+        const d = String(x?.date || '').trim();
+        return !d || d <= date;
+      })
+      .slice(0, 400);
+    const historyRows = canonicalizeForecastRows(historyRowsRaw, aliasLookup);
+
+    const target = {
+      store,
+      bizType,
+      slot,
+      date,
+      weather,
+      isHoliday,
+      expectedRevenue: Number(expectedRevenue.toFixed(2))
+    };
+
+    const evaluations = Array.isArray(state0.inventoryForecastEvaluations) ? state0.inventoryForecastEvaluations : [];
+    const evalRows = evaluations
+      .filter((x) => String(x?.store || '').trim() === store)
+      .filter((x) => String(x?.bizType || '').trim() === bizType)
+      .filter((x) => String(x?.slot || '').trim() === slot)
+      .slice(0, 600);
+    const calibration = buildForecastCalibrationFactors(evalRows, date);
+
+    const heuristic = buildForecastByHeuristic(historyRows, target, topN);
+    let source = 'heuristic';
+    let out = heuristic;
+
+    try {
+      const ai = await buildForecastByAI({ historyRows, target, topN, state0 });
+      if (ai && Array.isArray(ai.predictions) && ai.predictions.length) {
+        source = 'ai';
+        out = ai;
+      }
+    } catch (e) {
+      source = 'heuristic';
+    }
+
+    const calibratedPredictionsRaw = applyForecastCalibration((out?.predictions || []).slice(), calibration).slice(0, topN);
+    let calibratedPredictions = constrainPredictionsToHistory(calibratedPredictionsRaw, historyRows, topN);
+    if (!calibratedPredictions.length) {
+      // Safety net: if AI/calibration output drifts away from historical product universe,
+      // fall back to heuristic and constrain again.
+      const fallbackRaw = applyForecastCalibration((heuristic?.predictions || []).slice(), calibration).slice(0, topN);
+      calibratedPredictions = constrainPredictionsToHistory(fallbackRaw, historyRows, topN);
+    }
+    const coreTargets = (Array.isArray(state0.forecastCoreProducts) ? state0.forecastCoreProducts : [])
+      .filter((x) => String(x?.store || '').trim() === store)
+      .filter((x) => !isExcludedForecastProduct(x?.product));
+    const predMap = new Map(calibratedPredictions.map((x) => [String(x?.product || '').trim(), Number(x?.qty || 0)]));
+    const coreTargetUsage = coreTargets
+      .map((t) => {
+        const product = String(t?.product || '').trim();
+        const targetQty = Number(t?.targetQty || 0);
+        const predictedQty = Number(predMap.get(resolveForecastProductName(product, aliasLookup).display) || 0);
+        const coverageRate = targetQty > 0 ? Math.max(0, Number((predictedQty / targetQty).toFixed(4))) : 0;
+        return {
+          product,
+          targetQty: Number(targetQty.toFixed(1)),
+          predictedQty: Number(predictedQty.toFixed(1)),
+          gapQty: Number((targetQty - predictedQty).toFixed(1)),
+          coverageRate: Number((coverageRate * 100).toFixed(1))
+        };
+      })
+      .filter((x) => x.product)
+      .sort((a, b) => a.gapQty - b.gapQty);
+    const summaryRaw = String(out?.summary || '').trim();
+    const calibrationText = calibration.sampleCount > 0
+      ? `自校准系数${Number(calibration.globalFactor || 1).toFixed(2)}（样本${calibration.sampleCount}）`
+      : '暂无足够样本进行自校准。';
+    const summary = summaryRaw ? `${summaryRaw} ${calibrationText}` : calibrationText;
+
+    const now = hrmsNowISO();
+    const predictionList = Array.isArray(state0.inventoryForecastPredictions) ? state0.inventoryForecastPredictions.slice() : [];
+    const key = `${store}||${bizType}||${slot}||${date}`;
+    const keyOf = (x) => `${String(x?.store || '').trim()}||${String(x?.bizType || '').trim()}||${String(x?.slot || '').trim()}||${String(x?.date || '').trim()}`;
+    const idx = predictionList.findIndex((x) => keyOf(x) === key);
+    const prev = idx >= 0 ? (predictionList[idx] || {}) : null;
+    const predictionItem = {
+      ...(prev || {}),
+      id: prev?.id || randomUUID(),
+      store,
+      bizType,
+      slot,
+      date,
+      weather,
+      isHoliday,
+      expectedRevenue: Number(expectedRevenue.toFixed(2)),
+      source,
+      confidence: Number(out?.confidence || 0),
+      summary,
+      predictions: calibratedPredictions,
+      calibration,
+      historyCount: historyRows.length,
+      createdAt: prev?.createdAt || now,
+      createdBy: prev?.createdBy || username,
+      updatedAt: now,
+      updatedBy: username
+    };
+    if (idx >= 0) predictionList.splice(idx, 1, predictionItem);
+    else predictionList.unshift(predictionItem);
+
+    const actualOnDate = historyRows.find((x) => String(x?.date || '').trim() === date);
+    let immediateEval = null;
+    let nextEvaluations = Array.isArray(state0.inventoryForecastEvaluations) ? state0.inventoryForecastEvaluations.slice() : [];
+    if (actualOnDate) {
+      const metrics = calcForecastAccuracyMetrics(predictionItem.predictions, actualOnDate.productQuantities);
+      const evalKey = key;
+      const evalIdx = nextEvaluations.findIndex((x) => keyOf(x) === evalKey);
+      const prevEval = evalIdx >= 0 ? (nextEvaluations[evalIdx] || {}) : null;
+      const evalItem = {
+        ...(prevEval || {}),
+        id: prevEval?.id || randomUUID(),
+        predictionId: predictionItem.id,
+        store,
+        bizType,
+        slot,
+        date,
+        totalPredQty: metrics.totalPredQty,
+        totalActualQty: metrics.totalActualQty,
+        totalAbsError: metrics.totalAbsError,
+        totalAccuracy: metrics.totalAccuracy,
+        mape: metrics.mape,
+        hitRate20: metrics.hitRate20,
+        productCount: metrics.productCount,
+        perProduct: metrics.perProduct,
+        topDiffProducts: metrics.topDiffProducts,
+        evaluatedAt: now,
+        updatedAt: now,
+        updatedBy: username
+      };
+      immediateEval = evalItem;
+      if (evalIdx >= 0) nextEvaluations.splice(evalIdx, 1, evalItem);
+      else nextEvaluations.unshift(evalItem);
+      nextEvaluations = nextEvaluations.slice(0, 6000);
+    }
+
+    await saveSharedState({ ...state0, inventoryForecastPredictions: predictionList.slice(0, 6000), inventoryForecastEvaluations: nextEvaluations });
+
+    return res.json({
+      store,
+      bizType,
+      slot,
+      target,
+      historyCount: historyRows.length,
+      source,
+      confidence: Number(out?.confidence || 0),
+      summary,
+      predictions: calibratedPredictions,
+      calibration,
+      immediateAccuracy: immediateEval ? {
+        totalAccuracy: immediateEval.totalAccuracy,
+        mape: immediateEval.mape,
+        hitRate20: immediateEval.hitRate20
+      } : null,
+      coreTargetUsage,
+      generatedAt: now
+    });
   } catch (e) {
     return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
   }
@@ -3162,6 +8271,233 @@ function safeMonthOnly(input) {
   if (!v) return null;
   if (!/^\d{4}-\d{2}$/.test(v)) return null;
   return v;
+}
+
+function calcDateSpanDaysInclusive(startDate, endDate) {
+  const s = safeDateOnly(startDate);
+  const e = safeDateOnly(endDate);
+  if (!s || !e) return null;
+  const st = new Date(s + 'T00:00:00').getTime();
+  const et = new Date(e + 'T00:00:00').getTime();
+  if (!Number.isFinite(st) || !Number.isFinite(et) || et < st) return null;
+  const days = Math.floor((et - st) / (24 * 60 * 60 * 1000)) + 1;
+  return days > 0 ? days : null;
+}
+
+function calcOverlapDaysWithinMonth(startDate, endDate, month) {
+  const s = safeDateOnly(startDate);
+  const e = safeDateOnly(endDate);
+  const m = safeMonthOnly(month);
+  if (!s || !e || !m) return 0;
+  const [yr, mo] = m.split('-').map(Number);
+  const monthStart = new Date(yr, mo - 1, 1).getTime();
+  const monthEnd = new Date(yr, mo, 0).getTime();
+  const st = new Date(s + 'T00:00:00').getTime();
+  const et = new Date(e + 'T00:00:00').getTime();
+  if (!Number.isFinite(st) || !Number.isFinite(et) || et < st) return 0;
+  const overlapStart = Math.max(st, monthStart);
+  const overlapEnd = Math.min(et, monthEnd);
+  if (overlapEnd < overlapStart) return 0;
+  return Math.floor((overlapEnd - overlapStart) / 86400000) + 1;
+}
+
+function calcEmployeeMonthlyActualRestFromDailyReports(state, employee, month) {
+  const m = safeMonthOnly(month);
+  const emp = employee && typeof employee === 'object' ? employee : null;
+  const uname = String(emp?.username || '').trim().toLowerCase();
+  const name = String(emp?.name || '').trim();
+  if (!m || (!uname && !name)) return { total: 0, byDay: {} };
+
+  const reportList = Array.isArray(state?.dailyReports) ? state.dailyReports : [];
+  const byDay = {};
+
+  const splitNameTokens = (raw) => String(raw || '')
+    .split(/[，,、;；\n\r\t\s\/|]+/)
+    .map(x => String(x || '').trim())
+    .filter(Boolean);
+
+  reportList.forEach((rep) => {
+    const repDate = String(rep?.date || '').trim();
+    if (!repDate || !repDate.startsWith(m + '-')) return;
+    const data = rep?.data && typeof rep.data === 'object' ? rep.data : {};
+
+    const frontRestStaff = Array.isArray(data?.staff?.frontRestStaff) ? data.staff.frontRestStaff : [];
+    const kitchenRestStaff = Array.isArray(data?.staff?.kitchenRestStaff) ? data.staff.kitchenRestStaff : [];
+    const allRestStaff = frontRestStaff.concat(kitchenRestStaff);
+
+    let restDays = 0;
+    allRestStaff.forEach((it) => {
+      const u = String(it?.user || it?.username || '').trim().toLowerCase();
+      const n = String(it?.name || '').trim();
+      if (u && uname && u !== uname) return;
+      if (!u && name && n && n !== name) return;
+      if (!u && !name) return;
+      const days = Number(it?.days || 1);
+      const val = Number.isFinite(days) && days > 0 ? days : 1;
+      restDays += val;
+    });
+
+    // legacy fallback: comma-separated text names
+    if (restDays <= 0) {
+      const frontRest = String(data?.staff?.frontRest || '').trim();
+      const kitchenRest = String(data?.staff?.kitchenRest || '').trim();
+      const tokens = splitNameTokens(frontRest).concat(splitNameTokens(kitchenRest));
+      const tokenSet = new Set(tokens.map(x => x.toLowerCase()));
+      const hitByToken = (uname && tokenSet.has(uname)) || (!!name && tokenSet.has(name.toLowerCase()));
+      const hitByRaw = (!!name && (frontRest.includes(name) || kitchenRest.includes(name)))
+        || (uname && (frontRest.toLowerCase().includes(uname) || kitchenRest.toLowerCase().includes(uname)));
+      if (hitByToken || hitByRaw) restDays = 1;
+    }
+
+    if (restDays > 0) {
+      byDay[repDate] = Number((Number(byDay[repDate] || 0) + restDays).toFixed(2));
+    }
+  });
+
+  const total = Number(Object.values(byDay).reduce((s, x) => {
+    const n = Number(x || 0);
+    return Number((s + (Number.isFinite(n) ? n : 0)).toFixed(2));
+  }, 0).toFixed(2));
+
+  return { total, byDay };
+}
+
+function calcCumulativeLeaveDaysByJoinDate(joinDateInput) {
+  const joinDate = String(joinDateInput || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(joinDate)) return 0;
+  const jd = new Date(joinDate + 'T00:00:00');
+  if (!Number.isFinite(jd.getTime())) return 0;
+  const years = (Date.now() - jd.getTime()) / (365.25 * 24 * 60 * 60 * 1000);
+  if (years >= 20) return 15;
+  if (years >= 10) return 10;
+  if (years >= 1) return 5;
+  return 0;
+}
+
+function calcEmployeeMonthlyLeaveBalance(state, employee, month) {
+  const m = safeMonthOnly(month);
+  const emp = employee && typeof employee === 'object' ? employee : null;
+  const uname = String(emp?.username || '').trim();
+  if (!m || !uname) return null;
+
+  const [yr, mo] = m.split('-').map(Number);
+  const daysInMonth = new Date(yr, mo, 0).getDate();
+
+  const weekDetails = [];
+  for (let d = 1; d <= daysInMonth; d += 7) {
+    const startDay = d;
+    const endDay = Math.min(daysInMonth, d + 6);
+    let entitled = 0;
+    for (let x = startDay; x <= endDay; x++) {
+      if (new Date(yr, mo - 1, x).getDay() === 0) entitled += 1;
+    }
+    weekDetails.push({
+      weekIndex: weekDetails.length + 1,
+      range: `${m}-${String(startDay).padStart(2, '0')}~${m}-${String(endDay).padStart(2, '0')}`,
+      entitled,
+      used: 0,
+      remaining: entitled
+    });
+  }
+
+  const baseLeave = weekDetails.reduce((s, w) => s + Number(w?.entitled || 0), 0);
+
+  const joinDate = String(emp.joinDate || emp.createdAt || '').trim();
+  let annualLeave = 0;
+  if (joinDate) {
+    const jd = new Date(joinDate);
+    const monthStart = new Date(yr, mo - 1, 1);
+    const diffMs = monthStart - jd;
+    const diffYears = diffMs / (365.25 * 24 * 60 * 60 * 1000);
+    if (diffYears >= 1) annualLeave = Math.round((5 / 12) * 100) / 100;
+  }
+
+  const restStats = calcEmployeeMonthlyActualRestFromDailyReports(state, emp, m);
+  let usedLeave = Number(restStats?.total || 0);
+
+  Object.entries(restStats?.byDay || {}).forEach(([day, val]) => {
+    const n = Number(val || 0);
+    if (!(Number.isFinite(n) && n > 0)) return;
+    weekDetails.forEach((wk) => {
+      const [ws, we] = String(wk?.range || '').split('~');
+      if (!ws || !we) return;
+      if (day < ws || day > we) return;
+      wk.used = Number((Number(wk.used || 0) + n).toFixed(2));
+    });
+  });
+
+  // Fallback: when daily reports lack rest records, reuse approved leave records.
+  if (!(Number.isFinite(usedLeave) && usedLeave > 0)) {
+    const leaveRecords = Array.isArray(state?.leaveRecords) ? state.leaveRecords : [];
+    const uLower = uname.toLowerCase();
+    usedLeave = 0;
+    leaveRecords.forEach((lr) => {
+      if (String(lr?.applicant || '').toLowerCase() !== uLower) return;
+      if (String(lr?.status || '') !== 'approved') return;
+      const sd = String(lr?.startDate || '').trim();
+      const ed = String(lr?.endDate || '').trim();
+      const rawDays = lr?.days != null && lr?.days !== '' ? Number(lr.days) : null;
+      const overlapDays = calcOverlapDaysWithinMonth(sd, ed, m);
+
+      let days = 0;
+      if (overlapDays > 0) {
+        const sameMonthRange = sd.startsWith(m) && ed.startsWith(m);
+        days = (sameMonthRange && rawDays != null && Number.isFinite(rawDays) && rawDays > 0)
+          ? rawDays
+          : overlapDays;
+      } else if (rawDays != null && Number.isFinite(rawDays) && rawDays > 0 && sd.startsWith(m)) {
+        days = rawDays;
+      }
+      if (!(Number.isFinite(days) && days > 0)) return;
+      usedLeave += days;
+
+      if (overlapDays > 0) {
+        weekDetails.forEach((wk) => {
+          const [ws, we] = String(wk?.range || '').split('~');
+          const ov = calcDateSpanDaysInclusive(
+            (sd > ws ? sd : ws),
+            (ed < we ? ed : we)
+          );
+          if (ov && ov > 0) wk.used = Number((Number(wk.used || 0) + ov).toFixed(2));
+        });
+      }
+    });
+  }
+
+  usedLeave = Number((Number(usedLeave || 0)).toFixed(2));
+
+  const totalLeave = Number((baseLeave + annualLeave).toFixed(2));
+  const computedRemaining = Number((totalLeave - usedLeave).toFixed(2));
+
+  const overrides = state?.leaveBalanceOverrides && typeof state.leaveBalanceOverrides === 'object'
+    ? state.leaveBalanceOverrides
+    : {};
+  const overrideKey = `${uname}_${m}`;
+  const overrideVal = overrides[overrideKey];
+  const overridden = overrideVal != null && Number.isFinite(Number(overrideVal));
+  const remaining = overridden ? Number(overrideVal) : computedRemaining;
+
+  const adjustments = Array.isArray(state?.leaveBalanceAdjustments) ? state.leaveBalanceAdjustments : [];
+  const lastAdjustment = adjustments.find(a => String(a?.key || '') === overrideKey) || null;
+
+  weekDetails.forEach((wk) => {
+    wk.remaining = Number((Number(wk.entitled || 0) - Number(wk.used || 0)).toFixed(2));
+  });
+
+  return {
+    username: uname,
+    month: m,
+    baseLeave,
+    annualLeave: Number(annualLeave.toFixed(2)),
+    usedLeave: Number(usedLeave.toFixed(2)),
+    totalLeave,
+    computedRemaining,
+    remaining: Number(remaining.toFixed(2)),
+    overridden,
+    overrideValue: overridden ? Number(overrideVal) : null,
+    weeklyDetails: weekDetails,
+    lastAdjustment
+  };
 }
 
 function safeUuid(input) {
@@ -3318,8 +8654,9 @@ async function authRequired(req, res, next) {
   const hdr = String(req.headers.authorization || '');
   const token = hdr.startsWith('Bearer ') ? hdr.slice(7) : '';
   if (!token) return res.status(401).json({ error: 'unauthorized' });
+  if (!JWT_SECRET) return res.status(500).json({ error: 'server_config_error' });
   try {
-    const payload = jwt.verify(token, JWT_SECRET || 'local_dev_secret');
+    const payload = jwt.verify(token, JWT_SECRET);
     req.user = payload;
 
     // Single-device login: validate session nonce
@@ -3354,8 +8691,9 @@ function authRequiredOrQueryToken(req, res, next) {
     }
   }
   if (!token) return res.status(401).json({ error: 'unauthorized' });
+  if (!JWT_SECRET) return res.status(500).json({ error: 'server_config_error' });
   try {
-    const payload = jwt.verify(token, JWT_SECRET || 'local_dev_secret');
+    const payload = jwt.verify(token, JWT_SECRET);
     req.user = payload;
     return next();
   } catch (e) {
@@ -3433,6 +8771,143 @@ app.put('/api/state', authRequired, async (req, res) => {
       ['default', JSON.stringify(data)]
     );
     return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+app.get('/api/promotion/tracks', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const role = String(req.user?.role || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  try {
+    const state = (await getSharedState()) || {};
+    const list = Array.isArray(state.promotionTracks) ? state.promotionTracks.slice() : [];
+    let items = list;
+    if (!(role === 'admin' || role === 'hq_manager' || role === 'hr_manager')) {
+      items = list.filter(t => {
+        const applicant = String(t?.applicantUsername || '').trim();
+        const mentor = String(t?.mentorUsername || '').trim();
+        const store = String(t?.store || '').trim();
+        const mine = stateFindUserRecord(state, username) || {};
+        const myStore = String(mine?.store || '').trim();
+        const myRole = String(mine?.role || role || '').trim();
+        const storeManagerMatch = myRole === 'store_manager' && myStore && store === myStore;
+        const prodManagerMatch = myRole === 'store_production_manager' && myStore && store === myStore;
+        return applicant === username || mentor === username || storeManagerMatch || prodManagerMatch;
+      });
+    }
+    items.sort((a, b) => String(b?.updatedAt || '').localeCompare(String(a?.updatedAt || '')));
+    return res.json({ items });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+app.post('/api/promotion/tracks/:id/sessions/:sessionId/complete', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const role = String(req.user?.role || '').trim();
+  const id = String(req.params?.id || '').trim();
+  const sessionId = String(req.params?.sessionId || '').trim();
+  const feedback = String(req.body?.feedback || '').trim();
+  const evidenceUrls = Array.isArray(req.body?.evidenceUrls) ? req.body.evidenceUrls.map(x => String(x || '').trim()).filter(Boolean) : [];
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  if (!id || !sessionId) return res.status(400).json({ error: 'missing_id' });
+  try {
+    const state = (await getSharedState()) || {};
+    const tracks = Array.isArray(state.promotionTracks) ? state.promotionTracks.slice() : [];
+    const idx = tracks.findIndex(t => String(t?.id || '').trim() === id);
+    if (idx < 0) return res.status(404).json({ error: 'not_found' });
+    const track = tracks[idx] || {};
+    const mentor = String(track?.mentorUsername || '').trim();
+    const canEdit = username === mentor || role === 'admin' || role === 'hq_manager' || role === 'hr_manager' || role === 'store_manager' || role === 'store_production_manager';
+    if (!canEdit) return res.status(403).json({ error: 'forbidden' });
+
+    const sessions = Array.isArray(track.trainingSessions) ? track.trainingSessions.slice() : [];
+    const sIdx = sessions.findIndex(s => String(s?.id || '').trim() === sessionId);
+    if (sIdx < 0) return res.status(404).json({ error: 'session_not_found' });
+
+    sessions[sIdx] = {
+      ...sessions[sIdx],
+      status: 'completed',
+      feedback,
+      evidenceUrls,
+      completedBy: username,
+      completedAt: hrmsNowISO()
+    };
+    const allDone = sessions.length > 0 && sessions.every(s => String(s?.status || '') === 'completed');
+    tracks[idx] = {
+      ...track,
+      trainingSessions: sessions,
+      status: allDone ? 'training_completed' : (track?.status || 'qualification_approved'),
+      updatedAt: hrmsNowISO()
+    };
+    let nextState = { ...state, promotionTracks: tracks };
+
+    const recipients = await getPromotionTrackRecipients(nextState, tracks[idx]);
+    const title = '晋升培训反馈已提交';
+    const msg = `${String(track?.applicantName || track?.applicantUsername || '').trim() || '员工'} 的培训「${String(sessions[sIdx]?.title || '').trim() || '课程'}」已完成并提交反馈。`;
+    for (const u of recipients) {
+      nextState = addStateNotification(nextState, makeNotif(u, title, msg, { type: 'promotion_training_feedback', trackId: id }));
+    }
+    await saveSharedState(nextState);
+    return res.json({ ok: true, track: tracks[idx] });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+app.post('/api/promotion/tracks/:id/assessment', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const role = String(req.user?.role || '').trim();
+  const id = String(req.params?.id || '').trim();
+  const result = String(req.body?.result || '').trim().toLowerCase();
+  const comment = String(req.body?.comment || '').trim();
+  const evidenceUrls = Array.isArray(req.body?.evidenceUrls) ? req.body.evidenceUrls.map(x => String(x || '').trim()).filter(Boolean) : [];
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  if (!id) return res.status(400).json({ error: 'missing_id' });
+  if (!(result === 'passed' || result === 'failed')) return res.status(400).json({ error: 'invalid_result' });
+  try {
+    const state = (await getSharedState()) || {};
+    const tracks = Array.isArray(state.promotionTracks) ? state.promotionTracks.slice() : [];
+    const idx = tracks.findIndex(t => String(t?.id || '').trim() === id);
+    if (idx < 0) return res.status(404).json({ error: 'not_found' });
+    const track = tracks[idx] || {};
+    const store = String(track?.store || '').trim();
+    const department = String(track?.department || '').trim();
+    const currentPosition = String(track?.currentPosition || '').trim();
+    const applicantRole = String(track?.applicantRole || '').trim();
+    const kitchen = isKitchenByRoleOrPosition(applicantRole, currentPosition, department);
+    const assessorExpected = kitchen
+      ? pickStoreRoleUsernameByStore(state, store, ['store_production_manager'])
+      : pickStoreRoleUsernameByStore(state, store, ['store_manager']);
+    const canOverride = role === 'admin' || role === 'hq_manager' || role === 'hr_manager';
+    if (!canOverride && assessorExpected && assessorExpected !== username) {
+      return res.status(403).json({ error: 'forbidden' });
+    }
+
+    tracks[idx] = {
+      ...track,
+      assessmentStatus: result,
+      assessmentComment: comment,
+      assessmentEvidenceUrls: evidenceUrls,
+      assessmentBy: username,
+      assessmentAt: hrmsNowISO(),
+      status: result === 'passed' ? 'assessment_passed' : 'assessment_failed',
+      formalApplied: result === 'failed' ? false : !!track?.formalApplied,
+      updatedAt: hrmsNowISO()
+    };
+    let nextState = { ...state, promotionTracks: tracks };
+    const recipients = await getPromotionTrackRecipients(nextState, tracks[idx]);
+    const title = result === 'passed' ? '晋升考核已通过' : '晋升考核未通过';
+    const msg = result === 'passed'
+      ? `${String(track?.applicantName || track?.applicantUsername || '').trim() || '员工'} 的晋升考核已通过，可发起正式晋升申请。`
+      : `${String(track?.applicantName || track?.applicantUsername || '').trim() || '员工'} 的晋升考核未通过，可重新申请晋升资格。`;
+    for (const u of recipients) {
+      nextState = addStateNotification(nextState, makeNotif(u, title, msg, { type: 'promotion_assessment_result', trackId: id }));
+    }
+    await saveSharedState(nextState);
+    return res.json({ ok: true, track: tracks[idx] });
   } catch (e) {
     return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
   }
@@ -3677,18 +9152,39 @@ app.put('/api/stores/:id', authRequired, async (req, res) => {
   const managerName = String(req.body?.managerName || '').trim();
   const phone = String(req.body?.phone || '').trim();
   const openDate = String(req.body?.openDate || '').trim() || null;
+  const brandName = String(req.body?.brand || req.body?.brandName || '').trim();
+  const brandId = normalizeBrandId(req.body?.brandId || brandName);
   const isActive = req.body?.status ? String(req.body.status) === 'active' : true;
 
   try {
-    const r = await pool.query(
-      `update stores
-       set name=$2, address=$3, city=$4, floor=$5, manager_name=$6, phone=$7, open_date=$8, is_active=$9
-       where id=$1
-       returning id, name, address, city, floor, manager_name, phone, open_date, is_active, created_at, updated_at`,
-      [id, name, address || null, city || null, floor || null, managerName || null, phone || null, openDate, isActive]
-    );
-    if (!r.rows?.[0]) return res.status(404).json({ error: 'not_found' });
-    return res.json({ item: r.rows[0] });
+    const state0 = (await getSharedState()) || {};
+    const stores = Array.isArray(state0?.stores) ? state0.stores.slice() : [];
+    const idx = stores.findIndex((s) => String(s?.id || '').trim() === id);
+    if (idx < 0) return res.status(404).json({ error: 'not_found' });
+    const prev = stores[idx] || {};
+    stores[idx] = {
+      ...prev,
+      id,
+      name,
+      address,
+      city,
+      floor,
+      managerName,
+      manager: managerName,
+      phone,
+      openDate,
+      status: isActive ? 'active' : 'inactive',
+      brand: brandName,
+      brandName,
+      brandId,
+      updatedAt: hrmsNowISO()
+    };
+    const nextState = { ...state0, stores };
+    if (Array.isArray(nextState.brands)) {
+      nextState.brands = getBrandsFromState(nextState);
+    }
+    await saveSharedState(nextState);
+    return res.json({ item: stores[idx] });
   } catch (e) {
     return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
   }
@@ -3758,7 +9254,7 @@ app.post('/api/auth/login', async (req, res) => {
         const token = jwt.sign(
           { id: u.id, username: u.username, name: finalName, role: finalRole, sn },
           JWT_SECRET,
-          { expiresIn: '14d' }
+          { expiresIn: '7d' }
         );
         return res.json({
           token,
@@ -3789,9 +9285,9 @@ app.post('/api/auth/login', async (req, res) => {
         const canonicalUsername = String(found.username || '').trim() || username;
         const id = String(found.id || canonicalUsername);
         const name = String(found.name || found.real_name || found.realName || canonicalUsername);
-        const secret = JWT_SECRET || 'local_dev_secret';
+        if (!JWT_SECRET) return res.status(500).json({ error: 'server_config_error' });
         await storeSessionNonce(canonicalUsername, sn);
-        const token = jwt.sign({ id, username: canonicalUsername, name, role, sn }, secret, { expiresIn: '14d' });
+        const token = jwt.sign({ id, username: canonicalUsername, name, role, sn }, JWT_SECRET, { expiresIn: '7d' });
         return res.json({ token, user: { id, username: canonicalUsername, name, role } });
       }
     }
@@ -3799,20 +9295,22 @@ app.post('/api/auth/login', async (req, res) => {
     console.log('State login failed:', e?.message || e);
   }
 
-  // Fallback to local test accounts
-  const localUser = LOCAL_TEST_ACCOUNTS.find(u => u.username === username && u.password === password);
-  if (localUser) {
-    const secret = JWT_SECRET || 'local_dev_secret';
-    await storeSessionNonce(localUser.username, sn);
-    const token = jwt.sign(
-      { id: localUser.id, username: localUser.username, name: localUser.name, role: localUser.role, sn },
-      secret,
-      { expiresIn: '14d' }
-    );
-    return res.json({
-      token,
-      user: { id: localUser.id, username: localUser.username, name: localUser.name, role: localUser.role }
-    });
+  // H4-FIX: 本地测试账号仅在开发环境可用
+  if (process.env.NODE_ENV !== 'production') {
+    const localUser = LOCAL_TEST_ACCOUNTS.find(u => u.username === username && u.password === password);
+    if (localUser) {
+      if (!JWT_SECRET) return res.status(500).json({ error: 'server_config_error' });
+      await storeSessionNonce(localUser.username, sn);
+      const token = jwt.sign(
+        { id: localUser.id, username: localUser.username, name: localUser.name, role: localUser.role, sn },
+        JWT_SECRET,
+        { expiresIn: '7d' }
+      );
+      return res.json({
+        token,
+        user: { id: localUser.id, username: localUser.username, name: localUser.name, role: localUser.role }
+      });
+    }
   }
 
   return res.status(401).json({ error: 'invalid_credentials' });
@@ -3822,15 +9320,93 @@ app.get('/api/auth/me', authRequired, async (req, res) => {
   return res.json({ user: req.user });
 });
 
+app.post('/api/auth/change-password', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const oldPassword = String(req.body?.oldPassword || '').trim();
+  const newPassword = String(req.body?.newPassword || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  if (!oldPassword || !newPassword) return res.status(400).json({ error: 'missing_params' });
+  if (newPassword.length < 6) return res.status(400).json({ error: 'weak_password', message: '新密码至少6位' });
+
+  try {
+    const dbUser = await pool.query(
+      'select id, username, password_hash from users where lower(username) = lower($1) limit 1',
+      [username]
+    );
+    const row = dbUser.rows?.[0] || null;
+
+    let state = (await getSharedState()) || {};
+    const users = Array.isArray(state.users) ? state.users.slice() : [];
+    const employees = Array.isArray(state.employees) ? state.employees.slice() : [];
+
+    if (row) {
+      const ok = await bcrypt.compare(oldPassword, String(row.password_hash || ''));
+      if (!ok) return res.status(400).json({ error: 'old_password_invalid', message: '原密码不正确' });
+      const hash = await bcrypt.hash(newPassword, 10);
+      await pool.query('update users set password_hash = $2 where id = $1', [row.id, hash]);
+
+      const upd = (arr) => arr.map(it =>
+        String(it?.username || '').trim().toLowerCase() === String(username).toLowerCase()
+          ? { ...it, password: newPassword }
+          : it
+      );
+      state = { ...state, users: upd(users), employees: upd(employees) };
+      await saveSharedState(state);
+      return res.json({ ok: true, mode: 'db' });
+    }
+
+    // Fallback mode: shared-state users/employees
+    const all = employees.concat(users);
+    const found = all.find(u => String(u?.username || '').trim().toLowerCase() === String(username).toLowerCase());
+    if (!found) return res.status(404).json({ error: 'not_found' });
+    if (String(found?.password || '') !== oldPassword) {
+      return res.status(400).json({ error: 'old_password_invalid', message: '原密码不正确' });
+    }
+
+    const upd = (arr) => arr.map(it =>
+      String(it?.username || '').trim().toLowerCase() === String(username).toLowerCase()
+        ? { ...it, password: newPassword }
+        : it
+    );
+    state = { ...state, users: upd(users), employees: upd(employees) };
+    await saveSharedState(state);
+    return res.json({ ok: true, mode: 'state' });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
 app.get('/api/stores', authRequired, async (req, res) => {
   try {
-    const r = await pool.query(
-      `select id, name, address, city, floor, manager_name, phone, open_date, is_active, created_at, updated_at
-       from stores
-       order by created_at desc`
-    );
-    return res.json({ items: r.rows || [] });
+    // Read from hrms_state table (where actual data is stored)
+    const r = await pool.query('select data from hrms_state where key = $1 limit 1', ['default']);
+    const row = r.rows?.[0] || null;
+    if (!row || !row.data) {
+      return res.json({ items: [] });
+    }
+    
+    const stateStores = Array.isArray(row.data.stores) ? row.data.stores : [];
+    const items = stateStores.map(s => ({
+      id: s.id || s.name,
+      name: s.name,
+      address: s.address || '',
+      city: s.city || '',
+      floor: s.floor || '',
+      manager_name: s.manager || s.managerName || '',
+      managerName: s.manager || s.managerName || '',
+      phone: s.phone || '',
+      openDate: s.openDate || s.open_date || '',
+      brand: s.brand || s.brandName || '',
+      brandName: s.brand || s.brandName || '',
+      brandId: normalizeBrandId(s.brandId || s.brand || s.brandName),
+      status: String(s.status || 'active') === 'active' ? 'active' : 'inactive',
+      is_active: String(s.status || 'active') === 'active'
+    }));
+    
+    console.log('[/api/stores] Returning stores:', items.map(s => s.name));
+    return res.json({ items });
   } catch (e) {
+    console.error('[/api/stores] Error:', e?.message || e);
     return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
   }
 });
@@ -3845,16 +9421,107 @@ app.post('/api/stores', authRequired, async (req, res) => {
   const managerName = String(req.body?.managerName || '').trim();
   const phone = String(req.body?.phone || '').trim();
   const openDate = String(req.body?.openDate || '').trim() || null;
+  const brandName = String(req.body?.brand || req.body?.brandName || '').trim();
+  const brandId = normalizeBrandId(req.body?.brandId || brandName);
   const isActive = req.body?.status ? String(req.body.status) === 'active' : true;
 
   try {
-    const r = await pool.query(
-      `insert into stores (name, address, city, floor, manager_name, phone, open_date, is_active)
-       values ($1,$2,$3,$4,$5,$6,$7,$8)
-       returning id, name, address, city, floor, manager_name, phone, open_date, is_active, created_at, updated_at`,
-      [name, address || null, city || null, floor || null, managerName || null, phone || null, openDate, isActive]
-    );
-    return res.json({ item: r.rows?.[0] || null });
+    const state0 = (await getSharedState()) || {};
+    const stores = Array.isArray(state0?.stores) ? state0.stores.slice() : [];
+    const item = {
+      id: `store_${Date.now()}`,
+      name,
+      address,
+      city,
+      floor,
+      managerName,
+      manager: managerName,
+      phone,
+      openDate,
+      status: isActive ? 'active' : 'inactive',
+      brand: brandName,
+      brandName,
+      brandId,
+      createdAt: hrmsNowISO(),
+      updatedAt: hrmsNowISO()
+    };
+    stores.push(item);
+    const nextState = { ...state0, stores };
+    nextState.brands = getBrandsFromState(nextState);
+    await saveSharedState(nextState);
+    return res.json({ item });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+app.get('/api/brands', authRequired, async (req, res) => {
+  try {
+    const state0 = (await getSharedState()) || {};
+    const items = getBrandsFromState(state0);
+    return res.json({ items });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+app.post('/api/brands', authRequired, async (req, res) => {
+  const role = String(req.user?.role || '').trim();
+  if (!['admin', 'hq_manager'].includes(role)) return res.status(403).json({ error: 'forbidden' });
+  const name = String(req.body?.name || '').trim();
+  if (!name) return res.status(400).json({ error: 'missing_name' });
+  const id = normalizeBrandId(req.body?.id || name);
+  if (!id) return res.status(400).json({ error: 'invalid_brand_id' });
+  const config = req.body?.config && typeof req.body.config === 'object' ? req.body.config : { sopKeypoints: [], performanceWeights: {} };
+  try {
+    const state0 = (await getSharedState()) || {};
+    const brands = getBrandsFromState(state0).filter((b) => normalizeBrandId(b?.id) !== id);
+    const item = { id, name, config };
+    brands.unshift(item);
+    await saveSharedState({ ...state0, brands });
+    return res.json({ ok: true, item });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+app.put('/api/brands/:id', authRequired, async (req, res) => {
+  const role = String(req.user?.role || '').trim();
+  if (!['admin', 'hq_manager'].includes(role)) return res.status(403).json({ error: 'forbidden' });
+  const id = normalizeBrandId(req.params?.id);
+  if (!id) return res.status(400).json({ error: 'missing_id' });
+  const name = String(req.body?.name || '').trim();
+  const config = req.body?.config && typeof req.body.config === 'object' ? req.body.config : null;
+  try {
+    const state0 = (await getSharedState()) || {};
+    const brands = getBrandsFromState(state0);
+    const idx = brands.findIndex((b) => normalizeBrandId(b?.id) === id);
+    if (idx < 0) return res.status(404).json({ error: 'not_found' });
+    const prev = brands[idx] || {};
+    brands[idx] = {
+      ...prev,
+      id,
+      name: name || prev.name,
+      config: config || prev.config || { sopKeypoints: [], performanceWeights: {} }
+    };
+
+    const stores = Array.isArray(state0?.stores) ? state0.stores.slice() : [];
+    const oldName = String(prev?.name || '').trim();
+    const newName = String(brands[idx]?.name || '').trim();
+    const nextStores = stores.map((s) => {
+      const sid = normalizeBrandId(s?.brandId || s?.brand || s?.brandName);
+      if (sid !== id) return s;
+      return {
+        ...s,
+        brandId: id,
+        brand: newName || oldName,
+        brandName: newName || oldName,
+        updatedAt: hrmsNowISO()
+      };
+    });
+
+    await saveSharedState({ ...state0, brands, stores: nextStores });
+    return res.json({ ok: true, item: brands[idx] });
   } catch (e) {
     return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
   }
@@ -3862,10 +9529,14 @@ app.post('/api/stores', authRequired, async (req, res) => {
 
 app.get('/api/knowledge', authRequired, async (req, res) => {
   try {
+    const qBrand = buildKnowledgeBrandScopeTag(req.query?.brandId || req.query?.brandScope || 'all');
+    const withBrandFilter = qBrand && qBrand !== 'brand:all';
     const r = await pool.query(
       `select id, title, category, tags, file_path, file_type, file_size, access_roles, access_departments, created_by, created_at, updated_at
        from knowledge_base
-       order by created_at desc`
+       ${withBrandFilter ? 'where tags @> $1::text[] or tags @> ARRAY[\'brand:all\']::text[]' : ''}
+       order by created_at desc`,
+      withBrandFilter ? [[qBrand]] : []
     );
     return res.json({ items: r.rows || [] });
   } catch (e) {
@@ -3960,6 +9631,9 @@ app.post('/api/knowledge/direct', authRequired, async (req, res) => {
   const title = String(req.body?.title || '').trim();
   const category = String(req.body?.category || '').trim();
   const fileType = String(req.body?.type || '').trim();
+  const feedAgent = String(req.body?.feedAgent || '').trim();
+  const brandScopeTag = buildKnowledgeBrandScopeTag(req.body?.brandId || req.body?.brandScope || 'all');
+  const tags = normalizeKnowledgeTags(req.body?.tags, feedAgent, brandScopeTag);
   const filePath = String(req.body?.filePath || '').trim();
   const size = Number(req.body?.size || 0);
 
@@ -3973,7 +9647,7 @@ app.post('/api/knowledge/direct', authRequired, async (req, res) => {
       `insert into knowledge_base (title, content, category, tags, file_path, file_type, file_size, access_roles, access_departments, created_by)
        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
        returning id, title, category, tags, file_path, file_type, file_size, access_roles, access_departments, created_by, created_at, updated_at`,
-      [title, '', category || null, null, filePath, fileType || null, size || null, null, null, createdBy]
+      [title, '', category || null, tags, filePath, fileType || null, size || null, null, null, createdBy]
     );
     return res.json({ item: r.rows?.[0] || null });
   } catch (e) {
@@ -3988,6 +9662,9 @@ app.post('/api/knowledge', authRequired, knowledgeUpload.single('file'), async (
 
   const title = String(req.body?.title || '').trim();
   const category = String(req.body?.category || '').trim();
+  const feedAgent = String(req.body?.feedAgent || '').trim();
+  const brandScopeTag = buildKnowledgeBrandScopeTag(req.body?.brandId || req.body?.brandScope || 'all');
+  const tags = normalizeKnowledgeTags(req.body?.tags, feedAgent, brandScopeTag);
   const fileType = String(req.body?.type || '').trim() || String(req.file?.mimetype || '').trim();
   const size = Number(req.file?.size || 0);
   if (!title) return res.status(400).json({ error: 'missing_title' });
@@ -4005,7 +9682,7 @@ app.post('/api/knowledge', authRequired, knowledgeUpload.single('file'), async (
       `insert into knowledge_base (title, content, category, tags, file_path, file_type, file_size, access_roles, access_departments, created_by)
        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
        returning id, title, category, tags, file_path, file_type, file_size, access_roles, access_departments, created_by, created_at, updated_at`,
-      [title, '', category || null, null, filePath, fileType || null, size || null, null, null, createdBy]
+      [title, '', category || null, tags, filePath, fileType || null, size || null, null, null, createdBy]
     );
     inserted = r.rows?.[0] || null;
   } catch (e) {
@@ -4095,8 +9772,870 @@ app.post('/api/knowledge', authRequired, knowledgeUpload.single('file'), async (
   })();
 });
 
+// ─── 飞书Webhook接收端点 ───────────────────────────────────────────────
+
+app.post('/api/webhook/feishu', express.raw({ type: 'application/json' }), async (req, res) => {
+  console.log('[Feishu Webhook] Received request:', req.headers['x-lark-request-timestamp']);
+  
+  try {
+    // 验证webhook签名（可选，建议生产环境启用）
+    const body = req.body;
+    const data = typeof body === 'string' ? JSON.parse(body) : body;
+    
+    // URL验证模式（飞书首次配置webhook时）
+    if (data.type === 'url_verification') {
+      console.log('[Feishu Webhook] URL verification challenge:', data.challenge);
+      return res.json({ challenge: data.challenge });
+    }
+    
+    // 处理业务数据变更事件
+    if (data.header?.event_type === 'bitable.record.changed') {
+      const event = data.event;
+      const logId = randomUUID();
+      
+      // 记录同步日志
+      await pool.query(
+        `insert into feishu_sync_logs (id, event_type, table_id, record_id, data, sync_status) 
+         values ($1, $2, $3, $4, $5, 'pending')`,
+        [logId, data.header.event_type, event.app_token, event.record_id, event]
+      );
+      
+      // 异步处理数据同步
+      setImmediate(async () => {
+        try {
+          await processFeishuDataChange(event, logId);
+        } catch (error) {
+          console.error('[Feishu Webhook] Async processing error:', error);
+          await pool.query(
+            'update feishu_sync_logs set sync_status = $1, error_message = $2, processed_at = now() where id = $3',
+            ['failed', error?.message || error, logId]
+          );
+        }
+      });
+      
+      return res.json({ code: 0, message: 'success' });
+    }
+    
+    // 其他事件类型
+    console.log('[Feishu Webhook] Unhandled event type:', data.header?.event_type);
+    return res.json({ code: 0, message: 'ignored' });
+    
+  } catch (error) {
+    console.error('[Feishu Webhook] Error:', error);
+    return res.status(500).json({ code: 500, message: 'internal error' });
+  }
+});
+
+// 处理飞书数据变更
+async function processFeishuDataChange(event, logId) {
+  try {
+    const accessToken = await getFeishuAccessToken();
+    const appToken = event.app_token;
+    const tableId = event.table_id;
+    const recordId = event.record_id;
+    
+    // 获取记录详情
+    const recordData = await getFeishuBitableData(appToken, tableId, accessToken);
+    const record = recordData.items?.find(item => item.record_id === recordId);
+    
+    if (!record) {
+      throw new Error('Record not found in Feishu');
+    }
+
+    // Always upsert raw record into generic storage
+    try {
+      await upsertFeishuGenericRecord({ appToken, tableId, record });
+    } catch (e) {
+      console.log('[processFeishuDataChange] generic upsert failed:', e?.message || e);
+    }
+
+    // Only “桌访表” writes into structured table
+    const TABLE_VISIT_TABLE_ID = 'tblpx5Efqc6eHo3L';
+    const isTableVisit = String(tableId || '').trim() === TABLE_VISIT_TABLE_ID;
+    if (!isTableVisit) {
+      await pool.query(
+        'update feishu_sync_logs set sync_status = $1, processed_at = now() where id = $2',
+        ['success', logId]
+      );
+      return;
+    }
+    
+    // 根据表格类型处理数据
+    const hrmsData = mapFeishuFieldToHrms(record, 'table_visit');
+    
+    // 存储到HRMS系统（这里以桌访记录为例）
+    if (hrmsData.date && hrmsData.store) {
+      await pool.query(
+        `insert into table_visit_records (
+          date, store, brand, table_number, guest_count, amount, 
+          has_reservation, dissatisfaction_dish, feedback,
+          reservation_time, customer_type, order_type, service_rating, food_rating, environment_rating,
+          waiter_name, promotion_info, weather, peak_hours, customer_complaint, complaint_resolution,
+          satisfaction_level, repeat_customer, special_requests, payment_method, order_duration,
+          table_turnover, dish_recommendations, allergic_info, celebration_type, visit_purpose,
+          companion_info, customer_age, customer_gender, visit_frequency, preferred_dishes,
+          unsatisfied_items, suggested_improvements, staff_performance, facility_issues,
+          hygiene_rating, value_rating, ambiance_rating, noise_level, temperature,
+          lighting, music_volume, seating_comfort, queue_time, service_speed, order_accuracy,
+          staff_attitude, problem_resolution, manager_intervention, compensation_provided,
+          follow_up_required, follow_up_details, additional_notes,
+          feishu_record_id, created_at
+        ) values (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+          $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
+          $21, $22, $23, $24, $25, $26, $27, $28, $29, $30,
+          $31, $32, $33, $34, $35, $36, $37, $38, $39, $40,
+          $41, $42, $43, $44, $45, $46, $47, $48, $49, $50,
+          $51, $52, $53, $54, $55, $56, $57, $58, $59, now()
+        ) on conflict (feishu_record_id) do update set
+          date = excluded.date,
+          store = excluded.store,
+          brand = excluded.brand,
+          table_number = excluded.table_number,
+          guest_count = excluded.guest_count,
+          amount = excluded.amount,
+          has_reservation = excluded.has_reservation,
+          dissatisfaction_dish = excluded.dissatisfaction_dish,
+          feedback = excluded.feedback,
+          reservation_time = excluded.reservation_time,
+          customer_type = excluded.customer_type,
+          order_type = excluded.order_type,
+          service_rating = excluded.service_rating,
+          food_rating = excluded.food_rating,
+          environment_rating = excluded.environment_rating,
+          waiter_name = excluded.waiter_name,
+          promotion_info = excluded.promotion_info,
+          weather = excluded.weather,
+          peak_hours = excluded.peak_hours,
+          customer_complaint = excluded.customer_complaint,
+          complaint_resolution = excluded.complaint_resolution,
+          satisfaction_level = excluded.satisfaction_level,
+          repeat_customer = excluded.repeat_customer,
+          special_requests = excluded.special_requests,
+          payment_method = excluded.payment_method,
+          order_duration = excluded.order_duration,
+          table_turnover = excluded.table_turnover,
+          dish_recommendations = excluded.dish_recommendations,
+          allergic_info = excluded.allergic_info,
+          celebration_type = excluded.celebration_type,
+          visit_purpose = excluded.visit_purpose,
+          companion_info = excluded.companion_info,
+          customer_age = excluded.customer_age,
+          customer_gender = excluded.customer_gender,
+          visit_frequency = excluded.visit_frequency,
+          preferred_dishes = excluded.preferred_dishes,
+          unsatisfied_items = excluded.unsatisfied_items,
+          suggested_improvements = excluded.suggested_improvements,
+          staff_performance = excluded.staff_performance,
+          facility_issues = excluded.facility_issues,
+          hygiene_rating = excluded.hygiene_rating,
+          value_rating = excluded.value_rating,
+          ambiance_rating = excluded.ambiance_rating,
+          noise_level = excluded.noise_level,
+          temperature = excluded.temperature,
+          lighting = excluded.lighting,
+          music_volume = excluded.music_volume,
+          seating_comfort = excluded.seating_comfort,
+          queue_time = excluded.queue_time,
+          service_speed = excluded.service_speed,
+          order_accuracy = excluded.order_accuracy,
+          staff_attitude = excluded.staff_attitude,
+          problem_resolution = excluded.problem_resolution,
+          manager_intervention = excluded.manager_intervention,
+          compensation_provided = excluded.compensation_provided,
+          follow_up_required = excluded.follow_up_required,
+          follow_up_details = excluded.follow_up_details,
+          additional_notes = excluded.additional_notes,
+          updated_at = now()`,
+        [
+          hrmsData.date, hrmsData.store, hrmsData.brand, hrmsData.tableNumber,
+          hrmsData.guestCount, hrmsData.amount, hrmsData.hasReservation,
+          hrmsData.dissatisfactionDish, hrmsData.feedback,
+          hrmsData.reservationTime ? hrmsData.reservationTime.replace(/^(\d{1,2}):(\d{1,2})$/, '$1:$2:00') : null,
+          hrmsData.customerType, hrmsData.orderType,
+          hrmsData.serviceRating, hrmsData.foodRating, hrmsData.environmentRating,
+          hrmsData.waiterName, hrmsData.promotionInfo, hrmsData.weather, hrmsData.peakHours,
+          hrmsData.customerComplaint, hrmsData.complaintResolution, hrmsData.satisfactionLevel,
+          hrmsData.repeatCustomer, hrmsData.specialRequests, hrmsData.paymentMethod,
+          hrmsData.orderDuration, hrmsData.tableTurnover, hrmsData.dishRecommendations,
+          hrmsData.allergicInfo, hrmsData.celebrationType, hrmsData.visitPurpose,
+          hrmsData.companionInfo, hrmsData.customerAge, hrmsData.customerGender,
+          hrmsData.visitFrequency, hrmsData.preferredDishes, hrmsData.unsatisfiedItems,
+          hrmsData.suggestedImprovements, hrmsData.staffPerformance, hrmsData.facilityIssues,
+          hrmsData.hygieneRating, hrmsData.valueRating, hrmsData.ambianceRating,
+          hrmsData.noiseLevel, hrmsData.temperature, hrmsData.lighting,
+          hrmsData.musicVolume, hrmsData.seatingComfort, hrmsData.queueTime,
+          hrmsData.serviceSpeed, hrmsData.orderAccuracy, hrmsData.staffAttitude,
+          hrmsData.problemResolution, hrmsData.managerIntervention, hrmsData.compensationProvided,
+          hrmsData.followUpRequired, hrmsData.followUpDetails, hrmsData.additionalNotes,
+          hrmsData.recordId
+        ]
+      );
+      
+      // 更新同步状态
+      await pool.query(
+        'update feishu_sync_logs set sync_status = $1, processed_at = now() where id = $2',
+        ['success', logId]
+      );
+      
+      console.log('[Feishu Webhook] Data synced successfully:', hrmsData.recordId);
+    } else {
+      throw new Error('Missing required fields: date or store');
+    }
+    
+  } catch (error) {
+    await pool.query(
+      'update feishu_sync_logs set sync_status = $1, error_message = $2, processed_at = now() where id = $3',
+      ['failed', error?.message || error, logId]
+    );
+    throw error;
+  }
+}
+
+// 获取飞书同步状态
+app.get('/api/feishu/sync-status', authRequired, async (req, res) => {
+  const role = String(req.user?.role || '').trim();
+  if (!['admin', 'hq_manager'].includes(role)) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
+  
+  try {
+    const limit = Math.min(Number(req.query?.limit) || 50, 200);
+    const offset = Math.max(Number(req.query?.offset) || 0, 0);
+    const status = String(req.query?.status || '').trim();
+    
+    let query = 'select * from feishu_sync_logs';
+    const params = [];
+    
+    if (status) {
+      query += ' where sync_status = $1';
+      params.push(status);
+    }
+    
+    query += ' order by created_at desc limit $' + (params.length + 1) + ' offset $' + (params.length + 2);
+    params.push(limit, offset);
+    
+    const result = await pool.query(query, params);
+    
+    res.json({
+      items: result.rows,
+      pagination: {
+        limit,
+        offset,
+        total: result.rowCount
+      }
+    });
+  } catch (error) {
+    console.error('[Feishu Sync Status] Error:', error);
+    res.status(500).json({ error: 'server_error', message: error?.message || error });
+  }
+});
+
+// 手动触发飞书数据同步
+app.post('/api/feishu/sync-manual', authRequired, async (req, res) => {
+  const role = String(req.user?.role || '').trim();
+  if (!['admin', 'hq_manager', 'store_manager'].includes(role)) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
+  
+  try {
+    const { appToken, tableId, appId, appSecret } = req.body;
+    
+    if (!appToken || !tableId) {
+      return res.status(400).json({ error: 'missing_app_token_or_table_id' });
+    }
+    
+    const accessToken = await getFeishuAccessToken({ appId, appSecret });
+    const data = await getFeishuBitableData(appToken, tableId, accessToken);
+
+    // 当前仅“桌访表”写入结构化表 table_visit_records，其它表写入通用表 feishu_generic_records
+    const TABLE_VISIT_TABLE_ID = 'tblpx5Efqc6eHo3L';
+    const isTableVisit = String(tableId || '').trim() === TABLE_VISIT_TABLE_ID;
+    
+    let synced = 0;
+    let failed = 0;
+    let genericUpserted = 0;
+    const failedDetails = [];
+    
+    for (const record of data.items || []) {
+      try {
+        await upsertFeishuGenericRecord({ appToken, tableId, record });
+        genericUpserted++;
+
+        if (!isTableVisit) {
+          continue;
+        }
+
+        const hrmsData = mapFeishuFieldToHrms(record, 'table_visit');
+
+        if (hrmsData.date && hrmsData.store) {
+          await pool.query(
+            `insert into table_visit_records (
+              date, store, brand, table_number, guest_count, amount, 
+              has_reservation, dissatisfaction_dish, feedback,
+              reservation_time, customer_type, order_type, service_rating, food_rating, environment_rating,
+              waiter_name, promotion_info, weather, peak_hours, customer_complaint, complaint_resolution,
+              satisfaction_level, repeat_customer, special_requests, payment_method, order_duration,
+              table_turnover, dish_recommendations, allergic_info, celebration_type, visit_purpose,
+              companion_info, customer_age, customer_gender, visit_frequency, preferred_dishes,
+              unsatisfied_items, suggested_improvements, staff_performance, facility_issues,
+              hygiene_rating, value_rating, ambiance_rating, noise_level, temperature,
+              lighting, music_volume, seating_comfort, queue_time, service_speed, order_accuracy,
+              staff_attitude, problem_resolution, manager_intervention, compensation_provided,
+              follow_up_required, follow_up_details, additional_notes,
+              feishu_record_id, created_at
+            ) values (
+              $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+              $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
+              $21, $22, $23, $24, $25, $26, $27, $28, $29, $30,
+              $31, $32, $33, $34, $35, $36, $37, $38, $39, $40,
+              $41, $42, $43, $44, $45, $46, $47, $48, $49, $50,
+              $51, $52, $53, $54, $55, $56, $57, $58, $59, now()
+            ) on conflict (feishu_record_id) do update set
+              date = excluded.date,
+              store = excluded.store,
+              brand = excluded.brand,
+              table_number = excluded.table_number,
+              guest_count = excluded.guest_count,
+              amount = excluded.amount,
+              has_reservation = excluded.has_reservation,
+              dissatisfaction_dish = excluded.dissatisfaction_dish,
+              feedback = excluded.feedback,
+              reservation_time = excluded.reservation_time,
+              customer_type = excluded.customer_type,
+              order_type = excluded.order_type,
+              service_rating = excluded.service_rating,
+              food_rating = excluded.food_rating,
+              environment_rating = excluded.environment_rating,
+              waiter_name = excluded.waiter_name,
+              promotion_info = excluded.promotion_info,
+              weather = excluded.weather,
+              peak_hours = excluded.peak_hours,
+              customer_complaint = excluded.customer_complaint,
+              complaint_resolution = excluded.complaint_resolution,
+              satisfaction_level = excluded.satisfaction_level,
+              repeat_customer = excluded.repeat_customer,
+              special_requests = excluded.special_requests,
+              payment_method = excluded.payment_method,
+              order_duration = excluded.order_duration,
+              table_turnover = excluded.table_turnover,
+              dish_recommendations = excluded.dish_recommendations,
+              allergic_info = excluded.allergic_info,
+              celebration_type = excluded.celebration_type,
+              visit_purpose = excluded.visit_purpose,
+              companion_info = excluded.companion_info,
+              customer_age = excluded.customer_age,
+              customer_gender = excluded.customer_gender,
+              visit_frequency = excluded.visit_frequency,
+              preferred_dishes = excluded.preferred_dishes,
+              unsatisfied_items = excluded.unsatisfied_items,
+              suggested_improvements = excluded.suggested_improvements,
+              staff_performance = excluded.staff_performance,
+              facility_issues = excluded.facility_issues,
+              hygiene_rating = excluded.hygiene_rating,
+              value_rating = excluded.value_rating,
+              ambiance_rating = excluded.ambiance_rating,
+              noise_level = excluded.noise_level,
+              temperature = excluded.temperature,
+              lighting = excluded.lighting,
+              music_volume = excluded.music_volume,
+              seating_comfort = excluded.seating_comfort,
+              queue_time = excluded.queue_time,
+              service_speed = excluded.service_speed,
+              order_accuracy = excluded.order_accuracy,
+              staff_attitude = excluded.staff_attitude,
+              problem_resolution = excluded.problem_resolution,
+              manager_intervention = excluded.manager_intervention,
+              compensation_provided = excluded.compensation_provided,
+              follow_up_required = excluded.follow_up_required,
+              follow_up_details = excluded.follow_up_details,
+              additional_notes = excluded.additional_notes,
+              updated_at = now()`,
+            [
+              hrmsData.date, hrmsData.store, hrmsData.brand, hrmsData.tableNumber,
+              hrmsData.guestCount, hrmsData.amount, hrmsData.hasReservation,
+              hrmsData.dissatisfactionDish, hrmsData.feedback,
+              hrmsData.reservationTime ? hrmsData.reservationTime.replace(/^(\d{1,2}):(\d{1,2})$/, '$1:$2:00') : null,
+              hrmsData.customerType, hrmsData.orderType,
+              hrmsData.serviceRating, hrmsData.foodRating, hrmsData.environmentRating,
+              hrmsData.waiterName, hrmsData.promotionInfo, hrmsData.weather, hrmsData.peakHours,
+              hrmsData.customerComplaint, hrmsData.complaintResolution, hrmsData.satisfactionLevel,
+              hrmsData.repeatCustomer, hrmsData.specialRequests, hrmsData.paymentMethod,
+              hrmsData.orderDuration, hrmsData.tableTurnover, hrmsData.dishRecommendations,
+              hrmsData.allergicInfo, hrmsData.celebrationType, hrmsData.visitPurpose,
+              hrmsData.companionInfo, hrmsData.customerAge, hrmsData.customerGender,
+              hrmsData.visitFrequency, hrmsData.preferredDishes, hrmsData.unsatisfiedItems,
+              hrmsData.suggestedImprovements, hrmsData.staffPerformance, hrmsData.facilityIssues,
+              hrmsData.hygieneRating, hrmsData.valueRating, hrmsData.ambianceRating,
+              hrmsData.noiseLevel, hrmsData.temperature, hrmsData.lighting,
+              hrmsData.musicVolume, hrmsData.seatingComfort, hrmsData.queueTime,
+              hrmsData.serviceSpeed, hrmsData.orderAccuracy, hrmsData.staffAttitude,
+              hrmsData.problemResolution, hrmsData.managerIntervention, hrmsData.compensationProvided,
+              hrmsData.followUpRequired, hrmsData.followUpDetails, hrmsData.additionalNotes,
+              hrmsData.recordId
+            ]
+          );
+          synced++;
+        } else {
+          failed++;
+          const reason = `missing_required_fields date="${hrmsData.date || ''}" store="${hrmsData.store || ''}"`;
+          const detail = {
+            recordId: record?.record_id || null,
+            reason,
+            required: {
+              date: hrmsData.date || '',
+              store: hrmsData.store || ''
+            }
+          };
+          if (failedDetails.length < 30) failedDetails.push(detail);
+          console.warn('[Manual Sync] Skipped record:', detail);
+        }
+      } catch (error) {
+        const detail = {
+          recordId: record?.record_id || null,
+          reason: error?.message || String(error || 'unknown_error')
+        };
+        if (failedDetails.length < 30) failedDetails.push(detail);
+        console.error('[Manual Sync] Record error:', detail);
+        failed++;
+      }
+    }
+    
+    res.json({
+      message: 'Manual sync completed',
+      synced,
+      failed,
+      total: data.items?.length || 0,
+      genericUpserted,
+      isTableVisit,
+      failedDetails
+    });
+  } catch (error) {
+    console.error('[Manual Sync] Error:', error);
+    res.status(500).json({ error: 'server_error', message: error?.message || error });
+  }
+});
+
+// 测试飞书连接
+app.post('/api/feishu/test-connection', authRequired, async (req, res) => {
+  const role = String(req.user?.role || '').trim();
+  if (!['admin', 'hq_manager', 'store_manager'].includes(role)) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
+
+  try {
+    const { appId, appSecret } = req.body;
+
+    if (!appId || !appSecret) {
+      return res.status(400).json({ error: 'missing_app_id_or_secret' });
+    }
+
+    const accessToken = await getFeishuAccessToken({ appId, appSecret });
+    res.json({ success: true, message: '连接成功', accessToken: accessToken ? 'valid' : 'invalid' });
+  } catch (error) {
+    console.error('[Feishu Test Connection] Error:', error);
+    res.status(500).json({ success: false, message: error?.message || error });
+  }
+});
+
+// Agent/API: 直接写入飞书多维表格（单条或批量）
+app.post('/api/agent/feishu-table-write', authRequired, async (req, res) => {
+  const role = String(req.user?.role || '').trim();
+  if (!['admin', 'hq_manager', 'store_manager'].includes(role)) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
+
+  try {
+    const { appToken, tableId, appId, appSecret, fields, records } = req.body || {};
+    if (!appToken || !tableId) {
+      return res.status(400).json({ error: 'missing_app_token_or_table_id' });
+    }
+
+    const items = Array.isArray(records)
+      ? records
+      : (fields && typeof fields === 'object' ? [fields] : []);
+
+    if (!items.length) {
+      return res.status(400).json({ error: 'missing_fields_or_records' });
+    }
+    if (items.length > 50) {
+      return res.status(400).json({ error: 'too_many_records', message: 'max 50 records per request' });
+    }
+
+    const accessToken = await getFeishuAccessToken({ appId, appSecret });
+    const createdRecordIds = [];
+    const failedDetails = [];
+
+    for (let i = 0; i < items.length; i++) {
+      const row = items[i];
+      try {
+        if (!row || typeof row !== 'object' || Array.isArray(row)) {
+          throw new Error('invalid_fields');
+        }
+
+        const created = await createFeishuBitableRecord({
+          appToken,
+          tableId,
+          fields: row,
+          accessToken
+        });
+
+        if (created?.record_id) {
+          createdRecordIds.push(created.record_id);
+        }
+
+        try {
+          if (created) {
+            await upsertFeishuGenericRecord({ appToken, tableId, record: created });
+          }
+        } catch (e) {
+          // best effort local mirror; should not fail write call
+        }
+      } catch (err) {
+        failedDetails.push({
+          index: i,
+          error: err?.message || String(err)
+        });
+      }
+    }
+
+    return res.json({
+      success: true,
+      total: items.length,
+      created: createdRecordIds.length,
+      failed: failedDetails.length,
+      recordIds: createdRecordIds,
+      failedDetails
+    });
+  } catch (error) {
+    console.error('[Agent Feishu Table Write] Error:', error);
+    return res.status(500).json({ error: 'server_error', message: error?.message || error });
+  }
+});
+
+// Agent API - 查询桌访记录数据
+// H1-FIX: 添加认证保护
+app.get('/api/agent/table-visit-data', authRequired, async (req, res) => {
+  try {
+    const { 
+      startDate, 
+      endDate, 
+      store, 
+      satisfactionLevel, 
+      minRating, 
+      maxRating,
+      limit = 100,
+      offset = 0
+    } = req.query;
+    
+    let conditions = [];
+    let params = [];
+    let idx = 1;
+    
+    // 日期范围过滤
+    if (startDate) {
+      conditions.push(`date >= $${idx}::date`);
+      params.push(startDate);
+      idx++;
+    }
+    if (endDate) {
+      conditions.push(`date <= $${idx}::date`);
+      params.push(endDate);
+      idx++;
+    }
+    
+    // 门店过滤
+    if (store) {
+      conditions.push(`store = $${idx}`);
+      params.push(store);
+      idx++;
+    }
+    
+    // 满意度等级过滤
+    if (satisfactionLevel) {
+      conditions.push(`satisfaction_level = $${idx}`);
+      params.push(satisfactionLevel);
+      idx++;
+    }
+    
+    // 评分范围过滤
+    if (minRating) {
+      conditions.push(`service_rating >= $${idx} AND food_rating >= $${idx} AND environment_rating >= $${idx}`);
+      params.push(parseInt(minRating, 10));
+      idx++;
+    }
+    if (maxRating) {
+      conditions.push(`service_rating <= $${idx} AND food_rating <= $${idx} AND environment_rating <= $${idx}`);
+      params.push(parseInt(maxRating, 10));
+      idx++;
+    }
+    
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const limitClause = `LIMIT ${Math.min(parseInt(limit, 10) || 100, 1000)} OFFSET ${Math.max(parseInt(offset, 10) || 0, 0)}`;
+    
+    const query = `
+      SELECT 
+        id, date, store, brand, table_number, guest_count, amount,
+        has_reservation, dissatisfaction_dish, feedback,
+        reservation_time, customer_type, order_type,
+        service_rating, food_rating, environment_rating,
+        waiter_name, promotion_info, weather, peak_hours,
+        customer_complaint, complaint_resolution, satisfaction_level,
+        repeat_customer, special_requests, payment_method,
+        order_duration, table_turnover, dish_recommendations,
+        allergic_info, celebration_type, visit_purpose,
+        companion_info, customer_age, customer_gender,
+        visit_frequency, preferred_dishes, unsatisfied_items,
+        suggested_improvements, staff_performance, facility_issues,
+        hygiene_rating, value_rating, ambiance_rating,
+        noise_level, temperature, lighting, music_volume,
+        seating_comfort, queue_time, service_speed,
+        order_accuracy, staff_attitude, problem_resolution,
+        manager_intervention, compensation_provided,
+        follow_up_required, follow_up_details, additional_notes,
+        feishu_record_id, created_at, updated_at
+      FROM table_visit_records 
+      ${whereClause}
+      ORDER BY date DESC, created_at DESC
+      ${limitClause}
+    `;
+    
+    const result = await pool.query(query, params);
+    
+    // 返回统计信息
+    const statsQuery = `
+      SELECT 
+        COUNT(*) as total_records,
+        COUNT(CASE WHEN dissatisfaction_dish IS NOT NULL AND dissatisfaction_dish != '' THEN 1 END) as complaints,
+        COUNT(CASE WHEN customer_complaint IS NOT NULL AND customer_complaint != '' THEN 1 END) as serious_complaints,
+        AVG(service_rating) as avg_service_rating,
+        AVG(food_rating) as avg_food_rating,
+        AVG(environment_rating) as avg_environment_rating,
+        AVG(amount) as avg_amount,
+        SUM(guest_count) as total_guests
+      FROM table_visit_records 
+      ${whereClause}
+    `;
+    
+    const statsResult = await pool.query(statsQuery, params);
+    
+    res.json({
+      success: true,
+      data: result.rows,
+      stats: statsResult.rows[0] || {},
+      pagination: {
+        limit: parseInt(limit, 10) || 100,
+        offset: parseInt(offset, 10) || 0,
+        total: result.rowCount
+      }
+    });
+    
+  } catch (error) {
+    console.error('[Agent Table Visit Data] Error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'server_error', 
+      message: error?.message || error 
+    });
+  }
+});
+
+// Agent API - 获取桌访数据统计摘要
+// H1-FIX: 添加认证保护
+app.get('/api/agent/table-visit-summary', authRequired, async (req, res) => {
+  try {
+    const { startDate, endDate, store } = req.query;
+    
+    let conditions = [];
+    let params = [];
+    let idx = 1;
+    
+    if (startDate) {
+      conditions.push(`date >= $${idx}::date`);
+      params.push(startDate);
+      idx++;
+    }
+    if (endDate) {
+      conditions.push(`date <= $${idx}::date`);
+      params.push(endDate);
+      idx++;
+    }
+    if (store) {
+      conditions.push(`store = $${idx}`);
+      params.push(store);
+      idx++;
+    }
+    
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    
+    const query = `
+      SELECT 
+        COUNT(*) as total_visits,
+        COUNT(DISTINCT date) as active_days,
+        COUNT(DISTINCT store) as active_stores,
+        SUM(guest_count) as total_guests,
+        SUM(amount) as total_revenue,
+        AVG(amount) as avg_amount_per_visit,
+        AVG(guest_count) as avg_guests_per_visit,
+        COUNT(CASE WHEN has_reservation THEN 1 END) as reservation_count,
+        COUNT(CASE WHEN dissatisfaction_dish IS NOT NULL AND dissatisfaction_dish != '' THEN 1 END) as dish_complaints,
+        COUNT(CASE WHEN customer_complaint IS NOT NULL AND customer_complaint != '' THEN 1 END) as customer_complaints,
+        COUNT(CASE WHEN repeat_customer THEN 1 END) as repeat_customers,
+        AVG(service_rating) as avg_service_rating,
+        AVG(food_rating) as avg_food_rating,
+        AVG(environment_rating) as avg_environment_rating,
+        AVG(hygiene_rating) as avg_hygiene_rating,
+        AVG(value_rating) as avg_value_rating,
+        AVG(ambiance_rating) as avg_ambiance_rating,
+        COUNT(CASE WHEN manager_intervention THEN 1 END) as manager_interventions,
+        COUNT(CASE WHEN follow_up_required THEN 1 END) as follow_ups_required
+      FROM table_visit_records 
+      ${whereClause}
+    `;
+    
+    const result = await pool.query(query, params);
+    
+    // 满意度分布
+    const satisfactionQuery = `
+      SELECT satisfaction_level, COUNT(*) as count
+      FROM table_visit_records 
+      ${whereClause} AND satisfaction_level IS NOT NULL AND satisfaction_level != ''
+      GROUP BY satisfaction_level
+      ORDER BY count DESC
+    `;
+    
+    const satisfactionResult = await pool.query(satisfactionQuery, params);
+    
+    // 天气影响分析
+    const weatherQuery = `
+      SELECT weather, 
+             COUNT(*) as visits,
+             AVG(amount) as avg_amount,
+             AVG(service_rating) as avg_service_rating
+      FROM table_visit_records 
+      ${whereClause} AND weather IS NOT NULL AND weather != ''
+      GROUP BY weather
+      ORDER BY visits DESC
+    `;
+    
+    const weatherResult = await pool.query(weatherQuery, params);
+    
+    res.json({
+      success: true,
+      summary: result.rows[0] || {},
+      satisfaction_distribution: satisfactionResult.rows || [],
+      weather_impact: weatherResult.rows || []
+    });
+    
+  } catch (error) {
+    console.error('[Agent Table Visit Summary] Error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'server_error', 
+      message: error?.message || error 
+    });
+  }
+});
+
+// ── Multi-Agent Routes ──
+// ─── Training APIs ─────────────────────────────────────────────────────────────
+
+app.post('/api/training/tasks/batch', authRequired, async (req, res) => {
+  const role = String(req.user?.role || '').trim();
+  // 仅限管理员或HR执行批量下发
+  if (!['admin', 'hr_manager'].includes(role)) {
+    return res.status(403).json({ error: 'forbidden', message: '只有管理员或HR可以批量下发培训任务' });
+  }
+
+  const { type, title, target_role, due_date } = req.body || {};
+  if (!type || !title || !target_role) {
+    return res.status(400).json({ error: 'missing_fields', message: '请提供培训类型、标题和目标岗位' });
+  }
+
+  try {
+    const state = await getSharedState();
+    const employees = Array.isArray(state?.data?.employees) ? state.data.employees : [];
+    const users = Array.isArray(state?.data?.users) ? state.data.users : [];
+    const allUsers = employees.concat(users);
+
+    // 筛选符合目标岗位的人员
+    const targets = allUsers.filter(u => String(u.role || '') === target_role && String(u.status || '') !== '离职');
+
+    if (targets.length === 0) {
+      return res.status(404).json({ error: 'no_targets_found', message: `未找到岗位为 ${target_role} 的在职员工` });
+    }
+
+    let inserted = 0;
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      for (const t of targets) {
+        const trainingTaskId = `TR-${Date.now().toString().slice(-6)}-${Math.random().toString(36).slice(2, 6)}`;
+        await client.query(
+          `INSERT INTO training_tasks (task_id, type, title, target_role, assignee_username, store, brand, status, due_date)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8)`,
+          [
+            trainingTaskId,
+            type,
+            title,
+            target_role,
+            t.username,
+            t.store || '总部',
+            t.brand || '',
+            due_date || null
+          ]
+        );
+        inserted++;
+      }
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    res.json({ success: true, count: inserted, message: `成功为 ${inserted} 名员工下发了培训任务。Master Agent 将会在调度后通过飞书自动通知他们。` });
+  } catch (e) {
+    console.error('[API] /api/training/tasks/batch error:', e?.message);
+    res.status(500).json({ error: 'server_error', message: '内部服务器错误' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+registerAgentRoutes(app, authRequired);
+registerMasterRoutes(app, authRequired);
+registerNewScoringRoutes(app, authRequired);
+
 app.listen(PORT, HOST, async () => {
   console.log(`hrms-server listening on ${HOST}:${PORT}`);
+
+  // Initialize multi-agent system
+  try {
+    await ensureAgentTables();
+    startAgentScheduler();
+    console.log('[agents] Multi-agent system initialized');
+
+    // Start Bitable polling for checklist submissions (暂时禁用)
+    // startBitablePolling();
+    startScheduledTasks();
+    console.log('[agents] Bitable polling disabled, scheduled tasks started');
+
+    // Initialize Master Agent orchestration
+    setMasterPool(pool);
+    setTaskResponseHook(handleTaskResponse);
+    await ensureMasterTables();
+    startMasterAgent();
+    console.log('[master] Master Agent orchestration initialized');
+    
+    // Start Feishu daily sync
+    startDailyFeishuSync();
+    console.log('[feishu] Daily sync scheduler started');
+  } catch (e) {
+    console.error('[agents] init failed:', e?.message || e);
+  }
+
   // Migration: normalize all roles to 7 built-in roles + set specific user assignments
   try {
     const state = (await getSharedState()) || {};
@@ -4449,11 +10988,6 @@ app.get('/api/checkin/summary', authRequired, async (req, res) => {
 
     // Calculate leave balance per employee for this month
     const leaveBalances = {};
-    const leaveRecords = Array.isArray(state.leaveRecords) ? state.leaveRecords : [];
-    const leaveOverrides = state.leaveBalanceOverrides || {};
-    const [yr, mo] = month.split('-').map(Number);
-    const daysInMonth = new Date(yr, mo, 0).getDate();
-
     const allUsernames = new Set();
     rows.forEach(row => allUsernames.add(String(row.username || '').toLowerCase()));
 
@@ -4463,55 +10997,18 @@ app.get('/api/checkin/summary', authRequired, async (req, res) => {
       if (!emp) return;
       const uname = String(emp.username || '').trim();
 
-      // Base: 1 day off per week (count Sundays in month)
-      let weeksInMonth = 0;
-      for (let d = 1; d <= daysInMonth; d++) {
-        if (new Date(yr, mo - 1, d).getDay() === 0) weeksInMonth++;
-      }
-      let baseLeave = weeksInMonth;
-
-      // Annual leave: 5 days/year if employed >= 1 year, prorated monthly
-      const joinDate = String(emp.joinDate || emp.createdAt || '').trim();
-      let annualLeave = 0;
-      if (joinDate) {
-        const jd = new Date(joinDate);
-        const monthStart = new Date(yr, mo - 1, 1);
-        const diffMs = monthStart - jd;
-        const diffYears = diffMs / (365.25 * 24 * 60 * 60 * 1000);
-        if (diffYears >= 1) {
-          annualLeave = Math.round((5 / 12) * 100) / 100;
-        }
-      }
-
-      // Used leave this month
-      let usedLeave = 0;
-      leaveRecords.forEach(lr => {
-        if (String(lr.applicant || '').toLowerCase() !== uLower) return;
-        if (lr.status !== 'approved') return;
-        const sd = String(lr.startDate || '').trim();
-        const ed = String(lr.endDate || '').trim();
-        if (!sd || !ed) return;
-        const leaveStart = new Date(sd);
-        const leaveEnd = new Date(ed);
-        const mStart = new Date(yr, mo - 1, 1);
-        const mEnd = new Date(yr, mo, 0);
-        if (leaveEnd < mStart || leaveStart > mEnd) return;
-        const days = lr.days != null && lr.days !== '' ? Number(lr.days) : 0;
-        if (days > 0) usedLeave += days;
-      });
-
-      const totalLeave = baseLeave + annualLeave;
-      const remaining = Math.max(0, Math.round((totalLeave - usedLeave) * 100) / 100);
-      const overrideKey = `${uname}_${month}`;
-      const override = leaveOverrides[overrideKey];
-
+      const bal = calcEmployeeMonthlyLeaveBalance(state, emp, month);
+      if (!bal) return;
       leaveBalances[uname] = {
-        baseLeave,
-        annualLeave: Math.round(annualLeave * 100) / 100,
-        usedLeave,
-        totalLeave: Math.round(totalLeave * 100) / 100,
-        remaining: override != null ? Number(override) : remaining,
-        overridden: override != null
+        baseLeave: bal.baseLeave,
+        annualLeave: bal.annualLeave,
+        usedLeave: bal.usedLeave,
+        totalLeave: bal.totalLeave,
+        computedRemaining: bal.computedRemaining,
+        remaining: bal.remaining,
+        overridden: !!bal.overridden,
+        weeklyDetails: Array.isArray(bal.weeklyDetails) ? bal.weeklyDetails : [],
+        lastAdjustment: bal.lastAdjustment || null
       };
     });
 
@@ -4521,25 +11018,272 @@ app.get('/api/checkin/summary', authRequired, async (req, res) => {
   }
 });
 
+app.get('/api/profile/attendance-overview', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const role = String(req.user?.role || '').trim();
+  const month = String(req.query?.month || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  if (!month || !/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: 'missing_month' });
+
+  const parseDateOnly = (s) => {
+    const v = String(s || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return null;
+    const d = new Date(v + 'T00:00:00');
+    return Number.isFinite(d.getTime()) ? d : null;
+  };
+  const toDateOnly = (d) => {
+    if (!(d instanceof Date) || !Number.isFinite(d.getTime())) return '';
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  };
+  const shiftDate = (s, delta) => {
+    const d = parseDateOnly(s);
+    if (!d) return '';
+    d.setDate(d.getDate() + delta);
+    return toDateOnly(d);
+  };
+  const splitNameTokens = (raw) => {
+    return String(raw || '')
+      .split(/[，,、;；\n\r\t\s\/|]+/)
+      .map(x => String(x || '').trim())
+      .filter(Boolean);
+  };
+  const normalizeStaffUser = (item) => {
+    return String(item?.user || item?.username || '').trim().toLowerCase();
+  };
+  const normalizeStaffName = (item) => {
+    return String(item?.name || '').trim();
+  };
+
+  try {
+    const state = (await getSharedState()) || {};
+    const me = stateFindUserRecord(state, username) || {};
+    const myStore = String(me?.store || '').trim();
+    const myName = String(me?.name || '').trim();
+    const meLower = username.toLowerCase();
+
+    const [yearNum, monthNum] = month.split('-').map(Number);
+    const monthStart = `${month}-01`;
+    const monthEnd = `${month}-${String(new Date(yearNum, monthNum, 0).getDate()).padStart(2, '0')}`;
+
+    let conditions = [`to_char(check_time, 'YYYY-MM') = $1`, `lower(username) = lower($2)`];
+    let params = [month, username];
+    if (role === 'store_manager' && myStore) {
+      conditions.push(`store = $3`);
+      params.push(myStore);
+    }
+
+    const r = await pool.query(
+      `select type, check_time from checkin_records where ${conditions.join(' and ')} order by check_time asc`,
+      params
+    );
+    const checkinRows = Array.isArray(r.rows) ? r.rows : [];
+
+    const checkinByDay = new Map();
+    checkinRows.forEach((row) => {
+      const t = new Date(row.check_time);
+      if (!Number.isFinite(t.getTime())) return;
+      const dayKey = toDateOnly(t);
+      if (!dayKey || !dayKey.startsWith(month)) return;
+      const list = checkinByDay.get(dayKey) || [];
+      list.push({
+        type: String(row?.type || '').trim(),
+        date: t
+      });
+      checkinByDay.set(dayKey, list);
+    });
+
+    const reportList = Array.isArray(state?.dailyReports) ? state.dailyReports : [];
+    const scheduleByDay = new Map();
+    const restByDay = new Map();
+
+    reportList.forEach((rep) => {
+      const repStore = String(rep?.store || '').trim();
+      if (myStore && repStore && repStore !== myStore) return;
+
+      const repDate = String(rep?.date || '').trim();
+      if (!repDate) return;
+      const data = rep?.data && typeof rep.data === 'object' ? rep.data : {};
+
+      // 休息统计：按当天日报记录（优先结构化 staff list，兼容旧文本）
+      if (repDate >= monthStart && repDate <= monthEnd) {
+        const frontRestStaff = Array.isArray(data?.staff?.frontRestStaff) ? data.staff.frontRestStaff : [];
+        const kitchenRestStaff = Array.isArray(data?.staff?.kitchenRestStaff) ? data.staff.kitchenRestStaff : [];
+        const allRestStaff = frontRestStaff.concat(kitchenRestStaff);
+
+        let restDays = 0;
+        allRestStaff.forEach((it) => {
+          const u = String(it?.user || it?.username || '').trim().toLowerCase();
+          const n = String(it?.name || '').trim();
+          if (u && u !== meLower) return;
+          if (!u && myName && n && n !== myName) return;
+          const days = Number(it?.days || 1);
+          const val = Number.isFinite(days) && days > 0 ? days : 1;
+          restDays += val;
+        });
+
+        // legacy fallback: comma-separated text names
+        if (restDays <= 0) {
+          const frontRest = String(data?.staff?.frontRest || '').trim();
+          const kitchenRest = String(data?.staff?.kitchenRest || '').trim();
+          const tokens = splitNameTokens(frontRest).concat(splitNameTokens(kitchenRest));
+          const tokenSet = new Set(tokens.map(x => x.toLowerCase()));
+          const hitByToken = tokenSet.has(meLower) || (!!myName && tokenSet.has(myName.toLowerCase()));
+          const hitByRaw = (!!myName && (frontRest.includes(myName) || kitchenRest.includes(myName)))
+            || frontRest.toLowerCase().includes(meLower)
+            || kitchenRest.toLowerCase().includes(meLower);
+          if (hitByToken || hitByRaw) restDays = 1;
+        }
+
+        if (restDays > 0) {
+          const prev = Number(restByDay.get(repDate) || 0) || 0;
+          restByDay.set(repDate, Number((prev + restDays).toFixed(2)));
+        }
+      }
+
+      // 排班统计：日报记录的是“次日排班”
+      const targetDate = shiftDate(repDate, 1);
+      if (!targetDate || targetDate < monthStart || targetDate > monthEnd) return;
+      const next = data?.scheduleNextDay && typeof data.scheduleNextDay === 'object' ? data.scheduleNextDay : {};
+      const planAll = Array.isArray(next?.staff) ? next.staff : [];
+      const planMorning = Array.isArray(next?.morningStaff) ? next.morningStaff : [];
+      const planAfternoon = Array.isArray(next?.afternoonStaff) ? next.afternoonStaff : [];
+
+      const hasMatch = (list) => list.some((it) => {
+        const u = normalizeStaffUser(it);
+        const n = normalizeStaffName(it);
+        if (u && u === meLower) return true;
+        if (n && myName && n === myName) return true;
+        return false;
+      });
+
+      const dayPlan = scheduleByDay.get(targetDate) || { planned: false, morning: false, afternoon: false };
+      dayPlan.planned = dayPlan.planned || hasMatch(planAll) || hasMatch(planMorning) || hasMatch(planAfternoon);
+      dayPlan.morning = dayPlan.morning || hasMatch(planMorning) || hasMatch(planAll);
+      dayPlan.afternoon = dayPlan.afternoon || hasMatch(planAfternoon) || hasMatch(planAll);
+      scheduleByDay.set(targetDate, dayPlan);
+    });
+
+    let absentCount = 0;
+    let lateCount = 0;
+    let earlyLeaveCount = 0;
+
+    scheduleByDay.forEach((plan, dayKey) => {
+      if (!plan?.planned) return;
+      const logs = checkinByDay.get(dayKey) || [];
+      if (!logs.length) {
+        absentCount += 1;
+        return;
+      }
+
+      const clockInTimes = logs
+        .filter(x => x.type === 'clock_in')
+        .map(x => x.date)
+        .filter(d => d instanceof Date && Number.isFinite(d.getTime()));
+      const clockOutTimes = logs
+        .filter(x => x.type === 'clock_out')
+        .map(x => x.date)
+        .filter(d => d instanceof Date && Number.isFinite(d.getTime()));
+
+      if (plan.morning && clockInTimes.length) {
+        const firstIn = clockInTimes.reduce((a, b) => (a.getTime() <= b.getTime() ? a : b));
+        const lateMinutes = firstIn.getHours() * 60 + firstIn.getMinutes();
+        if (lateMinutes > (9 * 60)) lateCount += 1;
+      }
+
+      if (plan.afternoon && clockOutTimes.length) {
+        const lastOut = clockOutTimes.reduce((a, b) => (a.getTime() >= b.getTime() ? a : b));
+        const outMinutes = lastOut.getHours() * 60 + lastOut.getMinutes();
+        if (outMinutes < (22 * 60)) earlyLeaveCount += 1;
+      }
+    });
+
+    let restDays = 0;
+    restByDay.forEach((v) => {
+      const n = Number(v || 0);
+      if (Number.isFinite(n) && n > 0) restDays += n;
+    });
+    restDays = Number(restDays.toFixed(2));
+    const leaveBalance = calcEmployeeMonthlyLeaveBalance(state, me, month);
+    const monthRestRemaining = leaveBalance ? Number(leaveBalance.remaining || 0) : Number((4 - restDays).toFixed(2));
+
+    const joinDate = String(me?.joinDate || me?.hireDate || me?.startDate || me?.entryDate || me?.onboardDate || me?.joiningDate || '').trim();
+    const cumulativeLeaveDays = calcCumulativeLeaveDaysByJoinDate(joinDate);
+
+    return res.json({
+      month,
+      username,
+      name: myName || username,
+      cumulativeLeaveDays: Number(cumulativeLeaveDays.toFixed(1)),
+      absentCount,
+      lateCount,
+      earlyLeaveCount,
+      restDays,
+      monthRestRemaining,
+      leave: leaveBalance ? {
+        baseLeave: leaveBalance.baseLeave,
+        annualLeave: leaveBalance.annualLeave,
+        usedLeave: leaveBalance.usedLeave,
+        totalLeave: leaveBalance.totalLeave,
+        computedRemaining: leaveBalance.computedRemaining,
+        remaining: leaveBalance.remaining,
+        overridden: !!leaveBalance.overridden,
+        weeklyDetails: Array.isArray(leaveBalance.weeklyDetails) ? leaveBalance.weeklyDetails : [],
+        lastAdjustment: leaveBalance.lastAdjustment || null
+      } : null
+    });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
 // API to manually override leave balance for an employee in a specific month
 app.post('/api/checkin/leave-balance', authRequired, async (req, res) => {
+  const actor = String(req.user?.username || '').trim();
   const role = String(req.user?.role || '').trim();
-  if (role !== 'store_manager' && role !== 'admin' && role !== 'hq_manager') {
+  if (role !== 'admin' && role !== 'hr_manager') {
     return res.status(403).json({ error: 'forbidden' });
   }
   const targetUsername = String(req.body?.username || '').trim();
   const month = String(req.body?.month || '').trim();
   const value = Number(req.body?.value);
+  const note = String(req.body?.note || '').trim();
   if (!targetUsername || !month || !Number.isFinite(value)) {
     return res.status(400).json({ error: 'missing_params' });
   }
   try {
     const state = (await getSharedState()) || {};
-    const overrides = state.leaveBalanceOverrides || {};
+    const person = stateFindUserRecord(state, targetUsername) || {};
+    const before = calcEmployeeMonthlyLeaveBalance(state, person, month);
+    const oldValue = before ? Number(before.remaining || 0) : 0;
+
+    const overrides = state.leaveBalanceOverrides && typeof state.leaveBalanceOverrides === 'object'
+      ? { ...state.leaveBalanceOverrides }
+      : {};
     const key = `${targetUsername}_${month}`;
     overrides[key] = value;
-    await saveSharedState({ ...state, leaveBalanceOverrides: overrides });
-    return res.json({ ok: true, key, value });
+
+    const logs = Array.isArray(state.leaveBalanceAdjustments) ? state.leaveBalanceAdjustments.slice() : [];
+    const rec = {
+      id: randomUUID(),
+      key,
+      month,
+      targetUsername,
+      targetName: String(person?.name || targetUsername).trim(),
+      store: String(person?.store || '').trim(),
+      oldValue,
+      newValue: Number(value),
+      note,
+      adjustedBy: actor,
+      adjustedByRole: role,
+      adjustedAt: hrmsNowISO()
+    };
+    logs.unshift(rec);
+
+    await saveSharedState({ ...state, leaveBalanceOverrides: overrides, leaveBalanceAdjustments: logs.slice(0, 5000) });
+    return res.json({ ok: true, key, value: Number(value), adjustment: rec });
   } catch (e) {
     return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
   }
@@ -4696,6 +11440,11 @@ ensureApprovalTables();
 ensureUserReadsTable();
 ensureUserSessionsTable();
 ensureCheckinTable();
+ensureOpsTasksTable();
+ensureFeishuSyncTable();
+ensureFeishuGenericRecordsTable();
+ensureTableVisitRecordsTable();
+startOpsTaskScheduler();
 
 setInterval(() => {
   (async () => {
@@ -4741,6 +11490,49 @@ setInterval(() => {
         await saveSharedState({ ...state, employees });
       }
 
+      // Promotion training reminder: one day before session date
+      try {
+        let state2 = (await getSharedState()) || {};
+        const tracks = Array.isArray(state2.promotionTracks) ? state2.promotionTracks.slice() : [];
+        if (tracks.length) {
+          const nowDay = new Date(dateOnly + 'T00:00:00').getTime();
+          let changedTrack = false;
+          for (let i = 0; i < tracks.length; i += 1) {
+            const tr = tracks[i] || {};
+            const sessions = Array.isArray(tr.trainingSessions) ? tr.trainingSessions.slice() : [];
+            let sessionChanged = false;
+            for (let j = 0; j < sessions.length; j += 1) {
+              const s = sessions[j] || {};
+              const sDate = safeDateOnly(s?.date);
+              if (!sDate) continue;
+              const sTs = new Date(sDate + 'T00:00:00').getTime();
+              const diffDays = Math.round((sTs - nowDay) / 86400000);
+              if (diffDays !== 1) continue;
+              if (String(s?.status || '') === 'completed') continue;
+              if (s?.reminderSentAt) continue;
+              const recipients = await getPromotionTrackRecipients(state2, tr);
+              const title = '晋升培训提醒（提前1天）';
+              const msg = `${String(tr?.applicantName || tr?.applicantUsername || '').trim() || '员工'} 的培训「${String(s?.title || '').trim() || '课程'}」将在 ${sDate} 开始，请提前准备。`;
+              for (const u of recipients) {
+                state2 = addStateNotification(state2, makeNotif(u, title, msg, { type: 'promotion_training_reminder', trackId: String(tr?.id || ''), sessionId: String(s?.id || '') }));
+              }
+              sessions[j] = { ...s, reminderSentAt: hrmsNowISO() };
+              sessionChanged = true;
+            }
+            if (sessionChanged) {
+              tracks[i] = { ...tr, trainingSessions: sessions, updatedAt: hrmsNowISO() };
+              changedTrack = true;
+            }
+          }
+          if (changedTrack) {
+            state2 = { ...state2, promotionTracks: tracks };
+            await saveSharedState(state2);
+          }
+        }
+      } catch (e) {
+        console.log('promotion reminder job failed:', e?.message || e);
+      }
+
       for (const it of items) {
         try {
           await pool.query('update approval_requests set executed_at = now(), updated_at = now() where id = $1', [it.id]);
@@ -4751,6 +11543,412 @@ setInterval(() => {
     }
   })();
 }, 30 * 60 * 1000);
+
+// ========== 生日祝福自动发送 ==========
+
+// 解析生日字段，返回 { month, day } 或 null
+function parseBirthdayMonthDay(birthday) {
+  const s = String(birthday || '').trim();
+  if (!s) return null;
+  // 支持格式: YYYY-MM-DD, MM-DD, YYYY/MM/DD, MM/DD
+  const match = s.match(/(?:\d{4}[-/])?(\d{1,2})[-/](\d{1,2})/);
+  if (!match) return null;
+  const month = parseInt(match[1], 10);
+  const day = parseInt(match[2], 10);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  return { month, day };
+}
+
+// 获取下个月的年月
+function getNextMonth(today) {
+  const y = today.getFullYear();
+  const m = today.getMonth() + 1; // 1-12
+  if (m === 12) return { year: y + 1, month: 1 };
+  return { year: y, month: m + 1 };
+}
+
+// 检查是否是月底（当月最后3天）
+function isEndOfMonth(today) {
+  const lastDay = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
+  return today.getDate() >= lastDay - 2;
+}
+
+// 生日祝福定时任务 - 每小时检查一次
+setInterval(() => {
+  (async () => {
+    try {
+      const now = new Date();
+      const todayMonth = now.getMonth() + 1;
+      const todayDay = now.getDate();
+      const todayStr = `${now.getFullYear()}-${String(todayMonth).padStart(2, '0')}-${String(todayDay).padStart(2, '0')}`;
+      const hour = now.getHours();
+
+      let state = (await getSharedState()) || {};
+      const employees = Array.isArray(state.employees) ? state.employees : [];
+      const activeEmployees = employees.filter(e => String(e?.status || '').trim() !== '离职' && String(e?.status || '').trim() !== 'inactive');
+
+      // 记录已发送的生日祝福，避免重复
+      const birthdayGreetingsSent = state.birthdayGreetingsSent || {};
+      const birthdayRemindersSent = state.birthdayRemindersSent || {};
+      const monthlyRemindersSent = state.monthlyRemindersSent || {};
+
+      let changed = false;
+
+      // === 1. 生日当天自动发送祝福（每天8-10点之间执行一次）===
+      if (hour >= 8 && hour <= 10) {
+        const adminUsername = await pickAdminUsername(state);
+        const adminName = adminUsername ? (stateFindUserRecord(state, adminUsername)?.name || adminUsername) : '总部';
+
+        for (const emp of activeEmployees) {
+          const bd = parseBirthdayMonthDay(emp?.birthday);
+          if (!bd || bd.month !== todayMonth || bd.day !== todayDay) continue;
+
+          const empUsername = String(emp?.username || '').trim();
+          const empName = String(emp?.name || '').trim() || empUsername;
+          const greetingKey = `${empUsername}_${todayStr}`;
+
+          if (birthdayGreetingsSent[greetingKey]) continue;
+
+          // 生日祝福消息
+          const message = `${empName}，今天是你的生日，公司代表门店及总部所有人员祝你生日快乐，感谢你在过去一年里的努力与付出，你的专业与责任心让团队更加稳固可靠。愿新的一岁事业顺遂、生活明朗，收获成长与喜悦。公司很荣幸与你一路同行，期待与你共同创造更好的未来。\n\n来自总部 ${adminName}（${todayStr}）`;
+
+          state = addStateNotification(state, makeNotif(empUsername, '🎂 生日快乐', message, { type: 'birthday_greeting' }));
+          birthdayGreetingsSent[greetingKey] = hrmsNowISO();
+          changed = true;
+          console.log(`Birthday greeting sent to ${empName} (${empUsername})`);
+        }
+      }
+
+      // === 2. 生日前1天提醒店长（每天8-10点之间执行一次）===
+      if (hour >= 8 && hour <= 10) {
+        const tomorrow = new Date(now.getTime() + 86400000);
+        const tomorrowMonth = tomorrow.getMonth() + 1;
+        const tomorrowDay = tomorrow.getDate();
+        const tomorrowStr = `${tomorrow.getFullYear()}-${String(tomorrowMonth).padStart(2, '0')}-${String(tomorrowDay).padStart(2, '0')}`;
+
+        // 按门店分组明天过生日的员工
+        const storeMap = new Map();
+        for (const emp of activeEmployees) {
+          const bd = parseBirthdayMonthDay(emp?.birthday);
+          if (!bd || bd.month !== tomorrowMonth || bd.day !== tomorrowDay) continue;
+          const store = String(emp?.store || '').trim() || '总部';
+          if (!storeMap.has(store)) storeMap.set(store, []);
+          storeMap.get(store).push(emp);
+        }
+
+        // 通知每个门店的店长
+        for (const [store, emps] of storeMap) {
+          const storeManager = activeEmployees.find(e => String(e?.store || '').trim() === store && String(e?.role || '').trim() === 'store_manager');
+          if (!storeManager) continue;
+
+          const smUsername = String(storeManager?.username || '').trim();
+          const reminderKey = `${smUsername}_${tomorrowStr}`;
+          if (birthdayRemindersSent[reminderKey]) continue;
+
+          const names = emps.map(e => String(e?.name || e?.username || '').trim()).join('、');
+          const message = `温馨提醒：明天（${tomorrowStr}）是以下员工的生日，请提前准备祝福：\n\n${names}`;
+
+          state = addStateNotification(state, makeNotif(smUsername, '🎂 明日生日提醒', message, { type: 'birthday_reminder_1day' }));
+          birthdayRemindersSent[reminderKey] = hrmsNowISO();
+          changed = true;
+        }
+      }
+
+      // === 3. 月底提醒：下月生日员工名单（每月最后3天的8-10点执行一次）===
+      if (hour >= 8 && hour <= 10 && isEndOfMonth(now)) {
+        const nextMonth = getNextMonth(now);
+        const monthKey = `${nextMonth.year}-${String(nextMonth.month).padStart(2, '0')}`;
+
+        // 找出下月过生日的员工
+        const nextMonthBirthdays = activeEmployees.filter(e => {
+          const bd = parseBirthdayMonthDay(e?.birthday);
+          return bd && bd.month === nextMonth.month;
+        });
+
+        if (nextMonthBirthdays.length > 0) {
+          // 按门店分组
+          const storeMap = new Map();
+          for (const emp of nextMonthBirthdays) {
+            const store = String(emp?.store || '').trim() || '总部';
+            if (!storeMap.has(store)) storeMap.set(store, []);
+            storeMap.get(store).push(emp);
+          }
+
+          // 通知每个门店的店长
+          for (const [store, emps] of storeMap) {
+            const storeManager = activeEmployees.find(e => String(e?.store || '').trim() === store && String(e?.role || '').trim() === 'store_manager');
+            if (!storeManager) continue;
+
+            const smUsername = String(storeManager?.username || '').trim();
+            const reminderKey = `monthly_${smUsername}_${monthKey}`;
+            if (monthlyRemindersSent[reminderKey]) continue;
+
+            const lines = emps.map(e => {
+              const bd = parseBirthdayMonthDay(e?.birthday);
+              return `• ${String(e?.name || e?.username || '').trim()}（${nextMonth.month}月${bd?.day}日）`;
+            }).join('\n');
+            const message = `以下是${store}门店${nextMonth.month}月份过生日的员工名单，请提前准备祝福：\n\n${lines}`;
+
+            state = addStateNotification(state, makeNotif(smUsername, `📋 ${nextMonth.month}月生日员工名单`, message, { type: 'birthday_monthly_reminder' }));
+            monthlyRemindersSent[reminderKey] = hrmsNowISO();
+            changed = true;
+          }
+
+          // 通知总部人事（HR）
+          const hrUsername = await pickHrManagerUsername(state);
+          if (hrUsername) {
+            const hrReminderKey = `monthly_hr_${monthKey}`;
+            if (!monthlyRemindersSent[hrReminderKey]) {
+              const lines = nextMonthBirthdays.map(e => {
+                const bd = parseBirthdayMonthDay(e?.birthday);
+                const store = String(e?.store || '').trim() || '总部';
+                return `• ${String(e?.name || e?.username || '').trim()}（${store}，${nextMonth.month}月${bd?.day}日）`;
+              }).sort().join('\n');
+              const message = `以下是公司所有门店（含总部）${nextMonth.month}月份过生日的员工名单：\n\n${lines}`;
+
+              state = addStateNotification(state, makeNotif(hrUsername, `📋 ${nextMonth.month}月全公司生日员工名单`, message, { type: 'birthday_monthly_reminder_hr' }));
+              monthlyRemindersSent[hrReminderKey] = hrmsNowISO();
+              changed = true;
+            }
+          }
+        }
+      }
+
+      // 保存状态
+      if (changed) {
+        state.birthdayGreetingsSent = birthdayGreetingsSent;
+        state.birthdayRemindersSent = birthdayRemindersSent;
+        state.monthlyRemindersSent = monthlyRemindersSent;
+        await saveSharedState(state);
+      }
+
+    } catch (e) {
+      console.log('birthday greeting job failed:', e?.message || e);
+    }
+  })();
+}, 60 * 60 * 1000); // 每小时检查一次
+
+// 手动触发生日检查（仅管理员，用于测试）
+app.post('/api/birthday/check', authRequired, async (req, res) => {
+  try {
+    const role = String(req.user?.role || '').trim();
+    if (role !== 'admin') return res.status(403).json({ error: 'admin_only' });
+
+    const forceDate = String(req.body?.date || '').trim(); // 可选：模拟指定日期 YYYY-MM-DD
+    const now = forceDate ? new Date(forceDate + 'T09:00:00') : new Date();
+    if (isNaN(now.getTime())) return res.status(400).json({ error: 'invalid_date' });
+
+    const todayMonth = now.getMonth() + 1;
+    const todayDay = now.getDate();
+    const todayStr = `${now.getFullYear()}-${String(todayMonth).padStart(2, '0')}-${String(todayDay).padStart(2, '0')}`;
+
+    let state = (await getSharedState()) || {};
+    const employees = Array.isArray(state.employees) ? state.employees : [];
+    const activeEmployees = employees.filter(e => String(e?.status || '').trim() !== '离职' && String(e?.status || '').trim() !== 'inactive');
+
+    const birthdayGreetingsSent = state.birthdayGreetingsSent || {};
+    const birthdayRemindersSent = state.birthdayRemindersSent || {};
+    const monthlyRemindersSent = state.monthlyRemindersSent || {};
+
+    let changed = false;
+    const results = { greetings: [], reminders1day: [], monthlyReminders: [] };
+
+    // 1. 生日当天祝福
+    const adminUsername = await pickAdminUsername(state);
+    const adminName = adminUsername ? (stateFindUserRecord(state, adminUsername)?.name || adminUsername) : '总部';
+
+    for (const emp of activeEmployees) {
+      const bd = parseBirthdayMonthDay(emp?.birthday);
+      if (!bd || bd.month !== todayMonth || bd.day !== todayDay) continue;
+
+      const empUsername = String(emp?.username || '').trim();
+      const empName = String(emp?.name || '').trim() || empUsername;
+      const greetingKey = `${empUsername}_${todayStr}`;
+
+      if (birthdayGreetingsSent[greetingKey]) {
+        results.greetings.push({ name: empName, status: 'already_sent' });
+        continue;
+      }
+
+      const message = `${empName}，今天是你的生日，公司代表门店及总部所有人员祝你生日快乐，感谢你在过去一年里的努力与付出，你的专业与责任心让团队更加稳固可靠。愿新的一岁事业顺遂、生活明朗，收获成长与喜悦。公司很荣幸与你一路同行，期待与你共同创造更好的未来。\n\n来自总部 ${adminName}（${todayStr}）`;
+
+      state = addStateNotification(state, makeNotif(empUsername, '🎂 生日快乐', message, { type: 'birthday_greeting' }));
+      birthdayGreetingsSent[greetingKey] = hrmsNowISO();
+      changed = true;
+      results.greetings.push({ name: empName, status: 'sent' });
+    }
+
+    // 2. 生日前1天提醒店长
+    const tomorrow = new Date(now.getTime() + 86400000);
+    const tomorrowMonth = tomorrow.getMonth() + 1;
+    const tomorrowDay = tomorrow.getDate();
+    const tomorrowStr = `${tomorrow.getFullYear()}-${String(tomorrowMonth).padStart(2, '0')}-${String(tomorrowDay).padStart(2, '0')}`;
+
+    const storeMap = new Map();
+    for (const emp of activeEmployees) {
+      const bd = parseBirthdayMonthDay(emp?.birthday);
+      if (!bd || bd.month !== tomorrowMonth || bd.day !== tomorrowDay) continue;
+      const store = String(emp?.store || '').trim() || '总部';
+      if (!storeMap.has(store)) storeMap.set(store, []);
+      storeMap.get(store).push(emp);
+    }
+
+    for (const [store, emps] of storeMap) {
+      const storeManager = activeEmployees.find(e => String(e?.store || '').trim() === store && String(e?.role || '').trim() === 'store_manager');
+      if (!storeManager) continue;
+
+      const smUsername = String(storeManager?.username || '').trim();
+      const reminderKey = `${smUsername}_${tomorrowStr}`;
+      if (birthdayRemindersSent[reminderKey]) {
+        results.reminders1day.push({ store, status: 'already_sent' });
+        continue;
+      }
+
+      const names = emps.map(e => String(e?.name || e?.username || '').trim()).join('、');
+      const message = `温馨提醒：明天（${tomorrowStr}）是以下员工的生日，请提前准备祝福：\n\n${names}`;
+
+      state = addStateNotification(state, makeNotif(smUsername, '🎂 明日生日提醒', message, { type: 'birthday_reminder_1day' }));
+      birthdayRemindersSent[reminderKey] = hrmsNowISO();
+      changed = true;
+      results.reminders1day.push({ store, employees: names, status: 'sent' });
+    }
+
+    // 3. 月底提醒
+    if (isEndOfMonth(now)) {
+      const nextMonth = getNextMonth(now);
+      const monthKey = `${nextMonth.year}-${String(nextMonth.month).padStart(2, '0')}`;
+
+      const nextMonthBirthdays = activeEmployees.filter(e => {
+        const bd = parseBirthdayMonthDay(e?.birthday);
+        return bd && bd.month === nextMonth.month;
+      });
+
+      if (nextMonthBirthdays.length > 0) {
+        const storeMap2 = new Map();
+        for (const emp of nextMonthBirthdays) {
+          const store = String(emp?.store || '').trim() || '总部';
+          if (!storeMap2.has(store)) storeMap2.set(store, []);
+          storeMap2.get(store).push(emp);
+        }
+
+        for (const [store, emps] of storeMap2) {
+          const storeManager = activeEmployees.find(e => String(e?.store || '').trim() === store && String(e?.role || '').trim() === 'store_manager');
+          if (!storeManager) continue;
+
+          const smUsername = String(storeManager?.username || '').trim();
+          const reminderKey = `monthly_${smUsername}_${monthKey}`;
+          if (monthlyRemindersSent[reminderKey]) {
+            results.monthlyReminders.push({ store, status: 'already_sent' });
+            continue;
+          }
+
+          const lines = emps.map(e => {
+            const bd = parseBirthdayMonthDay(e?.birthday);
+            return `• ${String(e?.name || e?.username || '').trim()}（${nextMonth.month}月${bd?.day}日）`;
+          }).join('\n');
+          const message = `以下是${store}门店${nextMonth.month}月份过生日的员工名单，请提前准备祝福：\n\n${lines}`;
+
+          state = addStateNotification(state, makeNotif(smUsername, `📋 ${nextMonth.month}月生日员工名单`, message, { type: 'birthday_monthly_reminder' }));
+          monthlyRemindersSent[reminderKey] = hrmsNowISO();
+          changed = true;
+          results.monthlyReminders.push({ store, count: emps.length, status: 'sent' });
+        }
+
+        const hrUsername = await pickHrManagerUsername(state);
+        if (hrUsername) {
+          const hrReminderKey = `monthly_hr_${monthKey}`;
+          if (!monthlyRemindersSent[hrReminderKey]) {
+            const lines = nextMonthBirthdays.map(e => {
+              const bd = parseBirthdayMonthDay(e?.birthday);
+              const store = String(e?.store || '').trim() || '总部';
+              return `• ${String(e?.name || e?.username || '').trim()}（${store}，${nextMonth.month}月${bd?.day}日）`;
+            }).sort().join('\n');
+            const message = `以下是公司所有门店（含总部）${nextMonth.month}月份过生日的员工名单：\n\n${lines}`;
+
+            state = addStateNotification(state, makeNotif(hrUsername, `📋 ${nextMonth.month}月全公司生日员工名单`, message, { type: 'birthday_monthly_reminder_hr' }));
+            monthlyRemindersSent[hrReminderKey] = hrmsNowISO();
+            changed = true;
+            results.monthlyReminders.push({ target: 'HR', count: nextMonthBirthdays.length, status: 'sent' });
+          }
+        }
+      }
+    }
+
+    if (changed) {
+      state.birthdayGreetingsSent = birthdayGreetingsSent;
+      state.birthdayRemindersSent = birthdayRemindersSent;
+      state.monthlyRemindersSent = monthlyRemindersSent;
+      await saveSharedState(state);
+    }
+
+    res.json({ ok: true, date: todayStr, isEndOfMonth: isEndOfMonth(now), results });
+  } catch (e) {
+    console.error('POST /api/birthday/check error:', e);
+    res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
+// 查询生日员工列表（管理员/HR/店长）
+app.get('/api/birthday/upcoming', authRequired, async (req, res) => {
+  try {
+    const role = String(req.user?.role || '').trim();
+    const username = String(req.user?.username || '').trim();
+    const canSeeAll = role === 'admin' || role === 'hq_manager' || role === 'hr_manager' || role.startsWith('custom_人事');
+
+    const state = (await getSharedState()) || {};
+    const employees = Array.isArray(state.employees) ? state.employees : [];
+    const activeEmployees = employees.filter(e => String(e?.status || '').trim() !== '离职' && String(e?.status || '').trim() !== 'inactive');
+
+    let myStore = '';
+    if (role === 'store_manager') {
+      const me = activeEmployees.find(e => String(e?.username || '').toLowerCase() === username.toLowerCase());
+      myStore = String(me?.store || '').trim();
+    }
+
+    const now = new Date();
+    const todayMonth = now.getMonth() + 1;
+    const todayDay = now.getDate();
+    const daysParam = Math.max(1, Math.min(90, Number(req.query?.days) || 30));
+
+    const results = [];
+    for (const emp of activeEmployees) {
+      const bd = parseBirthdayMonthDay(emp?.birthday);
+      if (!bd) continue;
+
+      // 店长只能看本店
+      if (role === 'store_manager' && myStore) {
+        const empStore = String(emp?.store || '').trim();
+        if (empStore !== myStore) continue;
+      }
+
+      // 计算距离生日的天数
+      const thisYearBd = new Date(now.getFullYear(), bd.month - 1, bd.day);
+      let nextBd = thisYearBd;
+      if (thisYearBd < now) {
+        nextBd = new Date(now.getFullYear() + 1, bd.month - 1, bd.day);
+      }
+      const diffDays = Math.ceil((nextBd.getTime() - now.getTime()) / 86400000);
+
+      if (diffDays <= daysParam) {
+        results.push({
+          username: String(emp?.username || '').trim(),
+          name: String(emp?.name || '').trim(),
+          store: String(emp?.store || '').trim() || '总部',
+          birthday: String(emp?.birthday || '').trim(),
+          birthdayDisplay: `${bd.month}月${bd.day}日`,
+          daysUntil: diffDays,
+          isToday: diffDays === 0
+        });
+      }
+    }
+
+    results.sort((a, b) => a.daysUntil - b.daysUntil);
+    res.json({ ok: true, upcoming: results });
+  } catch (e) {
+    console.error('GET /api/birthday/upcoming error:', e);
+    res.status(500).json({ error: String(e?.message || e) });
+  }
+});
 
 // ========== 培训专注度监控 API ==========
 

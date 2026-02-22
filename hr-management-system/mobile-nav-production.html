@@ -816,6 +816,84 @@
             animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
         }
 
+        @keyframes notifPulse {
+            0%, 100% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.4); opacity: 0.5; }
+        }
+        @keyframes notifCardIn {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .notif-card-anim {
+            animation: notifCardIn 0.35s ease-out both;
+        }
+        .notif-card-item {
+            border-radius: 14px;
+            padding: 14px 16px;
+            margin-bottom: 10px;
+            position: relative;
+            overflow: hidden;
+            border: 1px solid rgba(255,255,255,0.07);
+            background: linear-gradient(135deg, rgba(255,255,255,0.04), rgba(255,255,255,0.015));
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            transition: transform 0.18s ease, box-shadow 0.18s ease;
+        }
+        .notif-card-item:active {
+            transform: scale(0.985);
+        }
+        .notif-card-item::before {
+            content: '';
+            position: absolute;
+            left: 0; top: 0; bottom: 0;
+            width: 3.5px;
+            border-radius: 3px 0 0 3px;
+        }
+        .notif-card-item.notif-type-new::before {
+            background: linear-gradient(180deg, #f59e0b, #d97706);
+        }
+        .notif-card-item.notif-type-important::before {
+            background: linear-gradient(180deg, #ef4444, #dc2626);
+        }
+        .notif-card-item.notif-type-system::before {
+            background: linear-gradient(180deg, #3b82f6, #2563eb);
+        }
+        .notif-card-item.notif-type-announcement::before {
+            background: linear-gradient(180deg, #8b5cf6, #7c3aed);
+        }
+        .notif-expand-area {
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.3s ease;
+        }
+        .notif-expand-area.expanded {
+            max-height: 600px;
+        }
+        .notif-more-btn {
+            display: block;
+            width: 100%;
+            text-align: center;
+            padding: 10px;
+            margin-top: 4px;
+            border-radius: 12px;
+            border: 1px dashed rgba(200,215,230,0.15);
+            background: transparent;
+            color: rgba(200,215,230,0.65);
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .notif-more-btn:active {
+            background: rgba(255,255,255,0.04);
+        }
+        .notif-full-msg.notif-msg-show {
+            display: block !important;
+        }
+        .notif-full-msg.notif-msg-show + div {
+            display: none !important;
+        }
+
         /* Ripple effect for buttons */
         .btn-ripple {
             position: relative;
@@ -1760,7 +1838,137 @@
 
             #kb-chat-modal #kb-chat-input {
                 font-size: 16px !important; /* 防止iOS缩放 */
+                color: #111827 !important;
+                caret-color: #111827 !important;
+                background: #ffffff !important;
             }
+
+            #kb-chat-modal #kb-chat-input::placeholder {
+                color: #6b7280 !important;
+                opacity: 1 !important;
+            }
+
+            /* Agent监控移动端适配 */
+            .am-modal-content {
+                max-width: 100%;
+                height: 100vh;
+                height: 100dvh;
+                border-radius: 0;
+                margin: 0;
+                display: flex;
+                flex-direction: column;
+                background: #f8fafc;
+            }
+            .am-header {
+                background: linear-gradient(135deg, #0f766e, #0ea5a0);
+                padding: 12px 16px;
+                flex-shrink: 0;
+            }
+            .am-header h3 { color: #fff; margin: 0; font-size: 16px; }
+            .am-header .modal-close { color: #fff; font-size: 24px; }
+            .am-body {
+                flex: 1;
+                overflow-y: auto;
+                -webkit-overflow-scrolling: touch;
+                padding: 12px;
+                padding-bottom: 70px;
+            }
+            .am-tab-panel {
+                -webkit-overflow-scrolling: touch;
+                touch-action: pan-y;
+            }
+            /* 底部Tab栏 */
+            .am-tab-bar {
+                position: fixed;
+                bottom: 0;
+                left: 0;
+                right: 0;
+                display: flex;
+                background: #fff;
+                border-top: 1px solid #e5e7eb;
+                padding: 4px 0;
+                padding-bottom: env(safe-area-inset-bottom, 4px);
+                z-index: 10;
+            }
+            .am-tab-btn {
+                flex: 1;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                padding: 6px 4px;
+                background: none;
+                border: none;
+                color: #64748b;
+                font-size: 10px;
+                cursor: pointer;
+                min-height: 48px;
+            }
+            .am-tab-btn.active { color: #0f766e; }
+            .am-tab-icon { font-size: 18px; line-height: 1.2; }
+            .am-tab-label { margin-top: 2px; font-weight: 500; }
+            /* 概览卡片网格 */
+            .am-dashboard-grid {
+                display: grid;
+                grid-template-columns: repeat(2, 1fr);
+                gap: 10px;
+            }
+            .am-stat-card {
+                background: #fff;
+                border: 1px solid #e5e7eb;
+                border-radius: 12px;
+                padding: 12px;
+                text-align: center;
+            }
+            .am-stat-label { font-size: 11px; color: #64748b; }
+            .am-stat-value { font-size: 24px; font-weight: 800; margin-top: 4px; }
+            .am-stat-value.red { color: #b91c1c; }
+            .am-stat-value.green { color: #0f766e; }
+            .am-stat-value.orange { color: #b45309; }
+            .am-stat-value.purple { color: #6366f1; }
+            .am-stat-sub { font-size: 10px; color: #94a3b8; margin-top: 2px; }
+            /* 信息卡片 */
+            .am-info-card {
+                margin-top: 12px;
+                padding: 12px;
+                background: #f0fdf4;
+                border-radius: 10px;
+                border: 1px solid #bbf7d0;
+            }
+            .am-info-title { font-size: 13px; font-weight: 600; color: #166534; }
+            .am-info-text { font-size: 12px; color: #15803d; line-height: 1.5; margin-top: 4px; }
+            /* 操作按钮 */
+            .am-actions { margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
+            .am-actions .btn { padding: 8px 16px; font-size: 13px; }
+            /* 列表样式 */
+            .am-list { display: flex; flex-direction: column; gap: 10px; }
+            .am-card {
+                background: #fff;
+                border: 1px solid #e5e7eb;
+                border-radius: 10px;
+                padding: 12px;
+            }
+            .am-card-header {
+                display: flex;
+                justify-content: space-between;
+                align-items: flex-start;
+                gap: 8px;
+            }
+            .am-card-title { font-size: 14px; font-weight: 600; color: #1e293b; flex: 1; }
+            .am-card-score { font-size: 20px; font-weight: 800; }
+            .am-card-meta { font-size: 11px; color: #64748b; margin-top: 4px; }
+            .am-card-detail { font-size: 12px; color: #334155; margin-top: 8px; line-height: 1.5; }
+            .am-card-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+            .am-tag { padding: 3px 8px; border-radius: 6px; font-size: 11px; background: #f1f5f9; color: #334155; }
+            .am-tag.red { background: #fef2f2; color: #b91c1c; }
+            .am-tag.green { background: #f0fdf4; color: #15803d; }
+            .am-badge { padding: 2px 6px; border-radius: 6px; font-size: 10px; font-weight: 500; }
+            .am-badge.red { background: #fef2f2; color: #b91c1c; }
+            .am-badge.green { background: #f0fdf4; color: #15803d; }
+            .am-badge.gray { background: #f1f5f9; color: #64748b; }
+            /* 解决输入框 */
+            .am-resolve-row { display: flex; gap: 8px; margin-top: 10px; }
+            .am-resolve-row input { flex: 1; padding: 8px 10px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 13px; }
+            .am-resolve-row .btn { padding: 6px 12px; font-size: 12px; }
         }
 
         .notification {
@@ -2452,12 +2660,20 @@
                 padding: 16px !important;
             }
 
-            /* 日报员工选择弹窗 - 全屏底部弹出 */
+            /* 日报员工选择弹窗 */
+            #dr-staff-modal {
+                align-items: flex-end !important;
+                padding: 0 8px calc(8px + env(safe-area-inset-bottom, 0px)) !important;
+            }
             #dr-staff-modal .modal-content {
-                max-height: 85dvh !important;
-                height: 85dvh !important;
+                width: min(680px, calc(100vw - 16px)) !important;
+                max-width: min(680px, calc(100vw - 16px)) !important;
+                margin: 0 auto !important;
+                max-height: min(76dvh, calc(100dvh - 88px)) !important;
+                height: auto !important;
                 display: flex !important;
                 flex-direction: column !important;
+                border-radius: 18px !important;
             }
             #dr-staff-modal .modal-header {
                 flex-shrink: 0;
@@ -2493,6 +2709,15 @@
                 padding: 14px 20px !important;
                 font-size: 16px !important;
                 min-height: 48px;
+            }
+
+            /* 手机上固定底部抽屉，不再使用 JS 顶部定位 */
+            @media (max-width: 768px) {
+                #dr-staff-modal .modal-content {
+                    width: min(680px, calc(100vw - 16px)) !important;
+                    max-width: min(680px, calc(100vw - 16px)) !important;
+                    margin: 0 auto !important;
+                }
             }
 
             /* 晋升申请页面移动端 */
@@ -5719,53 +5944,6 @@
 </head>
 <body>
     
-    <!-- 预加载动画 -->
-    <div id="loading-overlay" class="loading-overlay hidden">
-        <div class="spinner"></div>
-    </div>
-
-    <!-- 批量下发培训任务弹窗 -->
-    <div id="batch-training-modal" class="modal ui-modal">
-        <div class="modal-content" style="max-width: 520px;">
-            <div class="modal-header">
-                <div>
-                    <h3 class="ui-modal-title">批量下发培训任务</h3>
-                    <div class="ui-modal-desc">为指定岗位的在职员工一键下发学习任务</div>
-                </div>
-                <button class="modal-close" onclick="closeBatchTrainingModal()">×</button>
-            </div>
-            <div class="modal-body ui-form">
-                <div class="ui-form-group">
-                    <label class="ui-label">培训类型 <span class="req">*</span></label>
-                    <select id="batch-training-type">
-                        <option value="onboarding">新员工入职培训 (Onboarding)</option>
-                        <option value="skill_upgrade" selected>技能提升 (Skill Upgrade)</option>
-                        <option value="management">管理赋能 (Management)</option>
-                        <option value="culture">企业文化 (Culture)</option>
-                    </select>
-                </div>
-                <div class="ui-form-group">
-                    <label class="ui-label">课程标题 <span class="req">*</span></label>
-                    <input type="text" id="batch-training-title" placeholder="例如：海鲜食材鉴别与处理技能" class="ui-input">
-                </div>
-                <div class="ui-form-group">
-                    <label class="ui-label">目标岗位 <span class="req">*</span></label>
-                    <select id="batch-training-role">
-                        <!-- 将由 JS 动态填充岗位选项 -->
-                    </select>
-                </div>
-                <div class="ui-form-group">
-                    <label class="ui-label">截止日期</label>
-                    <input type="date" id="batch-training-due" class="ui-input">
-                </div>
-            </div>
-            <div class="modal-footer">
-                <button class="btn btn-secondary" onclick="closeBatchTrainingModal()">取消</button>
-                <button class="btn" onclick="submitBatchTraining()">确认下发</button>
-            </div>
-        </div>
-    </div>
-
     <!-- 登录界面 -->
     <div id="login" class="container">
         <div class="login-container">
@@ -6705,7 +6883,6 @@
                         <button id="rep-tab-attendance" class="btn btn-secondary" type="button" onclick="showReportsTab('attendance'); loadReportsData();" style="flex:1; padding:10px 0; font-size:13px; font-weight:700; border-radius:10px; border:none; background:transparent;">考勤表</button>
                         <button id="rep-tab-payroll" class="btn btn-secondary" type="button" onclick="showReportsTab('payroll'); loadReportsData();" style="flex:1; padding:10px 0; font-size:13px; font-weight:700; border-radius:10px; border:none; background:transparent;">薪资表</button>
                         <button id="rep-tab-turnover" class="btn btn-secondary" type="button" onclick="showReportsTab('turnover'); loadReportsData();" style="flex:1; padding:10px 0; font-size:13px; font-weight:700; border-radius:10px; border:none; background:transparent;">离职率</button>
-                        <button id="rep-tab-attention" class="btn btn-secondary" type="button" onclick="showReportsTab('attention'); loadAttentionReport();" style="flex:1; padding:10px 0; font-size:13px; font-weight:700; border-radius:10px; border:none; background:transparent;">专注度</button>
                     </div>
 
                     <div id="rep-business" style="margin-bottom:18px;">
@@ -6733,9 +6910,6 @@
                         <div id="rep-turnover-box" style="color:rgba(200,215,230,0.6);">加载中...</div>
                     </div>
 
-                    <div id="rep-attention" class="hidden" style="margin-bottom:18px;">
-                        <div id="rep-attention-box" style="color:rgba(200,215,230,0.6);">加载中...</div>
-                    </div>
                 </div>
             </div>
 
@@ -6904,40 +7078,50 @@
                 </div>
             </div>
 
-            <!-- 知识库AI对话弹窗 -->
+            <!-- 知识库AI对话弹窗（部门Agent） -->
             <div id="kb-chat-modal" class="modal">
                 <div class="modal-content" style="max-width: 900px; height: 85vh; display: flex; flex-direction: column;">
                     <div class="modal-header" style="background: linear-gradient(135deg, #8b5cf6, #6366f1); flex-shrink: 0;">
                         <div>
-                            <h3 style="color: white;">🎓 AI培训助手</h3>
-                            <div style="color: rgba(255,255,255,0.8); font-size: 12px;">基于知识库内容进行智能培训问答</div>
+                            <h3 style="color: white;">🤝 部门分身助手</h3>
+                            <div id="kb-chat-agent-subtitle" style="color: rgba(255,255,255,0.86); font-size: 12px;">先选择部门，再进行咨询</div>
                         </div>
                         <button class="modal-close" onclick="closeKnowledgeChatModal()" style="color: white;">×</button>
                     </div>
                     <div class="modal-body" style="flex: 1; display: flex; flex-direction: column; overflow: hidden; padding: 0;">
+                        <!-- 部门选择区 -->
+                        <div style="padding: 14px 16px 10px; background: linear-gradient(180deg, rgba(99, 102, 241, 0.12) 0%, rgba(99, 102, 241, 0.03) 100%); border-bottom: 1px solid rgba(99, 102, 241, 0.16);">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                                <span style="font-size: 14px; font-weight: 700; color: #4f46e5;">🏢 选择咨询部门</span>
+                                <span id="kb-chat-agent-role-note" style="font-size: 11px; color: #6b7280;">仅展示您有权限的部门</span>
+                            </div>
+                            <div id="kb-chat-agent-container" style="display: flex; flex-wrap: wrap; gap: 8px;"></div>
+                            <div id="kb-chat-agent-desc" style="margin-top: 8px; font-size: 11px; color: #64748b;"></div>
+                        </div>
+
                         <!-- 知识库选择区 -->
                         <div style="padding: 16px; background: linear-gradient(180deg, rgba(139, 92, 246, 0.12) 0%, rgba(139, 92, 246, 0.04) 100%); border-bottom: 1px solid rgba(139, 92, 246, 0.15);">
                             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
                                 <div style="display: flex; align-items: center; gap: 8px;">
-                                    <span style="font-size: 14px; font-weight: 600; color: #8b5cf6;">📚 选择培训资料</span>
+                                    <span style="font-size: 14px; font-weight: 600; color: #8b5cf6;">📚 选择部门资料</span>
                                     <span id="kb-chat-selected-count" style="font-size: 11px; padding: 2px 8px; background: rgba(139, 92, 246, 0.2); border-radius: 10px; color: #8b5cf6;">已选 0 项</span>
                                 </div>
                                 <button class="btn btn-secondary" type="button" onclick="clearKnowledgeChatHistory()" style="padding: 6px 12px; font-size: 12px;">🗑️ 清空对话</button>
                             </div>
                             <div id="kb-chat-source-container" style="display: flex; flex-wrap: wrap; gap: 8px; max-height: 100px; overflow-y: auto; padding: 4px 0;"></div>
-                            <div style="margin-top: 8px; font-size: 11px; color: #888;">💡 点击选择资料，AI将基于所选内容进行培训问答</div>
+                            <div style="margin-top: 8px; font-size: 11px; color: #888;">💡 可多选资料；建议至少选择2-3份，提高回答准确度</div>
                         </div>
                         
                         <!-- 对话区域 -->
                         <div id="kb-chat-messages" style="flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px;">
                             <div class="kb-chat-welcome" style="text-align: center; padding: 40px 20px; color: #888;">
-                                <div style="font-size: 48px; margin-bottom: 16px;">🎓</div>
-                                <div style="font-size: 16px; font-weight: 600; color: #666;">欢迎使用AI培训助手</div>
-                                <div style="margin-top: 8px; font-size: 13px;">选择培训资料后，可以向我提问任何相关问题</div>
+                                <div style="font-size: 48px; margin-bottom: 16px;">🤝</div>
+                                <div style="font-size: 16px; font-weight: 600; color: #666;">欢迎使用部门分身助手</div>
+                                <div style="margin-top: 8px; font-size: 13px;">先选部门，再选资料，助手会按门店实际场景回答</div>
                                 <div style="margin-top: 16px; display: flex; gap: 8px; justify-content: center; flex-wrap: wrap;">
-                                    <button class="btn btn-secondary" style="font-size: 12px; padding: 8px 12px;" onclick="insertKbChatSuggestion('请总结这份资料的主要内容')">📝 总结内容</button>
-                                    <button class="btn btn-secondary" style="font-size: 12px; padding: 8px 12px;" onclick="insertKbChatSuggestion('这份资料的关键要点有哪些？')">🎯 关键要点</button>
-                                    <button class="btn btn-secondary" style="font-size: 12px; padding: 8px 12px;" onclick="insertKbChatSuggestion('帮我出几道测试题检验学习效果')">📋 出测试题</button>
+                                    <button class="btn btn-secondary" style="font-size: 12px; padding: 8px 12px;" onclick="insertKbChatSuggestion('结合本店情况，给我今天可执行的3条建议')">🧭 今日建议</button>
+                                    <button class="btn btn-secondary" style="font-size: 12px; padding: 8px 12px;" onclick="insertKbChatSuggestion('遇到这个问题时，门店标准处理流程是什么？')">📌 标准流程</button>
+                                    <button class="btn btn-secondary" style="font-size: 12px; padding: 8px 12px;" onclick="insertKbChatSuggestion('请给我一个可直接复制执行的沟通话术')">🗣️ 沟通话术</button>
                                 </div>
                             </div>
                         </div>
@@ -6952,6 +7136,73 @@
                             </div>
                             <div id="kb-chat-status" style="margin-top: 6px; font-size: 11px; color: #999;"></div>
                         </div>
+                    </div>
+                </div>
+            </div>
+
+            <div id="agent-monitor-modal" class="modal">
+                <div class="modal-content am-modal-content">
+                    <div class="modal-header am-header">
+                        <h3>🤖 Agent 监控</h3>
+                        <button class="modal-close" onclick="closeAgentMonitorModal()">×</button>
+                    </div>
+                    <div class="modal-body am-body">
+                        <!-- 概览Tab -->
+                        <div id="am-tab-overview" class="am-tab-panel">
+                            <div id="am-dashboard" class="am-dashboard-grid"></div>
+                            <div class="am-info-card">
+                                <div class="am-info-title">💡 飞书交互说明</div>
+                                <div class="am-info-text">店长在飞书中与机器人对话：查数据、发照片审核、查绩效、问SOP、培训咨询、申诉。Agent定时扫描异常，自动推送飞书通知。</div>
+                            </div>
+                            <div id="am-admin-actions" class="am-actions"></div>
+                        </div>
+                        <!-- 异常Tab -->
+                        <div id="am-tab-issues" class="am-tab-panel" style="display:none;">
+                            <div id="am-issues-list" class="am-list"></div>
+                        </div>
+                        <!-- 绩效Tab -->
+                        <div id="am-tab-scores" class="am-tab-panel" style="display:none;">
+                            <div id="am-scores-list" class="am-list"></div>
+                        </div>
+                        <!-- 审核Tab -->
+                        <div id="am-tab-audits" class="am-tab-panel" style="display:none;">
+                            <div id="am-audits-list" class="am-list"></div>
+                        </div>
+                        <!-- 消息Tab -->
+                        <div id="am-tab-messages" class="am-tab-panel" style="display:none;">
+                            <div id="am-messages-list" class="am-list"></div>
+                        </div>
+                        <!-- 飞书Tab -->
+                        <div id="am-tab-users" class="am-tab-panel" style="display:none;">
+                            <div id="am-users-list" class="am-list"></div>
+                        </div>
+                    </div>
+                    <!-- 底部Tab栏 -->
+                    <div class="am-tab-bar">
+                        <button class="am-tab-btn active" data-tab="overview" onclick="switchAmTab('overview')">
+                            <span class="am-tab-icon">📊</span>
+                            <span class="am-tab-label">概览</span>
+                        </button>
+                        <button class="am-tab-btn" data-tab="issues" onclick="switchAmTab('issues')">
+                            <span class="am-tab-icon">📋</span>
+                            <span class="am-tab-label">异常</span>
+                        </button>
+                        <button class="am-tab-btn" data-tab="scores" onclick="switchAmTab('scores')">
+                            <span class="am-tab-icon">📈</span>
+                            <span class="am-tab-label">绩效</span>
+                        </button>
+                        <button class="am-tab-btn" data-tab="audits" onclick="switchAmTab('audits')">
+                            <span class="am-tab-icon">📷</span>
+                            <span class="am-tab-label">审核</span>
+                        </button>
+                        <button class="am-tab-btn" data-tab="messages" onclick="switchAmTab('messages')">
+                            <span class="am-tab-icon">💬</span>
+                            <span class="am-tab-label">消息</span>
+                        </button>
+                        <button class="am-tab-btn" data-tab="users" onclick="switchAmTab('users')">
+                            <span class="am-tab-icon">👥</span>
+                            <span class="am-tab-label">飞书</span>
+                        </button>
                     </div>
                 </div>
             </div>
@@ -7079,6 +7330,24 @@
                                         <option value="txt">TXT</option>
                                         <option value="img">图片</option>
                                     </select>
+                                </div>
+                            </div>
+
+                            <div class="ui-form-group-row">
+                                <div class="ui-form-group">
+                                    <label class="ui-label">投喂Agent <span class="req">*</span></label>
+                                    <select id="knowledge-upload-agent" onchange="syncKnowledgeUploadFields()">
+                                        <option value="">请选择</option>
+                                        <option value="train_advisor">培训与标准顾问</option>
+                                        <option value="data_auditor">数据审计员</option>
+                                        <option value="ops_supervisor">营运督导员</option>
+                                        <option value="chief_evaluator">绩效考核官</option>
+                                        <option value="appeal">申诉处理官</option>
+                                    </select>
+                                </div>
+                                <div class="ui-form-group">
+                                    <label class="ui-label">标签预设</label>
+                                    <div id="knowledge-upload-agent-tags" class="ui-file-hint" style="min-height: 38px; padding-top: 10px; line-height: 1.5;">请选择投喂Agent后自动带出标签</div>
                                 </div>
                             </div>
 
@@ -7294,7 +7563,6 @@
                             <div class="emp-subtitle">统一管理员工信息、账号权限与组织结构</div>
                         </div>
                         <div class="emp-actions">
-                            <button class="btn" onclick="showBatchTrainingModal()" id="batch-training-btn"><i>🎓</i> 批量培训</button>
                             <button class="btn" onclick="showAddEmployeeModal()" id="add-emp-btn"><i>➕</i> 新增员工</button>
                             <button class="btn" onclick="showBatchImportModal()" id="batch-import-btn"><i>📥</i> 批量导入</button>
                             <button class="btn btn-secondary" onclick="downloadEmployeeImportTemplate()" id="emp-import-template-btn"><i>⬇️</i> 模板</button>
@@ -7363,7 +7631,8 @@
                     <div class="kb-mobile-actions">
                         <button class="btn" id="btn-knowledge-upload" onclick="openKnowledgeUploadModal()"><i>📤</i> 上传内容</button>
                         <button class="btn btn-secondary" id="btn-knowledge-flashcards" onclick="openKnowledgeFlashcardsModal()"><i>🃏</i> 自我测验</button>
-                        <button class="btn btn-secondary" id="btn-knowledge-chat" onclick="openKnowledgeChatModal()" style="background: linear-gradient(135deg, #8b5cf6, #6366f1);"><i>🎓</i> AI培训</button>
+                        <button class="btn btn-secondary" id="btn-knowledge-chat" onclick="openKnowledgeChatModal()" style="background: linear-gradient(135deg, #8b5cf6, #6366f1);"><i>🤝</i> 部门分身</button>
+                        <button class="btn btn-secondary" id="btn-agent-monitor" onclick="openAgentMonitorModal()" style="background: linear-gradient(135deg, #0f766e, #0ea5a0);"><i>🤖</i> Agent监控</button>
                     </div>
                 </div>
 
@@ -8225,14 +8494,28 @@
                     </div>
                 </div>
 
-                <!-- 公司通知 -->
-                <div class="card" style="margin-bottom: 14px; padding: 20px;">
-                    <div style="display:flex; align-items:center; gap: 10px; margin-bottom: 10px;">
-                        <div style="width: 32px; height: 32px; border-radius: 8px; background: linear-gradient(135deg, rgba(59,130,246,0.2), rgba(59,130,246,0.1)); display:flex; align-items:center; justify-content:center; font-size: 16px;">🔔</div>
-                        <span style="font-weight: 700; font-size: 15px;">公司通知</span>
+                <!-- ═══════ 公司通知 · 重新设计 ═══════ -->
+                <div id="profile-notif-section" style="margin-bottom: 16px; position: relative;">
+                    <!-- 通知头部 -->
+                    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom: 12px; padding: 0 2px;">
+                        <div style="display:flex; align-items:center; gap: 10px;">
+                            <div style="position:relative; width:36px; height:36px; border-radius:12px; background:linear-gradient(135deg,rgba(250,204,21,0.22),rgba(245,158,11,0.12)); display:flex; align-items:center; justify-content:center; font-size:18px; box-shadow:0 4px 12px rgba(250,204,21,0.10);">
+                                <span>📢</span>
+                                <span id="profile-notif-pulse" style="display:none; position:absolute; top:-2px; right:-2px; width:10px; height:10px; border-radius:50%; background:#f59e0b; box-shadow:0 0 0 3px rgba(15,23,42,0.9); animation: notifPulse 2s infinite;"></span>
+                            </div>
+                            <div>
+                                <div style="font-weight:800; font-size:16px; letter-spacing:0.3px;">公司通知</div>
+                                <div id="profile-notif-subtitle" style="font-size:11px; color:rgba(200,215,230,0.55); margin-top:1px;">暂无新通知</div>
+                            </div>
+                        </div>
+                        <span id="profile-notif-count-badge" style="display:none; background:linear-gradient(135deg,#f59e0b,#d97706); color:#fff; font-size:11px; font-weight:800; padding:3px 10px; border-radius:12px; box-shadow:0 2px 8px rgba(245,158,11,0.3);"></span>
                     </div>
-                    <div id="profile-notifications" style="margin-top: 8px;"></div>
-                    <div id="profile-notifications-empty" style="margin-top: 8px; color:#777; font-size: 12px; display:none;">暂无通知。</div>
+                    <!-- 通知列表 -->
+                    <div id="profile-notifications"></div>
+                    <div id="profile-notifications-empty" style="display:none; text-align:center; padding:24px 16px;">
+                        <div style="font-size:32px; margin-bottom:8px; opacity:0.4;">🔕</div>
+                        <div style="font-size:13px; color:rgba(200,215,230,0.45); font-weight:500;">暂无通知</div>
+                    </div>
                 </div>
 
                 <!-- 假期余额 -->
@@ -9945,6 +10228,34 @@
             async getUnreadCounts() {
                 return this.request('/api/unread-counts', { method: 'GET' });
             },
+            async getOpsTasks(params) {
+                const p = params && typeof params === 'object' ? params : {};
+                const q = new URLSearchParams();
+                if (p.status) q.set('status', String(p.status));
+                if (p.date) q.set('date', String(p.date));
+                if (p.store) q.set('store', String(p.store));
+                if (p.limit != null) q.set('limit', String(p.limit));
+                const qs = q.toString();
+                return this.request('/api/ops/tasks' + (qs ? ('?' + qs) : ''), { method: 'GET' });
+            },
+            async markOpsTaskRead(id) {
+                return this.request('/api/ops/tasks/' + encodeURIComponent(String(id || '')) + '/read', {
+                    method: 'POST'
+                });
+            },
+            async uploadOpsTaskEvidence(formData) {
+                return this.request('/api/uploads/ops-task-evidence', {
+                    method: 'POST',
+                    body: formData
+                });
+            },
+            async completeOpsTask(id, payload) {
+                return this.request('/api/ops/tasks/' + encodeURIComponent(String(id || '')) + '/complete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload || {})
+                });
+            },
             async batchRead(module, keys) {
                 const m = String(module || '').trim();
                 const ks = Array.isArray(keys) ? keys : [];
@@ -11124,6 +11435,9 @@
                     store: u.store || empInfo.store || userInfo.store || '',
                     position: u.position || empInfo.position || userInfo.position || '',
                     department: u.department || empInfo.department || userInfo.department || '',
+                    level: u.level || empInfo.level || userInfo.level || '',
+                    joinDate: u.joinDate || empInfo.joinDate || userInfo.joinDate || '',
+                    managerUsername: u.managerUsername || empInfo.managerUsername || userInfo.managerUsername || '',
                     status: 'active'
                 };
                 isLoggedIn = true;
@@ -11301,6 +11615,9 @@
                     store: empInfo.store || userInfo.store || u.store || '',
                     position: empInfo.position || userInfo.position || u.position || '',
                     department: empInfo.department || userInfo.department || u.department || '',
+                    level: empInfo.level || userInfo.level || u.level || '',
+                    joinDate: empInfo.joinDate || userInfo.joinDate || u.joinDate || '',
+                    managerUsername: empInfo.managerUsername || userInfo.managerUsername || u.managerUsername || '',
                     status: 'active'
                 };
                 isLoggedIn = true;
@@ -11317,7 +11634,10 @@
                         role: (stateRole && stateRole !== ROLES.EMPLOYEE) ? stateRole : currentUser.role,
                         store: empInfo2.store || userInfo2.store || currentUser.store || '',
                         position: empInfo2.position || userInfo2.position || currentUser.position || '',
-                        department: empInfo2.department || userInfo2.department || currentUser.department || ''
+                        department: empInfo2.department || userInfo2.department || currentUser.department || '',
+                        level: empInfo2.level || userInfo2.level || currentUser.level || '',
+                        joinDate: empInfo2.joinDate || userInfo2.joinDate || currentUser.joinDate || '',
+                        managerUsername: empInfo2.managerUsername || userInfo2.managerUsername || currentUser.managerUsername || ''
                     };
                 } catch (e) {
                     // keep going even if sync fails
@@ -11534,6 +11854,9 @@
             }
             
             currentPage = pageName;
+            
+            // Sync mobile navigation
+            syncMobileNavigation(pageName);
             
             // 根据页面加载特定数据
             loadPageData(pageName);
@@ -13857,8 +14180,8 @@ ${r.approvalNote ? '审批备注：' + r.approvalNote : ''}
                 meta.textContent = [cat, t, sz].filter(Boolean).join(' · ');
             }
 
-            // 显示专注度监控面板
-            try { attnShowMonitorBar(); } catch (e) {}
+            // 已移除专注度监控功能：不再展示监控面板
+            try { attnHideMonitorBar(); } catch (e) {}
 
             // 添加删除按钮（仅管理员可见）
             const deleteBtn = document.getElementById('knowledge-delete-btn');
@@ -14336,9 +14659,115 @@ ${r.approvalNote ? '审批备注：' + r.approvalNote : ''}
             }
         }
 
-        // ========== 知识库AI对话功能 ==========
+        // ========== 知识库AI对话功能（部门Agent） ==========
         let kbChatHistory = [];
         let kbChatLoading = false;
+        let kbChatActiveAgentId = 'marketing';
+
+        const KB_CHAT_DEPARTMENT_AGENTS = [
+            {
+                id: 'marketing',
+                name: '市场部分身',
+                icon: '📣',
+                allowedRoles: ['admin', 'store_manager', 'store_product_manager', 'hq_manager', 'hr_manager'],
+                categories: ['市场', '营销', '活动', '会员', '私域', '品牌'],
+                hint: '用于活动策划、门店引流、会员运营、宣传文案。'
+            },
+            {
+                id: 'operations',
+                name: '营运部分身',
+                icon: '⚙️',
+                allowedRoles: ['admin', 'store_manager', 'store_product_manager', 'hq_manager', 'hr_manager'],
+                categories: ['营运', '运营', '出品', '值班', '巡店', '门店标准'],
+                hint: '用于门店运营、出品标准、排班协同、现场问题处理。'
+            },
+            {
+                id: 'hr',
+                name: 'HR分身',
+                icon: '🧑‍💼',
+                allowedRoles: ['admin', 'store_manager', 'hq_manager', 'hr_manager'],
+                categories: ['人事', 'HR', '招聘', '入职', '考勤', '奖惩', '培训'],
+                hint: '用于人事制度、入转调离、考勤与奖惩流程解释。'
+            }
+        ];
+
+        function getKbChatAllowedAgents() {
+            const role = String(currentUser?.role || '').trim();
+            if (!role) return [];
+            return KB_CHAT_DEPARTMENT_AGENTS.filter(a => Array.isArray(a.allowedRoles) && a.allowedRoles.includes(role));
+        }
+
+        function getKbChatActiveAgent() {
+            return getKbChatAllowedAgents().find(a => a.id === kbChatActiveAgentId) || getKbChatAllowedAgents()[0] || null;
+        }
+
+        function normalizeKbTags(raw) {
+            if (Array.isArray(raw)) return raw.map(x => String(x || '').trim()).filter(Boolean);
+            if (raw && typeof raw === 'object') return Object.values(raw).map(x => String(x || '').trim()).filter(Boolean);
+            const s = String(raw || '').trim();
+            if (!s) return [];
+            return s.split(/[，,;；\s]+/).map(x => x.trim()).filter(Boolean);
+        }
+
+        function kbItemMatchesAgent(item, agent) {
+            if (!item || !agent) return false;
+            const keys = [
+                String(item.category || ''),
+                String(item.title || ''),
+                String(item.name || ''),
+                ...normalizeKbTags(item.tags)
+            ].map(x => x.toLowerCase());
+            const rules = Array.isArray(agent.categories) ? agent.categories : [];
+            if (!rules.length) return true;
+            return rules.some(rule => {
+                const r = String(rule || '').trim().toLowerCase();
+                if (!r) return false;
+                return keys.some(k => k.includes(r));
+            });
+        }
+
+        function renderKbChatAgents() {
+            const container = document.getElementById('kb-chat-agent-container');
+            const descEl = document.getElementById('kb-chat-agent-desc');
+            if (!container) return;
+
+            const allowed = getKbChatAllowedAgents();
+            if (!allowed.length) {
+                container.innerHTML = '<div style="font-size:12px;color:#ef4444;">当前账号暂无可用部门分身权限，请联系管理员。</div>';
+                if (descEl) descEl.textContent = '';
+                return;
+            }
+
+            if (!allowed.some(a => a.id === kbChatActiveAgentId)) {
+                kbChatActiveAgentId = allowed[0].id;
+            }
+            const active = getKbChatActiveAgent();
+
+            container.innerHTML = allowed.map(agent => {
+                const isActive = active && active.id === agent.id;
+                return `<button type="button"
+                    onclick="setKbChatAgent('${escapeHtml(agent.id)}')"
+                    style="display:inline-flex;align-items:center;gap:6px;padding:7px 12px;border-radius:999px;border:1px solid ${isActive ? '#4f46e5' : '#c7d2fe'};background:${isActive ? 'rgba(79,70,229,0.14)' : 'rgba(255,255,255,0.72)'};color:${isActive ? '#3730a3' : '#4b5563'};font-size:12px;font-weight:${isActive ? '700' : '600'};cursor:pointer;">
+                    <span>${agent.icon || '🤖'}</span>
+                    <span>${escapeHtml(agent.name || '部门助手')}</span>
+                </button>`;
+            }).join('');
+
+            if (descEl) descEl.textContent = active?.hint || '';
+
+            const subtitle = document.getElementById('kb-chat-agent-subtitle');
+            if (subtitle) {
+                subtitle.textContent = active ? `${active.icon || '🤖'} ${active.name}：按门店场景给出可执行建议` : '先选择部门，再进行咨询';
+            }
+        }
+
+        function setKbChatAgent(agentId) {
+            kbChatActiveAgentId = String(agentId || '').trim();
+            kbChatSelectedSources.clear();
+            clearKnowledgeChatHistory();
+            renderKbChatAgents();
+            populateKnowledgeChatSources();
+        }
 
         function openKnowledgeChatModal() {
             if (!currentUser) {
@@ -14353,6 +14782,7 @@ ${r.approvalNote ? '审批备注：' + r.approvalNote : ''}
                 });
                 modal.dataset.boundClose = '1';
             }
+            renderKbChatAgents();
             populateKnowledgeChatSources();
             modal.style.display = '';
             modal.classList.add('show');
@@ -14370,16 +14800,27 @@ ${r.approvalNote ? '审批备注：' + r.approvalNote : ''}
         function populateKnowledgeChatSources() {
             const container = document.getElementById('kb-chat-source-container');
             if (!container) return;
+            const activeAgent = getKbChatActiveAgent();
             const items = HRMS_STORE.getKnowledge();
             const visible = (items || [])
                 .filter(it => it && (it.type === 'pdf' || it.type === 'doc' || it.type === 'txt'))
                 .filter(it => isAdminUser() || knowledgeItemMatchesUser(it, currentUser))
+                .filter(it => !activeAgent || kbItemMatchesAgent(it, activeAgent))
                 .slice()
                 .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
 
             if (!visible.length) {
-                container.innerHTML = '<div style="color: #999; font-size: 13px; padding: 8px;">暂无可用的培训资料</div>';
+                container.innerHTML = '<div style="color: #999; font-size: 13px; padding: 8px;">该部门暂无可用资料，请先上传并分类</div>';
                 return;
+            }
+
+            const validIds = new Set(visible.map(it => String(it.id || '')));
+            Array.from(kbChatSelectedSources).forEach(id => {
+                if (!validIds.has(String(id || ''))) kbChatSelectedSources.delete(id);
+            });
+
+            if (!kbChatSelectedSources.size) {
+                visible.slice(0, 3).forEach(it => kbChatSelectedSources.add(it.id));
             }
 
             container.innerHTML = visible.map(it => {
@@ -14441,16 +14882,19 @@ ${r.approvalNote ? '审批备注：' + r.approvalNote : ''}
         function clearKnowledgeChatHistory() {
             kbChatHistory = [];
             const messagesEl = document.getElementById('kb-chat-messages');
+            const activeAgent = getKbChatActiveAgent();
+            const title = activeAgent ? `${activeAgent.icon || '🤖'} ${activeAgent.name}` : '部门分身助手';
+            const hint = activeAgent ? (activeAgent.hint || '请选择资料后开始提问') : '请选择资料后开始提问';
             if (messagesEl) {
                 messagesEl.innerHTML = `
                     <div class="kb-chat-welcome" style="text-align: center; padding: 40px 20px; color: #888;">
-                        <div style="font-size: 48px; margin-bottom: 16px;">🎓</div>
-                        <div style="font-size: 16px; font-weight: 600; color: #666;">欢迎使用AI培训助手</div>
-                        <div style="margin-top: 8px; font-size: 13px;">选择培训资料后，可以向我提问任何相关问题</div>
+                        <div style="font-size: 48px; margin-bottom: 16px;">${activeAgent?.icon || '🤝'}</div>
+                        <div style="font-size: 16px; font-weight: 600; color: #666;">欢迎使用${escapeHtml(title)}</div>
+                        <div style="margin-top: 8px; font-size: 13px;">${escapeHtml(hint)}</div>
                         <div style="margin-top: 16px; display: flex; gap: 8px; justify-content: center; flex-wrap: wrap;">
-                            <button class="btn btn-secondary" style="font-size: 12px; padding: 8px 12px;" onclick="insertKbChatSuggestion('请总结这份资料的主要内容')">📝 总结内容</button>
-                            <button class="btn btn-secondary" style="font-size: 12px; padding: 8px 12px;" onclick="insertKbChatSuggestion('这份资料的关键要点有哪些？')">🎯 关键要点</button>
-                            <button class="btn btn-secondary" style="font-size: 12px; padding: 8px 12px;" onclick="insertKbChatSuggestion('帮我出几道测试题检验学习效果')">📋 出测试题</button>
+                            <button class="btn btn-secondary" style="font-size: 12px; padding: 8px 12px;" onclick="insertKbChatSuggestion('请按门店可执行步骤给出建议，今天就能落地')">✅ 可执行步骤</button>
+                            <button class="btn btn-secondary" style="font-size: 12px; padding: 8px 12px;" onclick="insertKbChatSuggestion('这件事的风险点是什么，怎么规避？')">⚠️ 风险规避</button>
+                            <button class="btn btn-secondary" style="font-size: 12px; padding: 8px 12px;" onclick="insertKbChatSuggestion('请给我一段对员工可直接使用的话术')">🗣️ 一键话术</button>
                         </div>
                     </div>
                 `;
@@ -14550,9 +14994,15 @@ ${r.approvalNote ? '审批备注：' + r.approvalNote : ''}
             }
 
             const selectedIds = getKbChatSelectedIds();
+            const activeAgent = getKbChatActiveAgent();
+
+            if (!activeAgent) {
+                showNotification('当前账号暂无可用部门分身', 'warning');
+                return;
+            }
 
             if (!selectedIds.length) {
-                showNotification('请先选择培训资料', 'warning');
+                showNotification('请先选择部门资料', 'warning');
                 return;
             }
 
@@ -14576,9 +15026,14 @@ ${r.approvalNote ? '审批备注：' + r.approvalNote : ''}
                 if (statusEl) statusEl.textContent = 'AI思考中...';
 
                 // 构建系统提示
-                const systemPrompt = `你是一个专业的知识库助手。请基于以下知识库内容回答用户的问题。
-如果问题与知识库内容无关，请礼貌地告知用户。
-回答时请简洁明了，使用中文。
+                const systemPrompt = `你是${activeAgent.name}，服务对象是门店店长和出品经理。
+请严格基于以下资料回答，优先给出可执行建议，不要空话，不要过度“AI腔”。
+回答要求：
+1) 先给结论（一句话）
+2) 再给步骤（最多3-5步，门店当天可执行）
+3) 必要时给一段可直接复制的沟通话术
+4) 若资料不足或不确定，请明确说“资料不足，需要补充”，不要编造
+5) 保持口语化、简洁、像有实操经验的部门同事
 
 【知识库内容】
 ${knowledgeContent.slice(0, 30000)}`;
@@ -14615,25 +15070,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                         ...history.slice(-10) // 保留最近10条对话
                     ];
 
-                    const resp = await fetch(baseUrl + '/chat/completions', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'Authorization': `Bearer ${apiKey}`
-                        },
-                        body: JSON.stringify({
-                            model: model,
-                            messages,
-                            max_tokens: 2000,
-                            temperature: 0.7
-                        })
-                    });
-
-                    if (!resp.ok) {
-                        const errText = await resp.text();
-                        throw new Error(`API请求失败(${resp.status}): ${errText.slice(0, 200)}`);
-                    }
-                    const data = await resp.json();
+                    const data = await callLlmViaServer(messages, { max_tokens: 2000, temperature: 0.7 });
                     return data.choices?.[0]?.message?.content || '无法获取回复';
                 } catch (e) {
                     console.error('AI API调用失败:', e);
@@ -14676,6 +15113,269 @@ ${knowledgeContent.slice(0, 30000)}`;
             }
 
             return `抱歉，我在知识库中没有找到与"${lastQuestion}"直接相关的内容。\n\n您可以尝试：\n1. 换一种方式提问\n2. 选择其他知识资料\n3. 配置AI API以获得更智能的回答`;
+        }
+
+        // ========== Agent 监控中心 (Feishu-First) ==========
+        function openAgentMonitorModal() {
+            if (!currentUser) { showNotification('请先登录', 'warning'); return; }
+            const modal = document.getElementById('agent-monitor-modal');
+            if (!modal) return;
+            if (!modal.dataset.boundClose) {
+                modal.addEventListener('click', (e) => { if (e.target === modal) closeAgentMonitorModal(); });
+                modal.dataset.boundClose = '1';
+            }
+            modal.style.display = '';
+            modal.classList.add('show');
+            loadAmDashboard();
+        }
+
+        function closeAgentMonitorModal() {
+            const modal = document.getElementById('agent-monitor-modal');
+            if (!modal) return;
+            modal.classList.remove('show');
+            modal.style.display = '';
+        }
+
+        function switchAmTab(tab) {
+            const tabs = ['overview', 'issues', 'scores', 'audits', 'messages', 'users'];
+            tabs.forEach(t => {
+                const panel = document.getElementById('am-tab-' + t);
+                const btn = document.querySelector(`.am-tab-btn[data-tab="${t}"]`);
+                if (panel) panel.style.display = t === tab ? '' : 'none';
+                if (btn) { btn.classList.toggle('active', t === tab); }
+            });
+            if (tab === 'overview') loadAmDashboard();
+            if (tab === 'issues') loadAmIssues();
+            if (tab === 'scores') loadAmScores();
+            if (tab === 'audits') loadAmAudits();
+            if (tab === 'messages') loadAmMessages();
+            if (tab === 'users') loadAmUsers();
+        }
+
+        function formatAmTime(v) {
+            const s = String(v || '').trim();
+            if (!s) return '-';
+            try { const d = new Date(s); if (!Number.isFinite(d.getTime())) return s; return `${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`; } catch(e) { return s; }
+        }
+
+        async function loadAmDashboard() {
+            const box = document.getElementById('am-dashboard');
+            const actionsBox = document.getElementById('am-admin-actions');
+            if (!box) return;
+            box.innerHTML = '<div style="color:#94a3b8; text-align:center; padding:20px; grid-column:1/-1;">加载中...</div>';
+            try {
+                const token = localStorage.getItem('hrms_token');
+                const resp = await fetch('/api/agents/dashboard', { headers: { 'Authorization': 'Bearer ' + token } });
+                if (!resp.ok) { box.innerHTML = '<div style="color:#64748b; text-align:center; padding:20px; grid-column:1/-1;">需要管理员权限</div>'; if (actionsBox) actionsBox.innerHTML = ''; return; }
+                const d = await resp.json();
+                box.innerHTML = `
+                    <div class="am-stat-card">
+                        <div class="am-stat-label">📋 异常问题</div>
+                        <div class="am-stat-value red">${d.issues?.open || 0}</div>
+                        <div class="am-stat-sub">高优 ${d.issues?.high_open || 0} · 总 ${d.issues?.total || 0}</div>
+                    </div>
+                    <div class="am-stat-card">
+                        <div class="am-stat-label">📊 平均绩效</div>
+                        <div class="am-stat-value green">${d.scores?.avg_score || '-'}</div>
+                        <div class="am-stat-sub">近30天 ${d.scores?.total || 0} 条</div>
+                    </div>
+                    <div class="am-stat-card">
+                        <div class="am-stat-label">📷 图片审核</div>
+                        <div class="am-stat-value orange">${d.audits?.total || 0}</div>
+                        <div class="am-stat-sub">不合格 ${d.audits?.failed || 0} · 重复 ${d.audits?.duplicates || 0}</div>
+                    </div>
+                    <div class="am-stat-card">
+                        <div class="am-stat-label">💬 飞书消息</div>
+                        <div class="am-stat-value purple">${d.messages?.total_7d || 0}</div>
+                        <div class="am-stat-sub">绑定 ${d.feishuUsers?.registered || 0}/${d.feishuUsers?.total || 0}</div>
+                    </div>`;
+                if (actionsBox && ['admin', 'hq_manager'].includes(currentUser?.role)) {
+                    actionsBox.innerHTML = `
+                        <button class="btn" onclick="triggerAmAudit()">🔍 数据审计</button>
+                        <button class="btn" onclick="triggerAmEval()">📊 绩效评估</button>`;
+                } else if (actionsBox) { actionsBox.innerHTML = ''; }
+            } catch (e) { box.innerHTML = '<div style="color:#b91c1c; padding:20px; grid-column:1/-1;">加载失败</div>'; }
+        }
+
+        async function triggerAmAudit() {
+            try {
+                const token = localStorage.getItem('hrms_token');
+                const resp = await fetch('/api/agents/run/audit', { method: 'POST', headers: { 'Authorization': 'Bearer ' + token } });
+                const d = await resp.json();
+                showNotification(`审计完成：发现 ${d.issuesFound || 0} 条，新增 ${d.issuesCreated || 0} 条，飞书推送 ${d.feishuPushed || 0} 条`, 'success');
+                loadAmDashboard();
+            } catch (e) { showNotification('审计触发失败', 'error'); }
+        }
+
+        async function triggerAmEval() {
+            const now = new Date();
+            const weekNum = Math.ceil((now.getDate() + new Date(now.getFullYear(), now.getMonth(), 1).getDay()) / 7);
+            const period = `${now.getFullYear()}-W${String(weekNum).padStart(2, '0')}`;
+            try {
+                const token = localStorage.getItem('hrms_token');
+                const resp = await fetch('/api/agents/run/evaluate', {
+                    method: 'POST', headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ period })
+                });
+                const d = await resp.json();
+                showNotification(`评估完成：${d.evaluated || 0} 人，飞书推送 ${d.feishuPushed || 0} 条`, 'success');
+                loadAmDashboard();
+            } catch (e) { showNotification('评估触发失败', 'error'); }
+        }
+
+        async function loadAmIssues() {
+            const box = document.getElementById('am-issues-list');
+            if (!box) return;
+            box.innerHTML = '<div style="color:#94a3b8; text-align:center; padding:20px;">加载中...</div>';
+            try {
+                const token = localStorage.getItem('hrms_token');
+                const resp = await fetch('/api/agents/issues?limit=50', { headers: { 'Authorization': 'Bearer ' + token } });
+                const data = await resp.json();
+                const items = Array.isArray(data?.items) ? data.items : [];
+                if (!items.length) { box.innerHTML = '<div style="color:#94a3b8; text-align:center; padding:20px;">暂无异常记录</div>'; return; }
+                box.innerHTML = items.map(i => {
+                    const sev = i.severity === 'high' ? '🔴' : '🟡';
+                    const statusBadge = i.status === 'resolved'
+                        ? '<span class="am-badge green">已解决</span>'
+                        : '<span class="am-badge red">待处理</span>';
+                    const notified = i.feishu_notified ? '<span class="am-badge green">✈️ 已推送</span>' : '<span class="am-badge gray">⏳ 未推送</span>';
+                    return `<div class="am-card">
+                        <div class="am-card-header">
+                            <div class="am-card-title">${sev} ${escapeHtml(i.title || '')}</div>
+                            <div style="display:flex; gap:4px; align-items:center;">${notified} ${statusBadge}</div>
+                        </div>
+                        <div class="am-card-meta">${escapeHtml(i.brand || '')} / ${escapeHtml(i.store || '')} · ${escapeHtml(i.category || '')} · ${formatAmTime(i.created_at)}${i.assignee_username ? ' · 指派: ' + escapeHtml(i.assignee_username) : ''}</div>
+                        ${i.detail ? `<div class="am-card-detail">${escapeHtml(i.detail)}</div>` : ''}
+                        ${i.status !== 'resolved' ? `<div class="am-resolve-row">
+                            <input id="resolve-${i.id}" placeholder="整改说明...">
+                            <button class="btn" onclick="resolveAmIssue('${i.id}')">解决</button>
+                        </div>` : (i.resolution ? `<div class="am-card-detail" style="color:#15803d;">✅ ${escapeHtml(i.resolution)}</div>` : '')}
+                    </div>`;
+                }).join('');
+            } catch (e) { box.innerHTML = '<div style="color:#b91c1c; padding:20px;">加载失败</div>'; }
+        }
+
+        async function resolveAmIssue(id) {
+            const input = document.getElementById('resolve-' + id);
+            const resolution = String(input?.value || '').trim();
+            if (!resolution) { showNotification('请输入整改说明', 'warning'); return; }
+            try {
+                const token = localStorage.getItem('hrms_token');
+                await fetch('/api/agents/issues/' + id + '/resolve', {
+                    method: 'POST', headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ resolution })
+                });
+                showNotification('已标记解决', 'success');
+                loadAmIssues();
+            } catch (e) { showNotification('操作失败', 'error'); }
+        }
+
+        async function loadAmScores() {
+            const box = document.getElementById('am-scores-list');
+            if (!box) return;
+            box.innerHTML = '<div style="color:#94a3b8; text-align:center; padding:20px;">加载中...</div>';
+            try {
+                const token = localStorage.getItem('hrms_token');
+                const resp = await fetch('/api/agents/scores?limit=20', { headers: { 'Authorization': 'Bearer ' + token } });
+                const data = await resp.json();
+                const items = Array.isArray(data?.items) ? data.items : [];
+                if (!items.length) { box.innerHTML = '<div style="color:#94a3b8; text-align:center; padding:20px;">暂无绩效记录</div>'; return; }
+                box.innerHTML = items.map(s => {
+                    const breakdown = s.breakdown && typeof s.breakdown === 'object' ? s.breakdown : {};
+                    const deductions = Array.isArray(s.deductions) ? s.deductions : [];
+                    const scoreColor = s.total_score >= 80 ? '#15803d' : s.total_score >= 60 ? '#b45309' : '#b91c1c';
+                    return `<div class="am-card">
+                        <div class="am-card-header">
+                            <div>
+                                <div class="am-card-title">${escapeHtml(s.store || '')}（${escapeHtml(s.brand || '')}）</div>
+                                <div class="am-card-meta">${escapeHtml(s.name || s.username || '')} · ${escapeHtml(s.period || '')}</div>
+                            </div>
+                            <div class="am-card-score" style="color:${scoreColor};">${s.total_score}</div>
+                        </div>
+                        <div class="am-card-tags">
+                            ${Object.entries(breakdown).map(([k,v]) => `<span class="am-tag">${escapeHtml(k)}: ${v}</span>`).join('')}
+                        </div>
+                        ${deductions.length ? `<div class="am-card-detail" style="color:#b91c1c;">扣分：${deductions.map(d => `${escapeHtml(d.category||'')}(${d.points})`).join('、')}</div>` : ''}
+                        ${s.summary ? `<div class="am-card-detail">${escapeHtml(s.summary)}</div>` : ''}
+                    </div>`;
+                }).join('');
+            } catch (e) { box.innerHTML = '<div style="color:#b91c1c; padding:20px;">加载失败</div>'; }
+        }
+
+        async function loadAmAudits() {
+            const box = document.getElementById('am-audits-list');
+            if (!box) return;
+            box.innerHTML = '<div style="color:#94a3b8; text-align:center; padding:20px;">加载中...</div>';
+            try {
+                const token = localStorage.getItem('hrms_token');
+                const resp = await fetch('/api/agents/audits?limit=50', { headers: { 'Authorization': 'Bearer ' + token } });
+                const data = await resp.json();
+                const items = Array.isArray(data?.items) ? data.items : [];
+                if (!items.length) { box.innerHTML = '<div style="color:#94a3b8; text-align:center; padding:20px;">暂无审核记录</div>'; return; }
+                box.innerHTML = items.map(a => {
+                    const resultIcon = a.result === 'pass' ? '✅' : a.result === 'fail' ? '❌' : '⏳';
+                    const resultBadge = a.result === 'pass' ? '<span class="am-badge green">合格</span>' : a.result === 'fail' ? '<span class="am-badge red">不合格</span>' : '<span class="am-badge gray">待定</span>';
+                    const conf = a.confidence ? `（${Math.round(a.confidence * 100)}%）` : '';
+                    return `<div class="am-card">
+                        <div class="am-card-header">
+                            <div class="am-card-title">${resultIcon} ${a.audit_type || '通用'}审核</div>
+                            ${resultBadge}
+                        </div>
+                        <div class="am-card-meta">${escapeHtml(a.store || '')} · ${escapeHtml(a.username || '')} · ${formatAmTime(a.created_at)}${a.duplicate_of ? ' · ⚠️ 重复' : ''}</div>
+                        ${a.findings ? `<div class="am-card-detail">${escapeHtml(a.findings)}${conf}</div>` : ''}
+                    </div>`;
+                }).join('');
+            } catch (e) { box.innerHTML = '<div style="color:#b91c1c; padding:20px;">加载失败</div>'; }
+        }
+
+        async function loadAmMessages() {
+            const box = document.getElementById('am-messages-list');
+            if (!box) return;
+            box.innerHTML = '<div style="color:#94a3b8; text-align:center; padding:20px;">加载中...</div>';
+            try {
+                const token = localStorage.getItem('hrms_token');
+                const resp = await fetch('/api/agents/messages?limit=50', { headers: { 'Authorization': 'Bearer ' + token } });
+                const data = await resp.json();
+                const items = Array.isArray(data?.items) ? data.items : [];
+                if (!items.length) { box.innerHTML = '<div style="color:#94a3b8; text-align:center; padding:20px;">暂无消息记录</div>'; return; }
+                const routeLabels = { data_auditor: '📊审计', ops_supervisor: '📷督导', chief_evaluator: '📈考核', appeal: '✋申诉', train_advisor: '📖培训', general: '🤖通用' };
+                box.innerHTML = items.map(m => {
+                    const dir = m.direction === 'out' ? '⬆️ 推送' : '⬇️ 收到';
+                    const route = routeLabels[m.routed_to] || m.routed_to || '';
+                    return `<div class="am-card">
+                        <div class="am-card-header">
+                            <div class="am-card-title">${dir} ${escapeHtml(m.sender_name || m.sender_username || '未知')}</div>
+                            <div class="am-card-meta">${route} · ${formatAmTime(m.created_at)}</div>
+                        </div>
+                        ${m.content ? `<div class="am-card-detail">${escapeHtml(String(m.content).slice(0, 150))}${String(m.content).length > 150 ? '...' : ''}</div>` : ''}
+                        ${m.agent_response ? `<div class="am-card-detail" style="background:rgba(15,118,110,.05); padding:8px; border-radius:6px; margin-top:6px;">${escapeHtml(String(m.agent_response).slice(0, 200))}${String(m.agent_response).length > 200 ? '...' : ''}</div>` : ''}
+                    </div>`;
+                }).join('');
+            } catch (e) { box.innerHTML = '<div style="color:#b91c1c; padding:20px;">加载失败</div>'; }
+        }
+
+        async function loadAmUsers() {
+            const box = document.getElementById('am-users-list');
+            if (!box) return;
+            box.innerHTML = '<div style="color:#94a3b8; text-align:center; padding:20px;">加载中...</div>';
+            try {
+                const token = localStorage.getItem('hrms_token');
+                const resp = await fetch('/api/agents/feishu-users', { headers: { 'Authorization': 'Bearer ' + token } });
+                if (!resp.ok) { box.innerHTML = '<div style="color:#64748b; text-align:center; padding:20px;">需要管理员权限</div>'; return; }
+                const data = await resp.json();
+                const items = Array.isArray(data?.items) ? data.items : [];
+                if (!items.length) { box.innerHTML = '<div style="color:#94a3b8; text-align:center; padding:20px;">暂无飞书用户绑定</div>'; return; }
+                box.innerHTML = items.map(u => {
+                    const status = u.registered ? '<span class="am-badge green">已绑定</span>' : '<span class="am-badge red">待绑定</span>';
+                    return `<div class="am-card">
+                        <div class="am-card-header">
+                            <div class="am-card-title">${escapeHtml(u.name || u.username || '未知')} ${status}</div>
+                        </div>
+                        <div class="am-card-meta">${escapeHtml(u.username || '-')} · ${escapeHtml(u.store || '-')} · ${escapeHtml(u.role || '-')}</div>
+                        <div class="am-card-detail" style="font-size:10px; color:#94a3b8;">open_id: ${escapeHtml(String(u.open_id || '').slice(0, 20))}... · ${formatAmTime(u.created_at)}</div>
+                    </div>`;
+                }).join('');
+            } catch (e) { box.innerHTML = '<div style="color:#b91c1c; padding:20px;">加载失败</div>'; }
         }
 
         // ========== 闪卡功能 ==========
@@ -15051,25 +15751,16 @@ ${knowledgeContent.slice(0, 30000)}`;
             const metaType = String(meta?.type || '').trim();
             const prompt = `你是企业内训“资料理解与记忆”的出题老师。你的任务：严格基于给定资料内容生成自测闪卡题。\n\n资料信息：\n- 标题：${metaTitle || '（未知）'}\n- 类型：${metaType || '（未知）'}\n\n出题要求（非常重要）：\n- 只能使用资料中明确出现的信息出题与作答；禁止编造或引入资料外知识。\n- 如果资料内容不足以支持某题，请跳过，不要硬凑。\n- 避免泛泛提问：不要出现“概括/谈谈/如何理解/为什么重要”等作文题。\n- 优先考核：关键结论、数据/指标、定义、对比关系、原因-结果、范围/口径、注意事项。\n- 可判分：答案必须唯一且简短（建议 <= 20 字）；不要给长段落答案。\n- 禁止水题：single 的选项中禁止出现“以上都是/都对/都错/以上均是/以上全是”。\n\n题型比例建议：blank 占 50%-70%，single 与 tf 用于核对关键点。\n\n输出格式要求：\n- 只输出严格 JSON 数组，不要输出多余文字\n- 每项字段：id,type,q,options,answer\n- type 仅允许：single / tf / blank\n- single: options 为 4 个选项，且 answer 必须出现在 options 内\n- tf: options 固定为 [\"正确\",\"错误\"]，answer 为其中一个\n- blank: options 为空数组，answer 为标准答案字符串（短、可背诵）\n\n资料正文：\n${String(text || '').slice(0, 6000)}`;
 
-            const resp = await fetch(baseUrl + '/chat/completions', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': 'Bearer ' + apiKey
-                },
-                body: JSON.stringify({
-                    model,
-                    messages: [{ role: 'user', content: prompt }],
+            let data = null;
+            try {
+                data = await callLlmViaServer([{ role: 'user', content: prompt }], {
                     max_tokens: 1200,
                     temperature: 0.3
-                })
-            });
-            if (!resp.ok) {
-                const errText = await resp.text();
-                console.error('AI flashcards error:', resp.status, errText);
+                });
+            } catch (e) {
+                console.error('AI flashcards error:', e);
                 return ruleBasedGenerateFlashcards(text, count);
             }
-            const data = await resp.json();
             const content = data?.choices?.[0]?.message?.content || '';
             const extracted = extractJsonArrayFromText(content);
             const parsed = hrmsSafeParseJson(extracted);
@@ -16809,6 +17500,20 @@ ${knowledgeContent.slice(0, 30000)}`;
             return false;
         }
 
+        const KNOWLEDGE_AGENT_TAG_PRESETS = {
+            train_advisor: ['sop', '流程', '标准', '规范', '培训', '课件', '带教', '讲师'],
+            data_auditor: ['数据', '审计', '异常', '标准'],
+            ops_supervisor: ['审核', '检查', '图片', '卫生'],
+            chief_evaluator: ['绩效', '考核', '评分', '权重'],
+            appeal: ['申诉', '处理', '流程']
+        };
+
+        function getKnowledgeAgentTags(agent) {
+            const key = String(agent || '').trim();
+            const tags = KNOWLEDGE_AGENT_TAG_PRESETS[key];
+            return Array.isArray(tags) ? tags.slice() : [];
+        }
+
         function openKnowledgeUploadModal() {
             if (!isAdminUser()) {
                 showNotification('仅管理员可上传知识库内容', 'warning');
@@ -16820,12 +17525,14 @@ ${knowledgeContent.slice(0, 30000)}`;
             const title = document.getElementById('knowledge-upload-title');
             const category = document.getElementById('knowledge-upload-category');
             const type = document.getElementById('knowledge-upload-type');
+            const agent = document.getElementById('knowledge-upload-agent');
             const file = document.getElementById('knowledge-upload-file');
             const status = document.getElementById('knowledge-upload-file-status');
             const aud = document.getElementById('knowledge-upload-audience-type');
             if (title) title.value = '';
             if (category) category.value = '';
             if (type) type.value = 'video';
+            if (agent) agent.value = '';
             if (aud) aud.value = 'all';
             if (file) file.value = '';
             if (status) status.textContent = '';
@@ -16899,10 +17606,17 @@ ${knowledgeContent.slice(0, 30000)}`;
         function syncKnowledgeUploadFields() {
             const type = (document.getElementById('knowledge-upload-type')?.value || '').trim();
             const audType = (document.getElementById('knowledge-upload-audience-type')?.value || '').trim();
+            const agent = (document.getElementById('knowledge-upload-agent')?.value || '').trim();
             const boxStore = document.getElementById('knowledge-upload-audience-store-box');
             const boxPos = document.getElementById('knowledge-upload-audience-position-box');
             if (boxStore) boxStore.style.display = audType === 'store' ? '' : 'none';
             if (boxPos) boxPos.style.display = audType === 'position' ? '' : 'none';
+
+            const tagsEl = document.getElementById('knowledge-upload-agent-tags');
+            const tags = getKnowledgeAgentTags(agent);
+            if (tagsEl) {
+                tagsEl.textContent = tags.length ? tags.join(' / ') : '请选择投喂Agent后自动带出标签';
+            }
 
             const hint = document.getElementById('knowledge-upload-file-hint');
             const fileEl = document.getElementById('knowledge-upload-file');
@@ -17005,9 +17719,11 @@ ${knowledgeContent.slice(0, 30000)}`;
             const title = (document.getElementById('knowledge-upload-title')?.value || '').trim();
             const category = (document.getElementById('knowledge-upload-category')?.value || '').trim();
             const type = (document.getElementById('knowledge-upload-type')?.value || '').trim();
+            const feedAgent = (document.getElementById('knowledge-upload-agent')?.value || '').trim();
             const audType = (document.getElementById('knowledge-upload-audience-type')?.value || '').trim();
             const fileInput = document.getElementById('knowledge-upload-file');
             const statusEl = document.getElementById('knowledge-upload-file-status');
+            const feedTags = getKnowledgeAgentTags(feedAgent);
 
             const file = fileInput?.files?.[0];
             if (!title) {
@@ -17016,6 +17732,10 @@ ${knowledgeContent.slice(0, 30000)}`;
             }
             if (!category) {
                 showNotification('请选择分类', 'warning');
+                return;
+            }
+            if (!feedAgent || !feedTags.length) {
+                showNotification('请选择投喂Agent', 'warning');
                 return;
             }
             if (!file) {
@@ -17096,6 +17816,8 @@ ${knowledgeContent.slice(0, 30000)}`;
                             title,
                             category,
                             type,
+                            feedAgent,
+                            tags: feedTags,
                             filePath: publicUrl,
                             size
                         });
@@ -17113,6 +17835,8 @@ ${knowledgeContent.slice(0, 30000)}`;
                         fd.append('title', title);
                         fd.append('category', category);
                         fd.append('type', type);
+                        fd.append('feedAgent', feedAgent);
+                        fd.append('tags', JSON.stringify(feedTags));
                         fd.append('audienceType', String(audience.type || 'all'));
                         if (audience.type === 'store') fd.append('audienceStore', String(audience.store || ''));
                         if (audience.type === 'position') fd.append('audiencePosition', String(audience.position || ''));
@@ -17132,6 +17856,8 @@ ${knowledgeContent.slice(0, 30000)}`;
                     fd.append('title', title);
                     fd.append('category', category);
                     fd.append('type', type);
+                    fd.append('feedAgent', feedAgent);
+                    fd.append('tags', JSON.stringify(feedTags));
 
                     // Audience scope
                     fd.append('audienceType', String(audience.type || 'all'));
@@ -18383,9 +19109,9 @@ ${knowledgeContent.slice(0, 30000)}`;
         // ========== 系统预设LLM配置（所有用户自动共享） ==========
         // 管理员可在此处配置默认的AI服务，所有用户无需手动配置即可使用
         const DEFAULT_LLM_CONFIG = {
-            baseUrl: 'https://api.deepseek.com/v1',  // DeepSeek API
-            model: 'deepseek-chat',  // DeepSeek-V3
-            apiKey: 'sk-b69ac2ab32154440aa26be7e7ecdf312'  // 系统预设API Key
+            baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',  // DashScope (通义千问)
+            model: 'qwen-turbo',  // qwen-turbo
+            apiKey: 'sk-58b59a56999a4e688d9fee958edbc82c'  // 系统预设API Key
         };
 
         // 获取有效的LLM配置（优先使用用户配置，否则使用系统预设）
@@ -18413,6 +19139,11 @@ ${knowledgeContent.slice(0, 30000)}`;
         function normalizeOpenAiBaseUrl(baseUrl) {
             const trimmed = String(baseUrl || '').trim().replace(/\/+$/, '');
             if (!trimmed) return '';
+            if (/ark\.cn-beijing\.volces\.com/i.test(trimmed)) {
+                if (/\/api\/v3$/i.test(trimmed)) return trimmed;
+                if (/\/v1$/i.test(trimmed)) return trimmed.replace(/\/v1$/i, '/api/v3');
+                return trimmed + '/api/v3';
+            }
             if (trimmed.endsWith('/v1')) return trimmed;
             return trimmed + '/v1';
         }
@@ -18431,6 +19162,71 @@ ${knowledgeContent.slice(0, 30000)}`;
             return raw;
         }
 
+        function normalizeLlmConfig(raw) {
+            return {
+                baseUrl: normalizeOpenAiBaseUrl(raw?.baseUrl),
+                apiKey: String(raw?.apiKey || '').trim(),
+                model: normalizeLlmModelName(raw?.model)
+            };
+        }
+
+        function isUsableLlmConfig(cfg) {
+            return !!(cfg && cfg.baseUrl && cfg.apiKey && cfg.model);
+        }
+
+        function isSameLlmConfig(a, b) {
+            return String(a?.baseUrl || '') === String(b?.baseUrl || '')
+                && String(a?.apiKey || '') === String(b?.apiKey || '')
+                && String(a?.model || '') === String(b?.model || '');
+        }
+
+        function shouldRetryWithDefaultLlm(err) {
+            const status = Number(err?.status || 0);
+            const msg = String(err?.message || err?.data?.message || '').toLowerCase();
+            if (status === 401 || status === 403 || status === 404) return true;
+            return /(model|endpoint|not exist|no access|invalid|forbidden|unauthorized|权限|不存在)/i.test(msg);
+        }
+
+        async function callLlmViaServer(messages, options = {}) {
+            const settings = HRMS_STORE.getSettings();
+            const userCfg = normalizeLlmConfig(settings?.llm || {});
+            const defaultCfg = normalizeLlmConfig(DEFAULT_LLM_CONFIG);
+            const primaryCfg = isUsableLlmConfig(userCfg) ? userCfg : defaultCfg;
+            const fallbackCfg = (isUsableLlmConfig(userCfg) && !isSameLlmConfig(userCfg, defaultCfg) && isUsableLlmConfig(defaultCfg))
+                ? defaultCfg
+                : null;
+            if (!isUsableLlmConfig(primaryCfg)) throw new Error('missing_llm_config');
+
+            const send = async (cfg) => HRMS_API.request('/api/ai/chat-completions', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    baseUrl: cfg.baseUrl,
+                    apiKey: cfg.apiKey,
+                    model: cfg.model,
+                    messages: Array.isArray(messages) ? messages : [],
+                    max_tokens: Number(options?.maxTokens || options?.max_tokens || 1024),
+                    temperature: Number.isFinite(Number(options?.temperature)) ? Number(options.temperature) : 0.2
+                })
+            });
+
+            try {
+                const data = await send(primaryCfg);
+                if (data && typeof data === 'object') data.__hrmsLlmFallbackUsed = false;
+                return data;
+            } catch (e) {
+                if (fallbackCfg && shouldRetryWithDefaultLlm(e)) {
+                    const data = await send(fallbackCfg);
+                    if (data && typeof data === 'object') {
+                        data.__hrmsLlmFallbackUsed = true;
+                        data.__hrmsLlmFallbackReason = String(e?.message || '');
+                    }
+                    return data;
+                }
+                throw e;
+            }
+        }
+
         function extractJsonArrayFromText(text) {
             const s = String(text || '').trim();
             if (!s) return '';
@@ -18447,8 +19243,8 @@ ${knowledgeContent.slice(0, 30000)}`;
         async function testLlmConnection() {
             // 使用系统LLM配置（自动使用预设或用户配置）
             const llm = getEffectiveLlmConfig();
-            const baseUrl = llm.baseUrl;
-            const apiKey = llm.apiKey;
+            const baseUrl = normalizeOpenAiBaseUrl(llm.baseUrl);
+            const apiKey = String(llm.apiKey || '').trim();
             const model = normalizeLlmModelName(llm.model);
             const errBox = document.getElementById('llm-last-error');
             if (errBox) errBox.value = '';
@@ -18458,34 +19254,22 @@ ${knowledgeContent.slice(0, 30000)}`;
             }
 
             try {
-                const resp = await fetch(baseUrl + '/chat/completions', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': 'Bearer ' + apiKey
-                    },
-                    body: JSON.stringify({
-                        model,
-                        messages: [{ role: 'user', content: 'hello' }],
-                        max_tokens: 10,
-                        temperature: 0
-                    })
+                const data = await callLlmViaServer([{ role: 'user', content: 'hello' }], {
+                    max_tokens: 10,
+                    temperature: 0
                 });
-                if (!resp.ok) {
-                    const text = await resp.text();
-                    console.error('LLM test error:', resp.status, text);
-                    const detail = String(text || '').slice(0, 160);
-                    showNotification(`连接失败：${resp.status}（model=${model}）` + (detail ? ' ' + detail : ''), 'error');
-                    if (errBox) {
-                        errBox.value = `HTTP ${resp.status}\nBaseURL: ${baseUrl}\nModel: ${model}\n\nResponse:\n${text || '(empty)'}`;
-                    }
-                    return;
-                }
                 if (errBox) errBox.value = '';
-                showNotification('连接成功', 'success');
+                if (data?.__hrmsLlmFallbackUsed) {
+                    showNotification('连接成功（已自动回退到系统默认模型）', 'success');
+                    if (errBox) {
+                        errBox.value = `检测到当前自定义配置不可用，已自动回退系统默认配置。\n\n原始错误:\n${String(data?.__hrmsLlmFallbackReason || '')}`;
+                    }
+                } else {
+                    showNotification('连接成功', 'success');
+                }
             } catch (e) {
                 console.error(e);
-                showNotification('连接失败：网络或CORS问题', 'error');
+                showNotification('连接失败：' + String(e?.message || e), 'error');
                 if (errBox) {
                     errBox.value = `Exception\nBaseURL: ${baseUrl}\nModel: ${model}\n\n${String(e?.message || e)}`;
                 }
@@ -21832,82 +22616,6 @@ ${knowledgeContent.slice(0, 30000)}`;
             })();
         }
         
-        // 批量下发培训功能
-        function showBatchTrainingModal() {
-            if (!isAdminUser()) {
-                showNotification('仅管理员可批量下发培训', 'warning');
-                return;
-            }
-            
-            // 填充岗位选项
-            const roleSelect = document.getElementById('batch-training-role');
-            roleSelect.innerHTML = '<option value="">加载中...</option>';
-            
-            try {
-                // 使用组织架构字典中的岗位数据
-                let positions = [];
-                const dictData = localStorage.getItem('hrms_org_dict');
-                if (dictData) {
-                    const dict = JSON.parse(dictData);
-                    if (dict.positions && dict.positions.length > 0) {
-                        positions = dict.positions.map(p => p.name || p);
-                    }
-                }
-                
-                roleSelect.innerHTML = '<option value="all">所有岗位 (全员)</option>';
-                if (positions.length > 0) {
-                    positions.forEach(pos => {
-                        const option = document.createElement('option');
-                        option.value = pos;
-                        option.textContent = pos;
-                        roleSelect.appendChild(option);
-                    });
-                } else {
-                    // 默认预设
-                    roleSelect.innerHTML += '<option value="店长">店长</option><option value="厨师长">厨师长</option><option value="服务员">服务员</option>';
-                }
-            } catch (e) {
-                console.error('加载岗位字典失败', e);
-                roleSelect.innerHTML = '<option value="all">所有岗位 (全员)</option><option value="店长">店长</option><option value="厨师长">厨师长</option><option value="服务员">服务员</option>';
-            }
-
-            // 设置默认截止日期为7天后
-            const defaultDue = new Date();
-            defaultDue.setDate(defaultDue.getDate() + 7);
-            document.getElementById('batch-training-due').value = defaultDue.toISOString().split('T')[0];
-            
-            document.getElementById('batch-training-modal').classList.add('active');
-        }
-
-        function closeBatchTrainingModal() {
-            document.getElementById('batch-training-modal').classList.remove('active');
-            // 清理表单
-            document.getElementById('batch-training-title').value = '';
-            document.getElementById('batch-training-type').value = 'skill_upgrade';
-        }
-
-        function submitBatchTraining() {
-            const title = document.getElementById('batch-training-title').value.trim();
-            const type = document.getElementById('batch-training-type').value;
-            const targetRole = document.getElementById('batch-training-role').value;
-            const dueDate = document.getElementById('batch-training-due').value;
-
-            if (!title) {
-                showNotification('请输入课程标题', 'warning');
-                return;
-            }
-
-            // 模拟下发过程
-            const loadingOverlay = document.getElementById('loading-overlay');
-            if (loadingOverlay) loadingOverlay.classList.remove('hidden');
-            
-            setTimeout(() => {
-                if (loadingOverlay) loadingOverlay.classList.add('hidden');
-                showNotification(`成功下发《${title}》给岗位：${targetRole === 'all' ? '全体员工' : targetRole}`, 'success');
-                closeBatchTrainingModal();
-            }, 800);
-        }
-        
         function showUserImportModal() {
             if (!isAdminUser()) {
                 showNotification('仅管理员可批量导入用户', 'warning');
@@ -22301,6 +23009,43 @@ ${knowledgeContent.slice(0, 30000)}`;
         // 加载个人信息数据
         function loadProfileData() {
             if (!currentUser) return;
+
+            // Re-read employee/user data to ensure onboarding fields are up-to-date
+            try {
+                const _empList = HRMS_STORE.getEmployees() || [];
+                const _userList = HRMS_STORE.getUsers() || [];
+                const _uname = String(currentUser.username || '').trim().toLowerCase();
+                const _uid = String(currentUser.id || '').trim().toLowerCase();
+                const _name = String(currentUser.name || '').trim();
+                const _empRec = _empList.find(e => {
+                    const eu = String(e?.username || '').trim().toLowerCase();
+                    const ei = String(e?.id || '').trim().toLowerCase();
+                    const en = String(e?.name || '').trim();
+                    return (_uname && eu === _uname) || (_uid && ei === _uid) || (_name && en === _name);
+                }) || {};
+                const _usrRec = _userList.find(u => {
+                    const uu = String(u?.username || '').trim().toLowerCase();
+                    const ui = String(u?.id || '').trim().toLowerCase();
+                    const un = String(u?.name || '').trim();
+                    return (_uname && uu === _uname) || (_uid && ui === _uid) || (_name && un === _name);
+                }) || {};
+
+                currentUser = {
+                    ...currentUser,
+                    id: currentUser.id || _usrRec.id || _empRec.id || '',
+                    username: currentUser.username || _usrRec.username || _empRec.username || '',
+                    name: currentUser.name || _usrRec.name || _empRec.name || '',
+                    gender: _empRec.gender || _usrRec.gender || currentUser.gender || '',
+                    birthday: _empRec.birthday || _usrRec.birthday || currentUser.birthday || '',
+                    hometown: _empRec.hometown || _usrRec.hometown || currentUser.hometown || '',
+                    store: _empRec.store || _usrRec.store || currentUser.store || '',
+                    department: _empRec.department || _usrRec.department || currentUser.department || '',
+                    position: _empRec.position || _usrRec.position || currentUser.position || '',
+                    level: _empRec.level || _empRec.jobLevel || _empRec.rank || _usrRec.level || _usrRec.jobLevel || _usrRec.rank || currentUser.level || '',
+                    joinDate: _empRec.joinDate || _empRec.hireDate || _empRec.entryDate || _empRec.onboardDate || _usrRec.joinDate || _usrRec.hireDate || _usrRec.entryDate || _usrRec.onboardDate || currentUser.joinDate || '',
+                    managerUsername: _empRec.managerUsername || _empRec.manager || _usrRec.managerUsername || _usrRec.manager || currentUser.managerUsername || ''
+                };
+            } catch (e) {}
             
             // 加载用户基本信息
             document.getElementById('profile-name').textContent = currentUser.name || '--';
@@ -22319,9 +23064,13 @@ ${knowledgeContent.slice(0, 30000)}`;
                 if (!mgrUsername) {
                     managerEl.textContent = '--';
                 } else {
-                    const users = HRMS_STORE.getUsers();
-                    const mgr = users.find(u => u.username === mgrUsername);
-                    managerEl.textContent = mgr ? `${mgr.name}（${mgr.username}）` : mgrUsername;
+                    const users = HRMS_STORE.getUsers() || [];
+                    const employees = HRMS_STORE.getEmployees() || [];
+                    const key = mgrUsername.toLowerCase();
+                    const mgrUser = users.find(u => String(u?.username || '').trim().toLowerCase() === key);
+                    const mgrEmp = employees.find(e => String(e?.username || '').trim().toLowerCase() === key || String(e?.id || '').trim().toLowerCase() === key || String(e?.name || '').trim() === mgrUsername);
+                    const mgrName = String(mgrEmp?.name || mgrUser?.name || '').trim();
+                    managerEl.textContent = mgrName || mgrUsername;
                 }
             }
 
@@ -22399,9 +23148,30 @@ ${knowledgeContent.slice(0, 30000)}`;
             try { loadProfileLeaveBalance(); } catch (e) {}
         }
 
+        function __notifRelativeTime(isoStr) {
+            try {
+                const d = new Date(isoStr);
+                if (isNaN(d.getTime())) return '';
+                const now = new Date();
+                const diff = now - d;
+                const mins = Math.floor(diff / 60000);
+                if (mins < 1) return '刚刚';
+                if (mins < 60) return mins + '分钟前';
+                const hrs = Math.floor(mins / 60);
+                if (hrs < 24) return hrs + '小时前';
+                const days = Math.floor(hrs / 24);
+                if (days === 1) return '昨天';
+                if (days < 7) return days + '天前';
+                return isoStr.slice(0, 10);
+            } catch (e) { return ''; }
+        }
+
         function renderProfileNotifications() {
             const box = document.getElementById('profile-notifications');
             const empty = document.getElementById('profile-notifications-empty');
+            const pulseEl = document.getElementById('profile-notif-pulse');
+            const subtitleEl = document.getElementById('profile-notif-subtitle');
+            const countBadge = document.getElementById('profile-notif-count-badge');
             if (!box || !empty || !currentUser) return;
             const data = HRMS_STORE.ensure();
             const myUsername = String(currentUser.username || currentUser.id || '').trim().toLowerCase();
@@ -22430,51 +23200,102 @@ ${knowledgeContent.slice(0, 30000)}`;
                 .map(a => ({ ...a, _src: 'announcement', _id: a.id || '' }));
             const visible = sysNotifs.concat(anns);
             visible.sort((a, b) => String(b?.createdAt || '').localeCompare(String(a?.createdAt || '')));
+
+            const todayDate = new Date().toISOString().slice(0, 10);
+            const todayCount = visible.filter(a => String(a?.createdAt || '').slice(0, 10) === todayDate).length;
+
             if (!visible.length) {
                 box.innerHTML = '';
                 empty.style.display = '';
+                if (pulseEl) pulseEl.style.display = 'none';
+                if (subtitleEl) subtitleEl.textContent = '暂无新通知';
+                if (countBadge) countBadge.style.display = 'none';
                 return;
             }
             empty.style.display = 'none';
+            if (pulseEl) pulseEl.style.display = todayCount > 0 ? '' : 'none';
+            if (subtitleEl) subtitleEl.textContent = todayCount > 0 ? `今日 ${todayCount} 条新通知` : `共 ${visible.length} 条通知`;
+            if (countBadge) {
+                if (todayCount > 0) {
+                    countBadge.style.display = '';
+                    countBadge.textContent = todayCount + ' 新';
+                } else {
+                    countBadge.style.display = 'none';
+                }
+            }
             const isAdmin = isAdminUser();
             const COLLAPSE_LIMIT = 3;
 
-            const renderCard = (a, idx) => {
+            const renderCard = (a, idx, animDelay) => {
                 const title = escapeHtml(String(a?.title || '通知'));
-                const msg = escapeHtml(String(a?.content || ''));
-                const dt = String(a?.createdAt || '').slice(0, 16).replace('T', ' ');
+                const rawMsg = String(a?.content || '');
+                const msg = escapeHtml(rawMsg);
+                const relTime = __notifRelativeTime(a?.createdAt);
+                const fullDt = String(a?.createdAt || '').slice(0, 16).replace('T', ' ');
                 const isSys = a._src === 'notification';
-                const badge = isSys
-                    ? '<span class="status-badge status-active" style="margin-left: 8px;">系统</span>'
-                    : (String(a?.level || '') === 'important'
-                        ? '<span class="status-badge status-active" style="margin-left: 8px;">重要</span>'
-                        : '<span class="status-badge status-inactive" style="margin-left: 8px;">公告</span>');
+                const notifDate = String(a?.createdAt || '').slice(0, 10);
+                const isToday = notifDate === todayDate;
+                const isImportant = String(a?.level || '') === 'important';
+
+                let typeClass = 'notif-type-announcement';
+                if (isToday) typeClass = 'notif-type-new';
+                else if (isImportant) typeClass = 'notif-type-important';
+                else if (isSys) typeClass = 'notif-type-system';
+
+                let typeIcon = '📣';
+                if (isSys) typeIcon = '🔔';
+                if (isToday) typeIcon = '🆕';
+                if (isImportant) typeIcon = '🔴';
+                if (String(a?.title || '').includes('排班')) typeIcon = '📅';
+
+                let badge = '';
+                if (isToday) {
+                    badge = '<span style="display:inline-block; font-size:10px; font-weight:700; padding:2px 7px; border-radius:6px; background:linear-gradient(135deg,#f59e0b,#d97706); color:#fff; margin-left:8px; letter-spacing:0.3px;">NEW</span>';
+                } else if (isImportant) {
+                    badge = '<span style="display:inline-block; font-size:10px; font-weight:700; padding:2px 7px; border-radius:6px; background:rgba(239,68,68,0.2); color:rgba(239,68,68,0.95); margin-left:8px;">重要</span>';
+                } else if (!isSys) {
+                    badge = '<span style="display:inline-block; font-size:10px; font-weight:600; padding:2px 7px; border-radius:6px; background:rgba(139,92,246,0.15); color:rgba(167,139,250,0.9); margin-left:8px;">公告</span>';
+                }
+
                 const delBtn = isAdmin
-                    ? `<button type="button" onclick="deleteProfileNotification(${idx})" style="background:none; border:none; color:rgba(239,68,68,0.8); cursor:pointer; font-size:12px; padding:2px 6px; border-radius:6px; white-space:nowrap;" title="删除通知">删除</button>`
+                    ? `<button type="button" onclick="event.stopPropagation();deleteProfileNotification(${idx})" style="background:rgba(239,68,68,0.1); border:none; color:rgba(239,68,68,0.8); cursor:pointer; font-size:11px; padding:3px 8px; border-radius:8px; white-space:nowrap; font-weight:600;" title="删除">删除</button>`
                     : '';
+
+                const isLong = rawMsg.length > 80;
+                const preview = isLong ? escapeHtml(rawMsg.slice(0, 80)) + '…' : msg;
+
                 return `
-                    <div style="padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.03); margin-bottom: 10px;">
-                        <div style="display:flex; align-items:center; justify-content:space-between; gap: 8px; flex-wrap: wrap;">
-                            <div style="display:flex; align-items:center; gap: 8px; flex-wrap: wrap;"><div style="font-weight: 900;">${title}</div>${badge}</div>
+                    <div class="notif-card-item ${typeClass} notif-card-anim" style="animation-delay:${animDelay}ms; padding-left:20px;"${isLong ? ` onclick="this.querySelector('.notif-full-msg').classList.toggle('notif-msg-show')"` : ''}>
+                        <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:8px;">
+                            <div style="display:flex; align-items:center; gap:8px; min-width:0; flex:1;">
+                                <span style="font-size:15px; flex-shrink:0;">${typeIcon}</span>
+                                <div style="min-width:0; flex:1;">
+                                    <div style="display:flex; align-items:center; flex-wrap:wrap; gap:2px;">
+                                        <span style="font-weight:800; font-size:14px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:180px;">${title}</span>
+                                        ${badge}
+                                    </div>
+                                    <div style="font-size:11px; color:rgba(200,215,230,0.5); margin-top:2px; display:flex; align-items:center; gap:6px;">
+                                        <span>${escapeHtml(relTime)}</span>
+                                        <span style="opacity:0.4;">·</span>
+                                        <span>${escapeHtml(fullDt)}</span>
+                                    </div>
+                                </div>
+                            </div>
                             ${delBtn}
                         </div>
-                        <div style="margin-top: 6px; color: rgba(226,232,240,0.92); font-size: 13px; white-space: pre-line;">${msg}</div>
-                        <div style="margin-top: 6px; color: rgba(200,215,230,0.72); font-size: 12px;">${escapeHtml(dt || '-')}</div>
+                        <div style="margin-top:8px; color:rgba(226,232,240,0.88); font-size:13px; line-height:1.6; white-space:pre-line;">${preview}</div>
+                        ${isLong ? `<div class="notif-full-msg" style="display:none; margin-top:4px; color:rgba(226,232,240,0.88); font-size:13px; line-height:1.6; white-space:pre-line;">${msg}</div><div style="margin-top:4px; font-size:11px; color:rgba(200,215,230,0.4); text-align:right;">点击展开全文</div>` : ''}
                     </div>
                 `;
             };
 
-            const topCards = visible.slice(0, COLLAPSE_LIMIT).map((a, i) => renderCard(a, i)).join('');
+            const topCards = visible.slice(0, COLLAPSE_LIMIT).map((a, i) => renderCard(a, i, i * 60)).join('');
             let html = topCards;
 
             if (visible.length > COLLAPSE_LIMIT) {
-                const moreCards = visible.slice(COLLAPSE_LIMIT).map((a, i) => renderCard(a, i + COLLAPSE_LIMIT)).join('');
-                html += `<div id="profile-notif-more" style="display:none;">${moreCards}</div>`;
-                html += `<div style="text-align:center; margin-top: 4px;">
-                    <button type="button" id="profile-notif-toggle" onclick="toggleProfileNotifications()" style="background:none; border:1px solid rgba(255,255,255,0.12); color:rgba(200,215,230,0.85); cursor:pointer; font-size:12px; padding:6px 16px; border-radius:8px;">
-                        展开更多（${visible.length - COLLAPSE_LIMIT}条）
-                    </button>
-                </div>`;
+                const moreCards = visible.slice(COLLAPSE_LIMIT).map((a, i) => renderCard(a, i + COLLAPSE_LIMIT, 0)).join('');
+                html += `<div id="profile-notif-more" class="notif-expand-area">${moreCards}</div>`;
+                html += `<button type="button" id="profile-notif-toggle" class="notif-more-btn" onclick="toggleProfileNotifications()">查看更多通知（${visible.length - COLLAPSE_LIMIT}条）▾</button>`;
             }
             box.innerHTML = html;
         }
@@ -22483,10 +23304,15 @@ ${knowledgeContent.slice(0, 30000)}`;
             const more = document.getElementById('profile-notif-more');
             const btn = document.getElementById('profile-notif-toggle');
             if (!more || !btn) return;
-            const hidden = more.style.display === 'none';
-            more.style.display = hidden ? '' : 'none';
-            btn.textContent = hidden ? '收起' : btn.textContent;
-            if (!hidden) btn.textContent = '展开更多';
+            const isExpanded = more.classList.contains('expanded');
+            if (isExpanded) {
+                more.classList.remove('expanded');
+                btn.innerHTML = btn.getAttribute('data-more-text') || '查看更多通知 ▾';
+            } else {
+                btn.setAttribute('data-more-text', btn.innerHTML);
+                more.classList.add('expanded');
+                btn.innerHTML = '收起 ▴';
+            }
         }
 
         async function renderProfilePendingApprovals() {
@@ -23207,10 +24033,11 @@ ${knowledgeContent.slice(0, 30000)}`;
             } catch (e) {}
         }
 
-        function openDailyReportStaffModal(kind) {
+        function openDailyReportStaffModal(kind, ev) {
             const modal = document.getElementById('dr-staff-modal');
             if (!modal) return;
             __DR_STAFF_MODAL_KIND = String(kind || '').trim() || 'front';
+            __DR_STAFF_ANCHOR = ev?.currentTarget || ev?.target || null;
             const users = drGetPickableUsers();
             __DR_STAFF_PICK_LIST = users.map(u => ({
                 username: String(u?.username || '').trim(),
@@ -23222,11 +24049,82 @@ ${knowledgeContent.slice(0, 30000)}`;
             })).filter(x => x.username);
             drRenderStaffPickList();
             modal.classList.add('show');
+            setTimeout(() => positionDailyReportStaffModal(), 0);
+        }
+
+        function positionDailyReportStaffModal() {
+            const modal = document.getElementById('dr-staff-modal');
+            const card = modal?.querySelector('.modal-content');
+            if (!modal || !card) return;
+            const trigger = (__DR_STAFF_ANCHOR && __DR_STAFF_ANCHOR.getBoundingClientRect)
+                ? __DR_STAFF_ANCHOR
+                : null;
+            const vw = window.innerWidth || document.documentElement.clientWidth || 375;
+            const vh = window.innerHeight || document.documentElement.clientHeight || 700;
+            const cardW = Math.min(560, Math.max(280, vw - 16));
+            const preferredH = Math.min(620, Math.floor(vh * 0.86));
+            const minH = 220;
+            const edge = 8;
+            const gap = 8;
+
+            if (vw <= 768) {
+                card.style.position = '';
+                card.style.width = '';
+                card.style.maxWidth = '';
+                card.style.margin = '';
+                card.style.left = '';
+                card.style.top = '';
+                card.style.maxHeight = '';
+                return;
+            }
+
+            card.style.position = 'fixed';
+            card.style.width = cardW + 'px';
+            card.style.maxWidth = cardW + 'px';
+            card.style.margin = '0';
+            card.style.left = Math.max(edge, Math.floor((vw - cardW) / 2)) + 'px';
+            card.style.top = Math.max(12, vh - preferredH - 12) + 'px';
+            card.style.maxHeight = preferredH + 'px';
+
+            if (!trigger) return;
+            const rect = trigger.getBoundingClientRect();
+
+            const spaceBelow = vh - rect.bottom - gap - edge;
+            const spaceAbove = rect.top - gap - edge;
+            const openAbove = (spaceBelow < 280 && spaceAbove > spaceBelow);
+            const available = openAbove ? spaceAbove : spaceBelow;
+            const modalH = Math.max(minH, Math.min(preferredH, available));
+
+            const left = Math.max(edge, Math.min(rect.left, vw - cardW - edge));
+            let top = openAbove
+                ? (rect.top - gap - modalH)
+                : (rect.bottom + gap);
+
+            top = Math.max(edge, Math.min(top, vh - modalH - edge));
+
+            card.style.left = Math.round(left) + 'px';
+            card.style.top = Math.round(top) + 'px';
+            card.style.maxHeight = Math.round(modalH) + 'px';
+        }
+
+        function resetDailyReportStaffModalPosition() {
+            const modal = document.getElementById('dr-staff-modal');
+            const card = modal?.querySelector('.modal-content');
+            if (!card) return;
+            card.style.position = '';
+            card.style.width = '';
+            card.style.maxWidth = '';
+            card.style.margin = '';
+            card.style.left = '';
+            card.style.top = '';
+            card.style.maxHeight = '';
         }
 
         function closeDailyReportStaffModal() {
             const modal = document.getElementById('dr-staff-modal');
             if (modal) modal.classList.remove('show');
+            resetDailyReportStaffModalPosition();
+            __DR_STAFF_ANCHOR = null;
         }
 
         function confirmDailyReportStaffModal() {
@@ -24172,7 +25070,7 @@ ${knowledgeContent.slice(0, 30000)}`;
         function showReportsTab(tab) {
             const t = String(tab || '').trim() || 'business';
             __REP_TAB = t;
-            const ids = ['business', 'attendance', 'payroll', 'turnover', 'attention'];
+            const ids = ['business', 'attendance', 'payroll', 'turnover'];
             ids.forEach(x => {
                 const box = document.getElementById('rep-' + x);
                 if (box) box.classList.toggle('hidden', x !== t);
@@ -26838,11 +27736,22 @@ ${knowledgeContent.slice(0, 30000)}`;
 
         // Mobile navigation functions
         function mobileNavigateTo(page) {
+            console.log('Mobile navigate to:', page);
+            
+            // Prevent event propagation
+            if (event) {
+                event.preventDefault();
+                event.stopPropagation();
+            }
+            
             // Update active state
             document.querySelectorAll('.mobile-nav-item').forEach(item => {
                 item.classList.remove('active');
             });
-            document.querySelector(`[data-page="${page}"]`).classList.add('active');
+            const activeItem = document.querySelector(`[data-page="${page}"]`);
+            if (activeItem) {
+                activeItem.classList.add('active');
+            }
             
             // Navigate to corresponding page
             switch(page) {
@@ -26883,7 +27792,10 @@ ${knowledgeContent.slice(0, 30000)}`;
             
             if (isMobile) {
                 // Show mobile navigation
-                document.getElementById('mobile-nav').style.display = 'flex';
+                const mobileNav = document.getElementById('mobile-nav');
+                if (mobileNav) {
+                    mobileNav.style.display = 'flex';
+                }
                 
                 // Hide sidebar
                 const sidebar = document.querySelector('.sidebar');
@@ -26891,31 +27803,67 @@ ${knowledgeContent.slice(0, 30000)}`;
                     sidebar.style.display = 'none';
                 }
                 
-                // Update page navigation to work with mobile nav
-                const originalShowPage = window.showPage;
-                window.showPage = function(pageId) {
-                    originalShowPage(pageId);
-                    
-                    // Update mobile nav active state
-                    const pageMap = {
-                        'dashboard': 'dashboard',
-                        'attendance-page': 'attendance',
-                        'rewards-page': 'approvals',
-                        'payment-page': 'approvals',
-                        'profile-page': 'profile'
-                    };
-                    
-                    const mobilePage = pageMap[pageId];
-                    if (mobilePage) {
-                        document.querySelectorAll('.mobile-nav-item').forEach(item => {
-                            item.classList.remove('active');
-                        });
-                        const activeItem = document.querySelector(`[data-page="${mobilePage}"]`);
-                        if (activeItem) {
-                            activeItem.classList.add('active');
-                        }
-                    }
+                // Adjust main content for mobile
+                const mainContent = document.querySelector('.main-content');
+                if (mainContent) {
+                    mainContent.style.marginLeft = '0';
+                    mainContent.style.paddingBottom = '80px'; // Space for bottom nav
+                }
+                
+                // Hide desktop navigation items
+                const desktopNav = document.querySelector('.nav');
+                if (desktopNav) {
+                    desktopNav.style.display = 'none';
+                }
+            } else {
+                // Hide mobile navigation on desktop
+                const mobileNav = document.getElementById('mobile-nav');
+                if (mobileNav) {
+                    mobileNav.style.display = 'none';
+                }
+                
+                // Show sidebar on desktop
+                const sidebar = document.querySelector('.sidebar');
+                if (sidebar) {
+                    sidebar.style.display = 'block';
+                }
+                
+                // Reset main content
+                const mainContent = document.querySelector('.main-content');
+                if (mainContent) {
+                    mainContent.style.marginLeft = '';
+                    mainContent.style.paddingBottom = '';
+                }
+                
+                // Show desktop navigation
+                const desktopNav = document.querySelector('.nav');
+                if (desktopNav) {
+                    desktopNav.style.display = '';
+                }
+            }
+        }
+
+        // Sync mobile navigation with page changes
+        function syncMobileNavigation(pageId) {
+            if (window.innerWidth <= 768) {
+                const pageMap = {
+                    'dashboard': 'dashboard',
+                    'attendance-page': 'attendance',
+                    'rewards-page': 'approvals',
+                    'payment-page': 'approvals',
+                    'profile-page': 'profile'
                 };
+                
+                const mobilePage = pageMap[pageId];
+                if (mobilePage) {
+                    document.querySelectorAll('.mobile-nav-item').forEach(item => {
+                        item.classList.remove('active');
+                    });
+                    const activeItem = document.querySelector(`[data-page="${mobilePage}"]`);
+                    if (activeItem) {
+                        activeItem.classList.add('active');
+                    }
+                }
             }
         }
 
@@ -27405,23 +28353,50 @@ ${knowledgeContent.slice(0, 30000)}`;
                 navigator.vibrate(type === 'error' ? [100, 50, 100] : 50);
             }
         }
+
+        function normalizeModalCloseButtons() {
+            try {
+                const btns = Array.from(document.querySelectorAll('button.modal-close'));
+                btns.forEach(btn => {
+                    const txt = String(btn.textContent || '').trim();
+                    if (txt !== '×' && txt !== '✕' && txt !== '✖') return;
+                    btn.textContent = '返回上一页';
+                    btn.setAttribute('title', '返回上一页');
+                    btn.setAttribute('aria-label', '返回上一页');
+                    btn.style.width = 'auto';
+                    btn.style.minWidth = '96px';
+                    btn.style.height = '32px';
+                    btn.style.padding = '0 10px';
+                    btn.style.borderRadius = '10px';
+                    btn.style.fontSize = '12px';
+                    btn.style.fontWeight = '700';
+                    btn.style.lineHeight = '32px';
+                });
+            } catch (e) {}
+        }
         
         // 初始化
         document.addEventListener('DOMContentLoaded', () => {
             updateDebug('系统初始化完成');
+            normalizeModalCloseButtons();
 
             // Initialize mobile features
             initMobileNavigation();
             initPullToRefresh();
             initMobileSwipe();
             initMobileOptimizer();
+            
+            // Handle window resize for mobile navigation
+            window.addEventListener('resize', () => {
+                initMobileNavigation();
+            });
 
             try {
                 if ('serviceWorker' in navigator) {
                     // Force clear old caches on every load
                     if (typeof caches !== 'undefined') {
                         caches.keys().then(keys => {
-                            keys.forEach(k => { if (k !== 'hrms-pwa-v57') caches.delete(k); });
+                            keys.forEach(k => { if (k !== 'hrms-pwa-v141') caches.delete(k); });
                         }).catch(() => {});
                     }
                     navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }).then((reg) => {
