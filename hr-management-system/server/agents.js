@@ -32,16 +32,845 @@ import { pool as agentPool, setPool as setUnifiedAgentPool } from './utils/datab
 import { safeExecute, safeErrorLog } from './utils/error-handler.js';
 import { handleMarginMessage } from './margin-message-handler.js';
 import { deduplicateMessage } from './message-deduplication.js';
-import { getOpsAgentConfig } from './agent-config-manager.js';
+import { getOpsAgentConfig, getBiAgentConfig, getCategoryAssigneeRoleMap } from './agent-config-manager.js';
 
 // ─────────────────────────────────────────────
 // 0. Config
 // ─────────────────────────────────────────────
 
-const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || process.env.ARK_API_KEY || '';
-const DEEPSEEK_BASE_URL = process.env.DEEPSEEK_BASE_URL || 'https://ark.cn-beijing.volces.com/api/v3';
-const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL || 'deepseek-v3-250324';
+const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || '';
+const DEEPSEEK_BASE_URL = process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com';
+const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL || 'deepseek-v3.2';
 const DEEPSEEK_VISION_MODEL = process.env.DEEPSEEK_VISION_MODEL || 'doubao-seed-2-0-pro-260215';
+const QWEN_API_KEY = process.env.QWEN_API_KEY || process.env.DASHSCOPE_API_KEY || '';
+const QWEN_BASE_URL = process.env.QWEN_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+const QWEN_MODEL = process.env.QWEN_MODEL || 'qwen-max';
+const DOUBAO_API_KEY = process.env.ARK_API_KEY || process.env.DOUBAO_API_KEY || '';
+const DOUBAO_BASE_URL = process.env.DOUBAO_BASE_URL || 'https://ark.cn-beijing.volces.com/api/v3';
+
+const FACTUAL_DATA_UNAVAILABLE_MESSAGE = '抱歉，我当前无法从数据库中获取相关凭证/数据，请您登录系统手动核查。';
+
+function isFactLikeQuestion(text) {
+  const q = String(text || '').trim();
+  if (!q) return false;
+  const hasFactTopic = /(营业额|营收|差评|桌访|开档|收档|例会|原料|kpi|考核指标|评分|门店|菜品|员工|姓名)/i.test(q);
+  const hasQuestionPattern = /[?？]|(多少|几条|几次|总数|记录数|数量|统计|有没有|是否|吗|多少次|多少条)/i.test(q);
+  return hasFactTopic && hasQuestionPattern;
+}
+
+async function buildBiDeterministicDataSourceCoverageReply(text) {
+  const q = String(text || '').trim();
+  if (!/(数据源|数据范围|能查什么|知道什么|覆盖|哪些表|可用数据)/.test(q)) return '';
+
+  const sourceDefs = [
+    { key: 'table_visit_records', label: '桌访记录（系统入库）', sql: `SELECT COUNT(*)::int AS c, MAX(date)::text AS latest FROM table_visit_records` },
+    { key: 'daily_reports', label: '营业日报（系统）', sql: `SELECT COUNT(*)::int AS c, MAX(date)::text AS latest FROM daily_reports` },
+    { key: 'bad_reviews', label: '差评报告（同步）', sql: `SELECT COUNT(*)::int AS c, MAX(created_at)::text AS latest FROM agent_messages WHERE content_type='negative_review'` },
+    { key: 'opening_reports_bitable', label: '开档报告（同步）', sql: `SELECT COUNT(DISTINCT record_id)::int AS c, MAX(created_at)::text AS latest FROM agent_messages WHERE content_type='opening_report'` },
+    { key: 'closing_reports_bitable', label: '收档报告（同步）', sql: `SELECT COUNT(DISTINCT record_id)::int AS c, MAX(created_at)::text AS latest FROM agent_messages WHERE content_type='closing_report'` },
+    { key: 'meeting_reports_bitable', label: '例会报告（同步）', sql: `SELECT COUNT(DISTINCT record_id)::int AS c, MAX(created_at)::text AS latest FROM agent_messages WHERE content_type='meeting_report'` },
+    { key: 'material_majixian_bitable', label: '马己仙原料收货（同步）', sql: `SELECT COUNT(DISTINCT record_id)::int AS c, MAX(created_at)::text AS latest FROM agent_messages WHERE content_type='material_report' AND lower(coalesce(agent_data->>'brand','')) LIKE '%maji%'` },
+    { key: 'material_hongchao_bitable', label: '洪潮原料收货（同步）', sql: `SELECT COUNT(DISTINCT record_id)::int AS c, MAX(created_at)::text AS latest FROM agent_messages WHERE content_type='material_report' AND lower(coalesce(agent_data->>'brand','')) LIKE '%hong%'` }
+  ];
+
+  const lines = [];
+  for (const s of sourceDefs) {
+    if (!isBiSourceEnabled(s.key)) {
+      lines.push(`- ${s.label}：已禁用`);
+      continue;
+    }
+    try {
+      const r = await pool().query(s.sql);
+      const c = Number(r.rows?.[0]?.c || 0);
+      const latest = String(r.rows?.[0]?.latest || '').trim() || '-';
+      lines.push(`- ${s.label}：${c}条（latest=${latest}）`);
+    } catch (_e) {
+      lines.push(`- ${s.label}：查询失败`);
+    }
+  }
+
+  return `当前 BI 可用数据源覆盖如下：\n${lines.join('\n')}\n\n说明：事实问答仅使用以上可用且可查询的数据源；缺失时将固定拒答。`;
+}
+
+function resolveBiRelevantSourceKeys(text) {
+  const q = String(text || '').trim();
+  const keys = new Set();
+  if (/(桌访|桌巡|巡台|巡桌|不满意.*菜|菜品.*不满意|最不满意|出品.*不满意)/.test(q)) {
+    keys.add('table_visit_records');
+    keys.add('table_visit_bitable');
+  }
+  if (/(差评|点评|评论|客诉)/.test(q)) {
+    keys.add('bad_reviews');
+  }
+  if (/(开档|开市)/.test(q)) {
+    keys.add('opening_reports_bitable');
+  }
+  if (/(收档|收市|闭市)/.test(q)) {
+    keys.add('closing_reports_bitable');
+  }
+  if (/(例会|会议)/.test(q)) {
+    keys.add('meeting_reports_bitable');
+  }
+  if (/(原料|收货)/.test(q)) {
+    keys.add('material_majixian_bitable');
+    keys.add('material_hongchao_bitable');
+  }
+  if (/(营业额|营收|收入|对账|毛利|损耗|成本|人效|KPI|kpi)/.test(q)) {
+    keys.add('daily_reports');
+  }
+  if (keys.size === 0 && isFactLikeQuestion(q)) {
+    keys.add('daily_reports');
+    keys.add('table_visit_records');
+    keys.add('bad_reviews');
+  }
+  return Array.from(keys);
+}
+
+async function buildBiFactSourceAudit(store, text) {
+  const keyDefs = {
+    table_visit_records: {
+      label: '桌访记录（系统入库）',
+      sql: `SELECT COUNT(*)::int AS c, MAX(date)::text AS latest FROM table_visit_records WHERE lower(regexp_replace(coalesce(store,''), '\\s+', '', 'g')) = $1`,
+      params: [normalizeStoreKey(store)]
+    },
+    table_visit_bitable: {
+      label: '桌访表（飞书）',
+      sql: `SELECT COUNT(DISTINCT record_id)::int AS c, MAX(created_at)::text AS latest FROM agent_messages WHERE content_type='table_visit' AND lower(regexp_replace(coalesce(agent_data->>'store', agent_data#>>'{fields,store}', ''), '\\s+', '', 'g')) = $1`,
+      params: [normalizeStoreKey(store)]
+    },
+    bad_reviews: {
+      label: '差评报告（同步）',
+      sql: `SELECT COUNT(*)::int AS c, MAX(created_at)::text AS latest FROM agent_messages WHERE content_type='negative_review' AND lower(regexp_replace(coalesce(agent_data->>'store', ''), '\\s+', '', 'g')) = $1`,
+      params: [normalizeStoreKey(store)]
+    },
+    opening_reports_bitable: {
+      label: '开档报告（同步）',
+      sql: `SELECT COUNT(DISTINCT record_id)::int AS c, MAX(created_at)::text AS latest FROM agent_messages WHERE content_type='opening_report' AND lower(regexp_replace(coalesce(agent_data#>>'{fields,store}', agent_data->>'store', ''), '\\s+', '', 'g')) = $1`,
+      params: [normalizeStoreKey(store)]
+    },
+    closing_reports_bitable: {
+      label: '收档报告（同步）',
+      sql: `SELECT COUNT(DISTINCT record_id)::int AS c, MAX(created_at)::text AS latest FROM agent_messages WHERE content_type='closing_report' AND lower(regexp_replace(coalesce(agent_data#>>'{fields,store}', agent_data->>'store', ''), '\\s+', '', 'g')) = $1`,
+      params: [normalizeStoreKey(store)]
+    },
+    meeting_reports_bitable: {
+      label: '例会报告（同步）',
+      sql: `SELECT COUNT(DISTINCT record_id)::int AS c, MAX(created_at)::text AS latest FROM agent_messages WHERE content_type='meeting_report' AND lower(regexp_replace(coalesce(agent_data#>>'{fields,store}', agent_data->>'store', ''), '\\s+', '', 'g')) = $1`,
+      params: [normalizeStoreKey(store)]
+    },
+    material_majixian_bitable: {
+      label: '马己仙原料收货（同步）',
+      sql: `SELECT COUNT(DISTINCT record_id)::int AS c, MAX(created_at)::text AS latest FROM agent_messages WHERE content_type='material_report' AND lower(regexp_replace(coalesce(agent_data#>>'{fields,store}', agent_data->>'store', ''), '\\s+', '', 'g')) = $1 AND lower(coalesce(agent_data->>'brand','')) LIKE '%maji%'`,
+      params: [normalizeStoreKey(store)]
+    },
+    material_hongchao_bitable: {
+      label: '洪潮原料收货（同步）',
+      sql: `SELECT COUNT(DISTINCT record_id)::int AS c, MAX(created_at)::text AS latest FROM agent_messages WHERE content_type='material_report' AND lower(regexp_replace(coalesce(agent_data#>>'{fields,store}', agent_data->>'store', ''), '\\s+', '', 'g')) = $1 AND lower(coalesce(agent_data->>'brand','')) LIKE '%hong%'`,
+      params: [normalizeStoreKey(store)]
+    },
+    daily_reports: {
+      label: '营业日报（系统）',
+      sql: `SELECT COUNT(*)::int AS c, MAX(date)::text AS latest FROM daily_reports WHERE lower(regexp_replace(coalesce(store,''), '\\s+', '', 'g')) = $1`,
+      params: [normalizeStoreKey(store)]
+    }
+  };
+
+  const relevant = resolveBiRelevantSourceKeys(text);
+  const rows = [];
+  for (const key of relevant) {
+    const def = keyDefs[key];
+    if (!def) continue;
+    if (!isBiSourceEnabled(key)) {
+      rows.push({ key, label: def.label, status: 'disabled', count: 0, latest: '-' });
+      continue;
+    }
+    try {
+      const r = await pool().query(def.sql, def.params);
+      const count = Number(r.rows?.[0]?.c || 0);
+      const latest = String(r.rows?.[0]?.latest || '').trim() || '-';
+      rows.push({ key, label: def.label, status: count > 0 ? 'ok' : 'empty', count, latest });
+    } catch (_e) {
+      rows.push({ key, label: def.label, status: 'error', count: 0, latest: '-' });
+    }
+  }
+  return rows;
+}
+
+function buildBiSourceAuditText(auditRows = []) {
+  if (!Array.isArray(auditRows) || auditRows.length === 0) return '';
+  const lines = auditRows.map((x) => {
+    const statusText = x.status === 'ok'
+      ? '可用'
+      : x.status === 'empty'
+        ? '空样本'
+        : x.status === 'disabled'
+          ? '已禁用'
+          : '查询失败';
+    return `- ${x.label}：${statusText}（count=${Number(x.count || 0)}, latest=${x.latest || '-'})`;
+  });
+  return lines.join('\n');
+}
+
+async function buildBiDeterministicOpsReportCountReply(store, text) {
+  const q = String(text || '').trim();
+  const targetStore = String(store || '').trim();
+  if (!targetStore) return '';
+  if (!/(开档|收档|例会|原料)/.test(q)) return '';
+  if (!/(多少|几次|几条|总数|次数|记录数|统计|一共|有没有|是否|吗)/.test(q)) return '';
+
+  const period = resolveDateRangeFromQuestion(q, 7);
+  const normalizedStore = normalizeStoreKey(targetStore);
+
+  const matchers = [
+    { key: 'opening_report', label: '开档', test: /(开档|开市)/ },
+    { key: 'closing_report', label: '收档', test: /(收档|闭市|收市)/ },
+    { key: 'meeting_report', label: '例会', test: /(例会|会议)/ },
+    { key: 'material_report', label: '原料收货', test: /(原料|收货)/ }
+  ];
+  const matched = matchers.find((x) => x.test.test(q));
+  if (!matched) return '';
+
+  try {
+    const r = await pool().query(
+      `SELECT COUNT(DISTINCT record_id)::int AS c
+       FROM agent_messages
+       WHERE content_type = $1
+         AND lower(regexp_replace(coalesce(agent_data#>>'{fields,store}', agent_data->>'store', ''), '\\s+', '', 'g')) = $2
+         AND (
+           CASE
+             WHEN coalesce(agent_data#>>'{fields,date}','') ~ '^\\d{4}-\\d{2}-\\d{2}$' THEN (agent_data#>>'{fields,date}')::date
+             WHEN coalesce(agent_data->>'date','') ~ '^\\d{4}-\\d{2}-\\d{2}$' THEN (agent_data->>'date')::date
+             WHEN coalesce(agent_data#>>'{fields,date}','') ~ '^\\d{10,13}$' THEN to_timestamp((agent_data#>>'{fields,date}')::bigint / CASE WHEN length(agent_data#>>'{fields,date}')=13 THEN 1000 ELSE 1 END)::date
+             WHEN coalesce(agent_data->>'date','') ~ '^\\d{10,13}$' THEN to_timestamp((agent_data->>'date')::bigint / CASE WHEN length(agent_data->>'date')=13 THEN 1000 ELSE 1 END)::date
+             ELSE created_at::date
+           END
+         ) BETWEEN $3::date AND $4::date`,
+      [matched.key, normalizedStore, period.start, period.end]
+    );
+    const count = Number(r.rows?.[0]?.c || 0);
+    return `${period.label}${matched.label}数据（${targetStore}）\n- ${matched.label}次数：${count}次\n- 数据源：agent_messages/${matched.key}`;
+  } catch (e) {
+    return FACTUAL_DATA_UNAVAILABLE_MESSAGE;
+  }
+}
+
+function buildKpiRadarAlertJson(issue = {}) {
+  const category = String(issue.category || '').trim();
+  const suggestedAgents = category.includes('毛利') || category.includes('营收')
+    ? ['ops_supervisor', 'chief_evaluator']
+    : category.includes('差评') || category.includes('桌访')
+      ? ['ops_supervisor', 'train_advisor']
+      : ['ops_supervisor'];
+
+  return {
+    alert_level: String(issue.severity || 'medium'),
+    abnormal_metric: category || '未知指标',
+    trigger_data: {
+      store: issue.store || '',
+      brand: issue.brand || '',
+      ...(issue.data && typeof issue.data === 'object' ? issue.data : {})
+    },
+    suggested_agents: suggestedAgents,
+    source: 'data_auditor',
+    generated_at: new Date().toISOString()
+  };
+}
+
+function isDataBackedReply(agentData = {}) {
+  return Boolean(agentData?.deterministic || agentData?.grounded || agentData?.dataBacked);
+}
+
+// ─────────────────────────────────────────────
+// 角色-Agent 权限矩阵
+// ─────────────────────────────────────────────
+const ROLE_AGENT_PERMISSIONS = {
+  admin:                    { allowed: ['data_auditor', 'ops_supervisor', 'master', 'sop_advisor', 'appeal', 'chief_evaluator', 'train_advisor'], scope: 'global' },
+  hq_manager:               { allowed: ['data_auditor', 'ops_supervisor', 'master', 'sop_advisor', 'appeal', 'chief_evaluator', 'train_advisor'], scope: 'global' },
+  hr_manager:               { allowed: ['chief_evaluator', 'data_auditor'], scope: 'global' },
+  cashier:                  { allowed: [], scope: 'none' },
+  store_manager:            { allowed: ['data_auditor', 'ops_supervisor', 'master', 'sop_advisor', 'appeal', 'chief_evaluator', 'train_advisor'], scope: 'store' },
+  store_production_manager: { allowed: ['data_auditor', 'ops_supervisor', 'master', 'sop_advisor', 'appeal', 'chief_evaluator', 'train_advisor'], scope: 'store' },
+  employee:                 { allowed: [], scope: 'none' }
+};
+
+function checkAgentPermission(role, route) {
+  const perm = ROLE_AGENT_PERMISSIONS[role] || ROLE_AGENT_PERMISSIONS['employee'];
+  if (!perm.allowed.length) return { allowed: false, reason: '您的角色暂无权限使用智能助理。如需开通请联系管理员。' };
+  if (!perm.allowed.includes(route)) {
+    const agentLabel = { data_auditor: 'BI数据', ops_supervisor: '营运督导', master: '总调度', sop_advisor: 'SOP', appeal: '申诉', chief_evaluator: '绩效', train_advisor: '培训' };
+    return { allowed: false, reason: `您的角色无权访问${agentLabel[route] || route}模块。可用功能：${perm.allowed.map(a => agentLabel[a] || a).join('、')}` };
+  }
+  return { allowed: true, scope: perm.scope };
+}
+
+// ─────────────────────────────────────────────
+// 飞书卡片格式化：将文字回复升级为结构化卡片
+// ─────────────────────────────────────────────
+const AGENT_CARD_CONFIG = {
+  data_auditor:    { icon: '📊', label: 'BI 数据审计', color: 'blue' },
+  ops_supervisor:  { icon: '🔍', label: '营运督导 OP', color: 'green' },
+  master:          { icon: '🎯', label: 'Master 调度', color: 'purple' },
+  sop_advisor:     { icon: '📖', label: 'SOP 顾问', color: 'turquoise' },
+  appeal:          { icon: '✋', label: '申诉处理', color: 'orange' },
+  chief_evaluator: { icon: '📈', label: '绩效评估', color: 'indigo' },
+  train_advisor:   { icon: '🎓', label: '培训助手', color: 'violet' }
+};
+
+function buildFeishuCardFromAgentReply(route, text, agentData = {}) {
+  if (!text) return null;
+  const cfg = AGENT_CARD_CONFIG[route] || { icon: '🤖', label: '智能助理', color: 'blue' };
+  const isDeterministic = agentData?.deterministic === true;
+  const lines = text.split('\n').filter(l => l.trim());
+  // 提取标题行（第一行通常是 emoji + 标题）
+  let title = lines[0] || '查询结果';
+  const bodyLines = lines.slice(1);
+  // 构建卡片元素
+  const elements = [];
+  // 数据指标区：解析 "- key：value" 格式为 fields
+  const fieldLines = bodyLines.filter(l => /^[-·•]\s/.test(l.trim()));
+  const textLines = bodyLines.filter(l => !/^[-·•]\s/.test(l.trim()));
+  if (fieldLines.length) {
+    const fields = fieldLines.map(l => {
+      const cleaned = l.trim().replace(/^[-·•]\s*/, '');
+      return { is_short: cleaned.length < 30, text: { tag: 'lark_md', content: cleaned.replace(/^(.+?)[:：]/, '**$1**\n') } };
+    });
+    // 分组展示（每组最多4个field）
+    for (let i = 0; i < fields.length; i += 4) {
+      elements.push({ tag: 'div', fields: fields.slice(i, i + 4) });
+    }
+  }
+  if (textLines.length) {
+    elements.push({ tag: 'div', text: { tag: 'lark_md', content: textLines.join('\n') } });
+  }
+  // 底部标注
+  const noteText = isDeterministic ? `${cfg.icon} ${cfg.label} · 数据实时查询` : `${cfg.icon} ${cfg.label}`;
+  elements.push({ tag: 'hr' });
+  elements.push({ tag: 'note', elements: [{ tag: 'plain_text', content: noteText }] });
+  return {
+    config: { wide_screen_mode: true },
+    header: { title: { tag: 'plain_text', content: title }, template: cfg.color },
+    elements
+  };
+}
+
+function resolveDateRangeFromQuestion(text, defaultDays = 7) {
+  const q = String(text || '').trim();
+  const now = new Date();
+  let label = `近${defaultDays}天`;
+  let start = '';
+  let end = '';
+
+  if (/(昨天|昨日)/.test(q)) {
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+    start = toDateOnly(d.toISOString());
+    end = start;
+    label = `昨天(${start})`;
+    return { start, end, label };
+  }
+
+  if (/今天|今日/.test(q)) {
+    start = toDateOnly(now.toISOString());
+    end = start;
+    label = `今天(${start})`;
+    return { start, end, label };
+  }
+
+  if (/上周/.test(q)) {
+    const day = now.getDay(); // 0=Sun,1=Mon
+    const mondayOffset = day === 0 ? -6 : (1 - day);
+    const thisMonday = new Date(now.getFullYear(), now.getMonth(), now.getDate() + mondayOffset);
+    const lastMonday = new Date(thisMonday.getFullYear(), thisMonday.getMonth(), thisMonday.getDate() - 7);
+    const lastSunday = new Date(thisMonday.getFullYear(), thisMonday.getMonth(), thisMonday.getDate() - 1);
+    start = toDateOnly(lastMonday.toISOString());
+    end = toDateOnly(lastSunday.toISOString());
+    label = `上周(${start}~${end})`;
+    return { start, end, label };
+  }
+
+  if (/本周/.test(q)) {
+    const day = now.getDay();
+    const mondayOffset = day === 0 ? -6 : (1 - day);
+    const thisMonday = new Date(now.getFullYear(), now.getMonth(), now.getDate() + mondayOffset);
+    start = toDateOnly(thisMonday.toISOString());
+    end = toDateOnly(now.toISOString());
+    label = `本周(${start}~${end})`;
+    return { start, end, label };
+  }
+
+  if (/(近30天|30天|本月)/.test(q)) {
+    end = toDateOnly(now.toISOString());
+    start = toDateOnly(new Date(Date.now() - 29 * 86400000).toISOString());
+    label = `近30天(${start}~${end})`;
+    return { start, end, label };
+  }
+
+  end = toDateOnly(now.toISOString());
+  start = toDateOnly(new Date(Date.now() - Math.max(defaultDays - 1, 0) * 86400000).toISOString());
+  label = `近${defaultDays}天(${start}~${end})`;
+  return { start, end, label };
+}
+
+function resolveModelProvider(modelName, forceProvider = '') {
+  const model = String(modelName || '').trim().toLowerCase();
+  if (forceProvider) return forceProvider;
+  if (model.startsWith('qwen-')) return 'qwen';
+  if (model.startsWith('doubao-')) return 'doubao';
+  if (model.startsWith('deepseek-')) return 'deepseek';
+  return 'deepseek';
+}
+
+async function buildBiDeterministicTableVisitReply(store, text) {
+  const q = String(text || '').trim();
+  const targetStore = String(store || '').trim();
+  if (!targetStore) return '';
+  const askTableVisitLike = /(桌访|桌巡|巡台|巡桌|不满意|满意度|菜品.*反馈|桌访.*记录|桌访.*样本)/.test(q);
+  if (!askTableVisitLike) return '';
+  if (/(点评|大众点评|美团|饿了么|差评报告)/.test(q)) return '';
+  const period = resolveDateRangeFromQuestion(q, 7);
+  const periodLabel = period.label;
+  const start = period.start;
+  const end = period.end;
+  const rows = await loadUnifiedTableVisitRowsByStore(targetStore, start, end);
+  if (!rows.length) {
+    return `${periodLabel}桌访数据（${targetStore}）：0条记录。该时间段暂无桌访数据入库。`;
+  }
+
+  // 统计不满意菜品
+  const dishTop = new Map();
+  rows.forEach((x) => {
+    extractTableVisitDishes(x).forEach((k) => dishTop.set(k, (dishTop.get(k) || 0) + 1));
+  });
+  const dishTopList = Array.from(dishTop.entries()).sort((a, b) => b[1] - a[1]);
+  const topDish = dishTopList[0] || null;
+
+  // 统计顾客反馈/满意原因（unsatisfied_items 实际存的是满意或不满意原因）
+  const feedbackTop = new Map();
+  const blockedFb = new Set(['无', '没有', '暂无', '不清楚', '未知', '其他', '']);
+  rows.forEach((x) => {
+    const reason = String(x?.unsatisfied_items || '').trim();
+    if (reason && !blockedFb.has(reason)) {
+      feedbackTop.set(reason, (feedbackTop.get(reason) || 0) + 1);
+    }
+  });
+  const feedbackList = Array.from(feedbackTop.entries()).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const feedbackText = feedbackList.map(([k, v]) => `「${k}」(${v}次)`).join('、') || '无';
+  const feedbackCount = rows.filter(x => { const r = String(x?.unsatisfied_items || '').trim(); return r && !blockedFb.has(r); }).length;
+
+  // 识别负面反馈（排除明显正面内容后，匹配负面关键词）
+  const positiveOnly = /^(.*好吃.*|.*满意.*|.*不错.*|.*喜欢.*|.*很好.*|.*挺好.*|.*可以的|.*味道好.*)$/;
+  const negativePattern = /太[咸淡冷油辣热硬]|有点[咸淡冷硬腥慢小挤]|不满意|不好吃|不新鲜|不够|偏[咸淡]|等[很太]久|等了[很太]久|上菜[有稍]?[点微]?慢|不[满熟行]|肿了|太老|没有肉感|不是很满意|该[咸淡]的不[咸淡]/;
+  const negFeedbackTop = new Map();
+  rows.forEach((x) => {
+    const reason = String(x?.unsatisfied_items || '').trim();
+    if (reason && !blockedFb.has(reason) && negativePattern.test(reason) && !positiveOnly.test(reason)) {
+      negFeedbackTop.set(reason, (negFeedbackTop.get(reason) || 0) + 1);
+    }
+  });
+  const negList = Array.from(negFeedbackTop.entries()).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const negCount = negList.reduce((s, [, v]) => s + v, 0);
+  const negText = negList.map(([k, v]) => `「${k}」(${v}次)`).join('、');
+
+  const dissatisfactionIntent = /(最不满意|哪里不满意|哪些不满意|不满意点|不满意.*菜|菜品.*不满意|出品.*不满意)/.test(q);
+  if (dissatisfactionIntent) {
+    const lines = [`📋 ${periodLabel}桌访不满意反馈（${targetStore}）`];
+    lines.push(`样本：${rows.length}条桌访`);
+    if (negList.length) {
+      lines.push(`\n⚠️ 负面反馈（${negCount}条）：`);
+      negList.forEach(([k, v]) => lines.push(`  · ${k}（${v}次）`));
+    }
+    if (topDish) {
+      lines.push(`\n🍽 不满意菜品：`);
+      dishTopList.slice(0, 5).forEach(([k, v]) => lines.push(`  · ${k}（${v}次）`));
+    }
+    if (!negList.length && !topDish) {
+      lines.push(`\n该时段顾客未反馈明确不满意内容。`);
+    }
+    return lines.join('\n');
+  }
+
+  if (/(多少|几条|总数|记录|样本|一共)/.test(q)) {
+    return `${periodLabel}桌访数据（${targetStore}）\n- 桌访记录：${rows.length}条\n- 含反馈记录：${feedbackCount}条`;
+  }
+
+  // 默认兜底：简洁统计摘要
+  const lines = [`📋 ${periodLabel}桌访概况（${targetStore}）`];
+  lines.push(`- 桌访记录：${rows.length}条`);
+  if (negList.length) lines.push(`- 负面反馈：${negList.slice(0, 3).map(([k, v]) => `${k}(${v}次)`).join('、')}`);
+  if (topDish) lines.push(`- 不满意菜品：${dishTopList.slice(0, 3).map(([k, v]) => `${k}(${v}次)`).join('、')}`);
+  return lines.join('\n');
+}
+
+// BI确定性回复：收档报告（得分、合格率）
+async function buildBiDeterministicClosingReportReply(store, text) {
+  const q = String(text || '').trim();
+  const targetStore = String(store || '').trim();
+  if (!targetStore) return '';
+  if (!/(收档|收市|闭档|清洁|卫生|档口.*得分|得分.*档口|平均.*得分|得分.*平均)/.test(q)) return '';
+  const period = resolveDateRangeFromQuestion(q, 7);
+  const tableId = String(BITABLE_CONFIGS?.closing_reports?.tableId || '').trim();
+  if (!tableId) return `收档报告数据源未配置，无法查询。`;
+  try {
+    const r = await pool().query(
+      `SELECT fields FROM feishu_generic_records WHERE table_id = $1 ORDER BY updated_at DESC LIMIT 3000`,
+      [tableId]
+    );
+    const all = (r.rows || []).map(row => row.fields && typeof row.fields === 'object' ? row.fields : {});
+    const matched = all.filter(f => {
+      const s = String(f['门店'] || f['所属门店'] || '').trim();
+      return isLikelySameStore(s, targetStore);
+    });
+    const inRange = matched.filter(f => {
+      const d = normalizeBitableDateValue(f['提交时间'] || f['日期'], null);
+      return d && inDateRangeInclusive(d, period.start, period.end);
+    });
+    if (!inRange.length) {
+      return `${period.label}收档报告（${targetStore}）：0条记录。该时间段暂无收档报告入库。`;
+    }
+    const scores = inRange.map(f => {
+      const s = extractBitableFieldText(f['档口收档平均得分']);
+      return parseFloat(s);
+    }).filter(n => !isNaN(n));
+    const avgScore = scores.length ? (scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(1) : '无';
+    const passCount = inRange.filter(f => /合格|通过|是/.test(extractBitableFieldText(f['是否合格']))).length;
+    const passRate = inRange.length ? ((passCount / inRange.length) * 100).toFixed(0) + '%' : '无';
+    const lines = [
+      `${period.label}收档报告（${targetStore}）`,
+      `- 收档记录：${inRange.length}条`,
+      `- 档口平均得分：${avgScore}`,
+      `- 合格率：${passRate}（${passCount}/${inRange.length}）`,
+    ];
+    if (scores.length) {
+      lines.push(`- 最高分：${Math.max(...scores)} / 最低分：${Math.min(...scores)}`);
+    }
+    return lines.join('\n');
+  } catch (e) {
+    return `收档报告查询失败：${e?.message || '未知错误'}`;
+  }
+}
+
+// BI确定性回复：开档报告
+async function buildBiDeterministicOpeningReportReply(store, text) {
+  const q = String(text || '').trim();
+  const targetStore = String(store || '').trim();
+  if (!targetStore) return '';
+  if (!/(开档|开市|备餐|开档.*记录|开档.*报告)/.test(q)) return '';
+  const period = resolveDateRangeFromQuestion(q, 7);
+  const tableId = String(BITABLE_CONFIGS?.opening_reports?.tableId || '').trim();
+  if (!tableId) return `开档报告数据源未配置，无法查询。`;
+  try {
+    const r = await pool().query(
+      `SELECT fields FROM feishu_generic_records WHERE table_id = $1 ORDER BY updated_at DESC LIMIT 3000`,
+      [tableId]
+    );
+    const all = (r.rows || []).map(row => row.fields && typeof row.fields === 'object' ? row.fields : {});
+    const matched = all.filter(f => {
+      const s = String(f['门店'] || f['所属门店'] || '').trim();
+      return isLikelySameStore(s, targetStore);
+    });
+    const inRange = matched.filter(f => {
+      const d = normalizeBitableDateValue(f['记录日期'] || f['提交时间'] || f['日期'], null);
+      return d && inDateRangeInclusive(d, period.start, period.end);
+    });
+    if (!inRange.length) {
+      return `${period.label}开档报告（${targetStore}）：0条记录。该时间段暂无开档报告入库。`;
+    }
+    const stationTop = new Map();
+    inRange.forEach(f => {
+      const station = extractBitableFieldText(f['岗位'] || f['档口']);
+      if (station) stationTop.set(station, (stationTop.get(station) || 0) + 1);
+    });
+    const stationText = Array.from(stationTop.entries()).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, v]) => `${k}(${v})`).join('、') || '无';
+    const mealTop = new Map();
+    inRange.forEach(f => {
+      const meal = extractBitableFieldText(f['饭市']);
+      if (meal) mealTop.set(meal, (mealTop.get(meal) || 0) + 1);
+    });
+    const mealText = Array.from(mealTop.entries()).map(([k, v]) => `${k}(${v})`).join('、') || '无';
+    return [`${period.label}开档报告（${targetStore}）`, `- 开档记录：${inRange.length}条`, `- 岗位分布：${stationText}`, `- 饭市分布：${mealText}`].join('\n');
+  } catch (e) {
+    return `开档报告查询失败：${e?.message || '未知错误'}`;
+  }
+}
+
+// BI确定性回复：原料收货日报（异常）
+async function buildBiDeterministicMaterialReportReply(store, text) {
+  const q = String(text || '').trim();
+  const targetStore = String(store || '').trim();
+  if (!targetStore) return '';
+  if (!/(原料|收货|食材|进货|供应商|原材料)/.test(q)) return '';
+  const period = resolveDateRangeFromQuestion(q, 7);
+  const tableIds = [
+    BITABLE_CONFIGS?.material_hongchao?.tableId,
+    BITABLE_CONFIGS?.material_majixian?.tableId
+  ].filter(Boolean);
+  if (!tableIds.length) return `原料收货日报数据源未配置，无法查询。`;
+  try {
+    const r = await pool().query(
+      `SELECT fields FROM feishu_generic_records WHERE table_id = ANY($1) ORDER BY updated_at DESC LIMIT 3000`,
+      [tableIds]
+    );
+    const all = (r.rows || []).map(row => row.fields && typeof row.fields === 'object' ? row.fields : {});
+    const matched = all.filter(f => {
+      const s = String(f['所属门店'] || f['门店'] || '').trim();
+      return isLikelySameStore(s, targetStore);
+    });
+    const inRange = matched.filter(f => {
+      const d = normalizeBitableDateValue(f['收货日期'] || f['日期'], null);
+      return d && inDateRangeInclusive(d, period.start, period.end);
+    });
+    if (!inRange.length) {
+      return `${period.label}原料收货日报（${targetStore}）：0条记录。该时间段暂无原料异常数据入库。`;
+    }
+    const hasIssue = inRange.filter(f => {
+      const feedback = extractBitableFieldText(f['今日异常反馈'] || f['今天原料情况']);
+      return feedback && !/正常|无|没有/.test(feedback);
+    });
+    const materialTop = new Map();
+    hasIssue.forEach(f => {
+      const name = extractBitableFieldText(f['异常原料名称']);
+      if (name) materialTop.set(name, (materialTop.get(name) || 0) + 1);
+    });
+    const matText = Array.from(materialTop.entries()).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, v]) => `${k}(${v}次)`).join('、') || '无';
+    const severityTop = new Map();
+    hasIssue.forEach(f => {
+      const sev = extractBitableFieldText(f['严重情况']);
+      if (sev) severityTop.set(sev, (severityTop.get(sev) || 0) + 1);
+    });
+    const sevText = Array.from(severityTop.entries()).map(([k, v]) => `${k}(${v})`).join('、') || '无';
+    const lines = [
+      `${period.label}原料收货日报（${targetStore}）`,
+      `- 收货记录：${inRange.length}条`,
+      `- 异常记录：${hasIssue.length}条`,
+      `- 异常原料Top：${matText}`,
+      `- 严重程度：${sevText}`
+    ];
+    return lines.join('\n');
+  } catch (e) {
+    return `原料收货日报查询失败：${e?.message || '未知错误'}`;
+  }
+}
+
+// BI确定性回复：例会报告统计
+async function buildBiDeterministicMeetingReportReply(store, text) {
+  const q = String(text || '').trim();
+  const targetStore = String(store || '').trim();
+  if (!targetStore) return '';
+  if (!/(例会|早会|班会|会议|开会)/.test(q)) return '';
+  const period = resolveDateRangeFromQuestion(q, 30);
+  const tableId = String(BITABLE_CONFIGS?.meeting_reports?.tableId || '').trim();
+  if (!tableId) return `例会报告数据源未配置，无法查询。`;
+  try {
+    const r = await pool().query(
+      `SELECT fields FROM feishu_generic_records WHERE table_id = $1 ORDER BY updated_at DESC LIMIT 500`,
+      [tableId]
+    );
+    const rows = (r.rows || []).filter(row => {
+      const f = row.fields && typeof row.fields === 'object' ? row.fields : {};
+      const rowStore = extractBitableFieldText(f['所属门店'] || f['门店']);
+      return isLikelySameStore(rowStore, targetStore);
+    });
+    if (!rows.length) return `📊 ${period.label}例会数据（${targetStore}）：暂无例会记录入库。`;
+    const scores = rows.map(row => parseFloat(extractBitableFieldText(row.fields['得分']))).filter(n => !isNaN(n));
+    const avgScore = scores.length ? (scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(1) : '-';
+    const hosts = new Map();
+    rows.forEach(row => {
+      const h = extractBitableFieldText(row.fields['主持人']);
+      if (h) hosts.set(h, (hosts.get(h) || 0) + 1);
+    });
+    const absentees = new Map();
+    rows.forEach(row => {
+      const abs = extractBitableFieldText(row.fields['缺席人员姓名']);
+      if (abs && abs !== '无') abs.split(/[,，、]/).forEach(n => { n = n.trim(); if (n) absentees.set(n, (absentees.get(n) || 0) + 1); });
+    });
+    const lines = [`📊 例会数据（${targetStore}）`];
+    lines.push(`- 例会记录：${rows.length}次`);
+    if (avgScore !== '-') lines.push(`- 平均得分：${avgScore}分`);
+    if (hosts.size) lines.push(`- 主持人：${Array.from(hosts.entries()).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, v]) => `${k}(${v}次)`).join('、')}`);
+    if (absentees.size) lines.push(`- 缺席频次Top：${Array.from(absentees.entries()).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, v]) => `${k}(${v}次)`).join('、')}`);
+    return lines.join('\n');
+  } catch (e) {
+    return `例会数据查询失败：${e?.message || '未知错误'}`;
+  }
+}
+
+// BI确定性回复：营业日报（daily_reports 表）
+async function buildBiDeterministicDailyReportReply(store, text) {
+  const q = String(text || '').trim();
+  const targetStore = String(store || '').trim();
+  if (!targetStore) return '';
+  if (!/(营业额|营收|日报|毛利|点评评分|大众点评.*分|dianping|revenue|翻台|订单|客单价|会员|充值|业绩|达成率|目标)/.test(q)) return '';
+  const period = resolveDateRangeFromQuestion(q, 7);
+  try {
+    let sql = `SELECT * FROM daily_reports WHERE lower(regexp_replace(coalesce(store,''), '\\s+', '', 'g')) = $1`;
+    const params = [normalizeStoreKey(targetStore)];
+    if (period.start) { sql += ` AND date >= $${params.length + 1}`; params.push(period.start); }
+    if (period.end) { sql += ` AND date <= $${params.length + 1}`; params.push(period.end); }
+    sql += ' ORDER BY date DESC LIMIT 60';
+    const r = await pool().query(sql, params);
+    const rows = r.rows || [];
+    if (!rows.length) return `📊 ${period.label}营业数据（${targetStore}）：暂无营业日报数据。`;
+    const totalRevenue = rows.reduce((s, r) => s + (parseFloat(r.actual_revenue) || 0), 0);
+    const totalTarget = rows.reduce((s, r) => s + (parseFloat(r.target_revenue) || 0), 0);
+    const avgMargin = rows.filter(r => r.actual_margin != null);
+    const avgMarginVal = avgMargin.length ? (avgMargin.reduce((s, r) => s + parseFloat(r.actual_margin), 0) / avgMargin.length).toFixed(1) : null;
+    const dianpingRows = rows.filter(r => r.dianping_rating != null);
+    const avgDianping = dianpingRows.length ? (dianpingRows.reduce((s, r) => s + parseFloat(r.dianping_rating), 0) / dianpingRows.length).toFixed(2) : null;
+    const achieveRate = totalTarget > 0 ? (totalRevenue / totalTarget * 100).toFixed(1) : null;
+    const lines = [`📊 营业数据（${targetStore}·${period.label}）`];
+    lines.push(`- 统计天数：${rows.length}天`);
+    lines.push(`- 累计营收：¥${totalRevenue.toLocaleString('zh-CN', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`);
+    if (totalTarget > 0) lines.push(`- 目标营收：¥${totalTarget.toLocaleString('zh-CN', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}（达成率 ${achieveRate}%）`);
+    lines.push(`- 日均营收：¥${(totalRevenue / rows.length).toFixed(0)}`);
+    if (avgMarginVal) lines.push(`- 平均毛利率：${avgMarginVal}%`);
+    if (avgDianping) lines.push(`- 大众点评均分：${avgDianping}`);
+    // 趋势：最近3天 vs 之前
+    if (rows.length >= 4) {
+      const recent3 = rows.slice(0, 3).reduce((s, r) => s + (parseFloat(r.actual_revenue) || 0), 0) / 3;
+      const older = rows.slice(3).reduce((s, r) => s + (parseFloat(r.actual_revenue) || 0), 0) / rows.slice(3).length;
+      if (older > 0) {
+        const trend = ((recent3 - older) / older * 100).toFixed(1);
+        lines.push(`- 趋势：近3天日均 vs 之前 ${Number(trend) >= 0 ? '+' : ''}${trend}%`);
+      }
+    }
+    return lines.join('\n');
+  } catch (e) {
+    return `营业数据查询失败：${e?.message || '未知错误'}`;
+  }
+}
+
+// BI确定性回复：报损单统计
+async function buildBiDeterministicLossReportReply(store, text) {
+  const q = String(text || '').trim();
+  const targetStore = String(store || '').trim();
+  if (!targetStore) return '';
+  if (!/(报损|损耗|废弃|报废|丢弃)/.test(q)) return '';
+  const period = resolveDateRangeFromQuestion(q, 30);
+  const tableId = String(BITABLE_CONFIGS?.loss_reports?.tableId || '').trim();
+  if (!tableId) return `报损单数据源未配置，无法查询。`;
+  try {
+    const r = await pool().query(
+      `SELECT fields FROM feishu_generic_records WHERE table_id = $1 ORDER BY updated_at DESC LIMIT 500`,
+      [tableId]
+    );
+    const rows = (r.rows || []).filter(row => {
+      const f = row.fields && typeof row.fields === 'object' ? row.fields : {};
+      const rowStore = extractBitableFieldText(f['门店'] || f['所属门店'] || f['报损门店']);
+      return !rowStore || isLikelySameStore(rowStore, targetStore);
+    });
+    if (!rows.length) return `📊 ${period.label}报损数据（${targetStore}）：暂无报损记录入库。`;
+    const itemTop = new Map();
+    let totalAmount = 0;
+    rows.forEach(row => {
+      const f = row.fields && typeof row.fields === 'object' ? row.fields : {};
+      const item = extractBitableFieldText(f['报损品名'] || f['品名'] || f['物品名称'] || f['报损物品']);
+      const amount = parseFloat(extractBitableFieldText(f['报损金额'] || f['金额'] || f['损失金额'])) || 0;
+      if (item) itemTop.set(item, (itemTop.get(item) || 0) + 1);
+      totalAmount += amount;
+    });
+    const lines = [`📊 报损数据（${targetStore}）`];
+    lines.push(`- 报损记录：${rows.length}条`);
+    if (totalAmount > 0) lines.push(`- 报损总额：¥${totalAmount.toFixed(2)}`);
+    if (itemTop.size) lines.push(`- 报损品项Top：${Array.from(itemTop.entries()).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, v]) => `${k}(${v}次)`).join('、')}`);
+    return lines.join('\n');
+  } catch (e) {
+    return `报损数据查询失败：${e?.message || '未知错误'}`;
+  }
+}
+
+// BI确定性回复：差评报告/点评统计（数据源：feishu_generic_records + agent_messages）
+async function buildBiDeterministicBadReviewReportReply(store, text) {
+  const q = String(text || '').trim();
+  const targetStore = String(store || '').trim();
+  if (!targetStore) return '';
+  if (!/(差评|负评|投诉|点评|评价.*差|差.*评价|大众点评|美团|评价.*结果|评价.*怎么样|评价.*情况)/.test(q)) return '';
+  const period = resolveDateRangeFromQuestion(q, 30);
+  const badReviewTableId = String(BITABLE_CONFIGS?.bad_reviews?.tableId || '').trim();
+  try {
+    // 从 feishu_generic_records 查差评报告原始数据
+    let rows = [];
+    if (badReviewTableId) {
+      const r = await pool().query(
+        `SELECT fields, created_at FROM feishu_generic_records WHERE table_id = $1 ORDER BY updated_at DESC LIMIT 500`,
+        [badReviewTableId]
+      );
+      rows = (r.rows || []).filter(row => {
+        const f = row.fields && typeof row.fields === 'object' ? row.fields : {};
+        const rowStore = extractBitableFieldText(f['差评门店'] || f['门店'] || f['所属门店']);
+        return isLikelySameStore(rowStore, targetStore);
+      });
+    }
+    // 补充从 agent_messages 查
+    if (!rows.length) {
+      const r2 = await pool().query(
+        `SELECT agent_data as fields, created_at FROM agent_messages WHERE content_type = 'negative_review' ORDER BY created_at DESC LIMIT 500`
+      );
+      rows = (r2.rows || []).filter(row => {
+        const f = row.fields && typeof row.fields === 'object' ? row.fields : {};
+        return isLikelySameStore(String(f.store || ''), targetStore);
+      });
+    }
+    if (!rows.length) {
+      return `📊 ${period.label}差评数据（${targetStore}）：暂无差评记录入库。`;
+    }
+    // 统计
+    const productTop = new Map();
+    const keywordTop = new Map();
+    const platformTop = new Map();
+    const samples = [];
+    rows.forEach(row => {
+      const f = row.fields && typeof row.fields === 'object' ? row.fields : {};
+      const product = extractBitableFieldText(f['差评产品'] || f.product_name);
+      const keyword = extractBitableFieldText(f['差评关键词'] || f.keywords);
+      const platform = extractBitableFieldText(f['差评平台'] || f.platform);
+      const reason = extractBitableFieldText(f['差评原因'] || f.content || f.reason);
+      if (product && product !== '无') productTop.set(product, (productTop.get(product) || 0) + 1);
+      if (keyword) keyword.split(/[,，、]/).forEach(k => { k = k.trim(); if (k) keywordTop.set(k, (keywordTop.get(k) || 0) + 1); });
+      if (platform) {
+        const pText = Array.isArray(platform) ? platform.join('') : String(platform);
+        pText.split(/[,，、]/).forEach(p => { p = p.trim(); if (p) platformTop.set(p, (platformTop.get(p) || 0) + 1); });
+      }
+      if (reason && samples.length < 3) samples.push(String(reason).slice(0, 80));
+    });
+    const topN = (m, n = 5) => Array.from(m.entries()).sort((a, b) => b[1] - a[1]).slice(0, n).map(([k, v]) => `${k}(${v})`).join('、') || '无';
+    const lines = [`📊 差评数据（${targetStore}）`, `- 差评总数：${rows.length}条`];
+    if (platformTop.size) lines.push(`- 来源平台：${topN(platformTop, 3)}`);
+    if (productTop.size) lines.push(`- 差评产品Top：${topN(productTop)}`);
+    if (keywordTop.size) lines.push(`- 关键词Top：${topN(keywordTop)}`);
+    if (samples.length) {
+      lines.push(`- 最新样例：`);
+      samples.forEach(s => lines.push(`  · ${s}`));
+    }
+    return lines.join('\n');
+  } catch (e) {
+    return `差评数据查询失败：${e?.message || '未知错误'}`;
+  }
+}
+
+function getLLMClientConfig(modelName, options = {}) {
+  const provider = resolveModelProvider(modelName, options.forceProvider || '');
+  if (provider === 'qwen') {
+    return {
+      provider,
+      model: String(modelName || '').trim() || QWEN_MODEL,
+      apiKey: QWEN_API_KEY,
+      baseUrl: QWEN_BASE_URL
+    };
+  }
+  if (provider === 'doubao') {
+    return {
+      provider,
+      model: String(modelName || '').trim() || DEEPSEEK_VISION_MODEL,
+      apiKey: DOUBAO_API_KEY,
+      baseUrl: DOUBAO_BASE_URL
+    };
+  }
+  return {
+    provider: 'deepseek',
+    model: String(modelName || '').trim() || DEEPSEEK_MODEL,
+    apiKey: DEEPSEEK_API_KEY,
+    baseUrl: DEEPSEEK_BASE_URL
+  };
+}
 
 const LARK_APP_ID = process.env.LARK_APP_ID || '';
 const LARK_APP_SECRET = process.env.LARK_APP_SECRET || '';
@@ -55,9 +884,10 @@ const BITABLE_CONFIGS = {
     appSecret: process.env.BITABLE_OPS_APP_SECRET || 'sjpAzPwu4KixvhbAOD7w4ee1oEKRRBQF',
     appToken: process.env.BITABLE_OPS_APP_TOKEN || 'PtVObRtoPaMAP3stIIFc8DnJngd',
     tableId: process.env.BITABLE_OPS_TABLE_ID || 'tblxHI9ZAKONOTpp',
-    name: '运营检查表',
+    name: '运营检查表(含开收档)',
     type: 'checklist',
-    pollingInterval: 60000
+    pollingInterval: 60000,
+    sortField: '["_id DESC"]'
   },
   'table_visit': {
     appId: process.env.BITABLE_TABLEVISIT_APP_ID || 'cli_a9fc0d13c838dcd6',
@@ -66,9 +896,19 @@ const BITABLE_CONFIGS = {
     tableId: process.env.BITABLE_TABLEVISIT_TABLE_ID || 'tblpx5Efqc6eHo3L',
     name: '桌访表',
     type: 'table_visit',
-    pollingInterval: 300000  // 5分钟轮询
+    pollingInterval: 300000,
+    sortField: '["日期 DESC"]'
   },
-  // 新增5个表格配置
+  'bad_reviews': {
+    appId: process.env.BITABLE_TABLEVISIT_APP_ID || 'cli_a9fc0d13c838dcd6',
+    appSecret: process.env.BITABLE_TABLEVISIT_APP_SECRET || 'pRVuBmiWc0hzqP1YzZDqzGUPFlaProDN',
+    appToken: process.env.BITABLE_TABLEVISIT_APP_TOKEN || 'PTWrbUdcbarCshst0QncMoY7nKe',
+    tableId: 'tblgReexNjWJOJB6',
+    name: '差评报告DB',
+    type: 'bad_review',
+    pollingInterval: 300000,
+    sortField: '["创建日期 DESC"]'
+  },
   'closing_reports': {
     appId: process.env.BITABLE_CLOSING_APP_ID || 'cli_a9fc0d13c838dcd6',
     appSecret: process.env.BITABLE_CLOSING_APP_SECRET || 'pRVuBmiWc0hzqP1YzZDqzGUPFlaProDN',
@@ -76,7 +916,8 @@ const BITABLE_CONFIGS = {
     tableId: process.env.BITABLE_CLOSING_TABLE_ID || 'tblXYfSBRrgNGohN',
     name: '收档报告DB',
     type: 'closing_report',
-    pollingInterval: 300000
+    pollingInterval: 300000,
+    sortField: '["日期 DESC"]'
   },
   'opening_reports': {
     appId: process.env.BITABLE_OPENING_APP_ID || 'cli_a9fc0d13c838dcd6',
@@ -85,7 +926,8 @@ const BITABLE_CONFIGS = {
     tableId: process.env.BITABLE_OPENING_TABLE_ID || 'tbl32E6d0CyvLvfi',
     name: '开档报告',
     type: 'opening_report',
-    pollingInterval: 300000
+    pollingInterval: 300000,
+    sortField: '["日期 DESC"]'
   },
   'meeting_reports': {
     appId: process.env.BITABLE_MEETING_APP_ID || 'cli_a9fc0d13c838dcd6',
@@ -94,7 +936,8 @@ const BITABLE_CONFIGS = {
     tableId: process.env.BITABLE_MEETING_TABLE_ID || 'tblZXgaU0LpSye2m',
     name: '例会报告',
     type: 'meeting_report',
-    pollingInterval: 300000
+    pollingInterval: 300000,
+    sortField: '["日期 DESC"]'
   },
   'material_majixian': {
     appId: process.env.BITABLE_MATERIAL_MJX_APP_ID || 'cli_a9fc0d13c838dcd6',
@@ -104,7 +947,8 @@ const BITABLE_CONFIGS = {
     name: '马己仙原料收货日报',
     type: 'material_report',
     brand: 'majixian',
-    pollingInterval: 300000
+    pollingInterval: 300000,
+    sortField: '["日期 DESC"]'
   },
   'material_hongchao': {
     appId: process.env.BITABLE_MATERIAL_HC_APP_ID || 'cli_a9fc0d13c838dcd6',
@@ -114,9 +958,87 @@ const BITABLE_CONFIGS = {
     name: '洪潮原料收货日报',
     type: 'material_report',
     brand: 'hongchao',
-    pollingInterval: 300000
+    pollingInterval: 300000,
+    sortField: '["日期 DESC"]'
+  },
+  'loss_reports': {
+    appId: process.env.BITABLE_LOSS_APP_ID || 'cli_a9fc0d13c838dcd6',
+    appSecret: process.env.BITABLE_LOSS_APP_SECRET || 'pRVuBmiWc0hzqP1YzZDqzGUPFlaProDN',
+    appToken: process.env.BITABLE_LOSS_APP_TOKEN || 'PTWrbUdcbarCshst0QncMoY7nKe',
+    tableId: process.env.BITABLE_LOSS_TABLE_ID || 'tblLCxLO0ZbV7uyo',
+    name: '报损单',
+    type: 'loss_report',
+    pollingInterval: 300000,
+    sortField: '["创建日期 DESC"]'
   }
 };
+
+let BI_AGENT_CONFIG = {
+  dataSources: [
+    { key: 'daily_reports', enabled: true },
+    { key: 'table_visit_records', enabled: true },
+    { key: 'table_visit_bitable', enabled: true },
+    { key: 'opening_reports_bitable', enabled: true },
+    { key: 'closing_reports_bitable', enabled: true },
+    { key: 'meeting_reports_bitable', enabled: true },
+    { key: 'bad_reviews', enabled: true },
+    { key: 'material_majixian_bitable', enabled: true },
+    { key: 'material_hongchao_bitable', enabled: true },
+    { key: 'ops_checklist_bitable', enabled: true },
+    { key: 'loss_reports_bitable', enabled: true }
+  ],
+  anomalyTriggers: {
+    tableVisitProductMedium: 2,
+    tableVisitProductHigh: 4,
+    tableVisitRatioMedium: 0.5,
+    tableVisitRatioHigh: 0.4,
+    badReviewMedium: 1,
+    badReviewHigh: 2,
+    rechargeStreakHighDays: 2
+  }
+};
+
+async function refreshBiAgentRuntimeConfig() {
+  try {
+    const remote = await getBiAgentConfig();
+    if (remote && typeof remote === 'object') {
+      BI_AGENT_CONFIG = {
+        ...BI_AGENT_CONFIG,
+        ...remote,
+        anomalyTriggers: {
+          ...(BI_AGENT_CONFIG?.anomalyTriggers || {}),
+          ...(remote?.anomalyTriggers || {})
+        }
+      };
+    }
+  } catch (e) {
+    console.error('[bi] refresh runtime config failed:', e?.message || e);
+  }
+}
+
+function isBiSourceEnabled(key) {
+  const list = Array.isArray(BI_AGENT_CONFIG?.dataSources) ? BI_AGENT_CONFIG.dataSources : [];
+  const hit = list.find((x) => String(x?.key || '').trim() === String(key || '').trim());
+  return hit ? hit.enabled !== false : true;
+}
+
+function getOpsReasoningModel() {
+  const model = String(OPS_AGENT_CONFIG?.llmModels?.reasoningModel || '').trim();
+  return model || DEEPSEEK_MODEL;
+}
+
+function getOpsVisionModel() {
+  const model = String(OPS_AGENT_CONFIG?.llmModels?.visionModel || '').trim();
+  if (model.startsWith('doubao-')) return model;
+  return String(DEEPSEEK_VISION_MODEL || '').startsWith('doubao-') ? DEEPSEEK_VISION_MODEL : 'doubao-seed-2-0-pro-260215';
+}
+
+function formatChecklistTypeLabel(checkType) {
+  const type = String(checkType || '').trim();
+  if (type === 'opening') return '开市';
+  if (type === 'closing') return '收档';
+  return type || '巡检';
+}
 
 async function refreshOpsAgentRuntimeConfig() {
   try {
@@ -242,7 +1164,7 @@ function getBrandRuntimeConfig(state0, brandContext) {
 }
 
 function buildOpsChecklistItemDetailCard({ checkType, brandName, storeName, itemIndex, itemName, detail = {} }) {
-  const typeLabel = checkType === 'opening' ? '开市' : '收档';
+  const typeLabel = formatChecklistTypeLabel(checkType);
   const statusLabel = detail.status === 'fail' ? '异常' : detail.status === 'pass' ? '合格' : '未选择';
   const remark = String(detail.remark || '').trim() || '未填写';
   const photoCount = Number(detail.photoCount) || 0;
@@ -331,8 +1253,8 @@ function countOpsChecklistAbnormal(progress) {
 }
 
 function buildOpsChecklistItemsCard({ checkType, brandName, storeName, checkedIndices = new Set() }) {
-  const typeLabel = checkType === 'opening' ? '开市' : '收档';
-  const items = getOpsChecklistItems(checkType, brandName);
+  const typeLabel = formatChecklistTypeLabel(checkType);
+  const items = getOpsChecklistItems(checkType, storeName, brandName);
   const rows = (items.length ? items : ['现场环境检查', '设备状态检查', '安全规范检查'])
     .map((item, idx) => {
       const done = checkedIndices.has(idx);
@@ -369,8 +1291,8 @@ function buildOpsChecklistItemsCard({ checkType, brandName, storeName, checkedIn
 }
 
 function buildOpsChecklistAbnormalItemsCard({ checkType, brandName, storeName }) {
-  const typeLabel = checkType === 'opening' ? '开市' : '收档';
-  const items = getOpsChecklistItems(checkType, brandName);
+  const typeLabel = formatChecklistTypeLabel(checkType);
+  const items = getOpsChecklistItems(checkType, storeName, brandName);
   const rows = (items.length ? items : ['现场环境', '设备状态', '安全规范'])
     .map((item, idx) => ({
       tag: 'action',
@@ -423,16 +1345,19 @@ function detectOpsChecklistType(text) {
   return '';
 }
 
-function getOpsChecklistItems(checkType, brandName) {
+function getOpsChecklistItems(checkType, storeName = '', brandName = '') {
   const daily = OPS_AGENT_CONFIG?.scheduledTasks?.dailyInspections || [];
-  let target = daily.find(i => i.type === checkType && i.brand === brandName);
+  const store = String(storeName || '').trim();
+  const brand = String(brandName || '').trim();
+  let target = daily.find((i) => i.type === checkType && String(i?.store || '').trim() === store && store);
+  if (!target) target = daily.find((i) => i.type === checkType && String(i?.brand || '').trim() === brand && brand);
   if (!target) target = daily.find(i => i.type === checkType);
   return Array.isArray(target?.checklist) ? target.checklist : [];
 }
 
 function buildOpsChecklistCard({ checkType, brandName, storeName, abnormalCount = 0, totalCount = 0 }) {
-  const typeLabel = checkType === 'opening' ? '开市' : '收档';
-  const items = getOpsChecklistItems(checkType, brandName);
+  const typeLabel = formatChecklistTypeLabel(checkType);
+  const items = getOpsChecklistItems(checkType, storeName, brandName);
   const listMd = items.length
     ? items.map((item, idx) => `${idx + 1}. ${item}`).join('\n')
     : '1. 现场环境检查\n2. 设备状态检查\n3. 安全规范检查';
@@ -475,8 +1400,8 @@ function buildOpsChecklistCard({ checkType, brandName, storeName, abnormalCount 
 }
 
 function buildOpsChecklistTemplateText({ checkType, brandName, storeName }) {
-  const typeLabel = checkType === 'opening' ? '开市' : '收档';
-  const items = getOpsChecklistItems(checkType, brandName);
+  const typeLabel = formatChecklistTypeLabel(checkType);
+  const items = getOpsChecklistItems(checkType, storeName, brandName);
   const lines = items.length
     ? items.map((item, idx) => `${idx + 1}. ${item}: [合格/异常] 备注:[ ]`).join('\n')
     : '1. 现场环境: [合格/异常] 备注:[ ]\n2. 设备状态: [合格/异常] 备注:[ ]\n3. 安全规范: [合格/异常] 备注:[ ]';
@@ -507,7 +1432,7 @@ async function handleOpsChecklistCardAction(event) {
   const storeName = String(feishuUser.store || '').trim();
   const checkType = String(actionValue.checkType || '').trim() || 'opening';
   const progressKey = getOpsChecklistProgressKey(openId, checkType, storeName);
-  const checklistItems = getOpsChecklistItems(checkType, brandName);
+  const checklistItems = getOpsChecklistItems(checkType, storeName, brandName);
 
   if (!_opsChecklistProgress.has(progressKey)) {
     _opsChecklistProgress.set(progressKey, {
@@ -540,7 +1465,7 @@ async function handleOpsChecklistCardAction(event) {
 
   if (action === 'ops_checklist_abnormal_item') {
     const itemName = String(actionValue.itemName || '其他异常').trim() || '其他异常';
-    const typeLabel = checkType === 'opening' ? '开市' : '收档';
+    const typeLabel = formatChecklistTypeLabel(checkType);
     const structured = {
       source: 'feishu_card_action',
       route: 'ops_supervisor',
@@ -581,7 +1506,7 @@ async function handleOpsChecklistCardAction(event) {
   }
 
   if (action === 'ops_checklist_submit') {
-    const typeLabel = checkType === 'opening' ? '开市' : '收档';
+    const typeLabel = formatChecklistTypeLabel(checkType);
     const items = progress?.items?.length ? progress.items : checklistItems;
     const total = Math.max(1, items.length);
     const abnormalCount = countOpsChecklistAbnormal(progress);
@@ -707,6 +1632,8 @@ export async function ensureAgentTables() {
         agent_response TEXT,
         agent_data JSONB DEFAULT '{}'::jsonb,
         feishu_message_id VARCHAR(200),
+        record_id VARCHAR(200),
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
@@ -824,6 +1751,9 @@ export async function ensureAgentTables() {
     try { await client.query(`ALTER TABLE agent_scores ADD COLUMN IF NOT EXISTS feishu_notified BOOLEAN DEFAULT FALSE`); } catch (e) {}
     // Add name column to agent_scores (migration)
     try { await client.query(`ALTER TABLE agent_scores ADD COLUMN IF NOT EXISTS name VARCHAR(200)`); } catch (e) {}
+    try { await client.query(`ALTER TABLE agent_messages ADD COLUMN IF NOT EXISTS record_id VARCHAR(200)`); } catch (e) {}
+    try { await client.query(`ALTER TABLE agent_messages ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`); } catch (e) {}
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_agent_messages_record_id ON agent_messages (record_id) WHERE record_id IS NOT NULL`);
 
     await client.query('COMMIT');
   } catch (e) {
@@ -918,8 +1848,9 @@ function getContext(userId) {
 }
 
 export async function callLLM(messages, options = {}) {
-  const model = options.model || DEEPSEEK_MODEL;
-  const apiKey = DEEPSEEK_API_KEY;
+  const cfg = getLLMClientConfig(options.model || DEEPSEEK_MODEL);
+  const model = cfg.model;
+  const apiKey = cfg.apiKey;
   if (!apiKey) return { ok: false, error: 'no_api_key', content: '' };
   
   // 生成缓存键
@@ -936,7 +1867,7 @@ export async function callLLM(messages, options = {}) {
   
   try {
     const resp = await axios.post(
-      `${DEEPSEEK_BASE_URL}/chat/completions`,
+      `${cfg.baseUrl}/chat/completions`,
       { 
         model, 
         messages, 
@@ -971,23 +1902,47 @@ export async function callLLM(messages, options = {}) {
 }
 
 export async function callVisionLLM(imageUrl, prompt) {
-  const apiKey = DEEPSEEK_API_KEY;
+  const model = getOpsVisionModel();
+  const cfg = getLLMClientConfig(model, { forceProvider: 'doubao' });
+  const apiKey = cfg.apiKey;
   if (!apiKey) return { ok: false, error: 'no_api_key', content: '' };
   try {
-    let imageContent;
-    if (imageUrl.startsWith('data:') || imageUrl.startsWith('http')) {
-      imageContent = { type: 'image_url', image_url: { url: imageUrl } };
+    const content = [];
+    if (Array.isArray(imageUrl)) {
+      for (const item of imageUrl) {
+        if (!item || typeof item !== 'object') continue;
+        if (item.type === 'text') {
+          content.push({ type: 'text', text: String(item.text || '').trim() });
+        } else if (item.type === 'image' && item.image_url) {
+          content.push({ type: 'image_url', image_url: { url: String(item.image_url) } });
+        } else if (item.type === 'image_url') {
+          const url = typeof item.image_url === 'string' ? item.image_url : item.image_url?.url;
+          if (url) content.push({ type: 'image_url', image_url: { url: String(url) } });
+        }
+      }
     } else {
-      const buf = fs.readFileSync(imageUrl);
-      const b64 = buf.toString('base64');
-      const ext = path.extname(imageUrl).replace('.', '') || 'jpeg';
-      imageContent = { type: 'image_url', image_url: { url: `data:image/${ext};base64,${b64}` } };
+      const imagePath = String(imageUrl || '').trim();
+      let imageContent;
+      if (imagePath.startsWith('data:') || imagePath.startsWith('http')) {
+        imageContent = { type: 'image_url', image_url: { url: imagePath } };
+      } else {
+        const buf = fs.readFileSync(imagePath);
+        const b64 = buf.toString('base64');
+        const ext = path.extname(imagePath).replace('.', '') || 'jpeg';
+        imageContent = { type: 'image_url', image_url: { url: `data:image/${ext};base64,${b64}` } };
+      }
+      content.push(imageContent);
+      if (prompt) content.push({ type: 'text', text: String(prompt) });
     }
+
+    if (!content.length && prompt) content.push({ type: 'text', text: String(prompt) });
+    if (!content.length) return { ok: false, error: 'invalid_vision_input', content: '' };
+
     const resp = await axios.post(
-      `${DEEPSEEK_BASE_URL}/chat/completions`,
+      `${cfg.baseUrl}/chat/completions`,
       {
-        model: DEEPSEEK_VISION_MODEL,
-        messages: [{ role: 'user', content: [imageContent, { type: 'text', text: prompt }] }],
+        model: cfg.model,
+        messages: [{ role: 'user', content }],
         temperature: 0.2, max_tokens: 1500
       },
       { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 90000 }
@@ -1121,8 +2076,9 @@ export async function findStoreManager(state, storeName) {
     ...(Array.isArray(state?.employees) ? state.employees : []),
     ...(Array.isArray(state?.users) ? state.users : [])
   ];
+  const normalizedStoreName = normalizeStoreKey(storeName);
   const mgr = all.find(u =>
-    String(u?.store || '').trim() === storeName &&
+    normalizeStoreKey(u?.store) === normalizedStoreName &&
     String(u?.role || '').trim() === 'store_manager'
   );
   return mgr ? String(mgr.username || '').trim() : null;
@@ -1164,14 +2120,195 @@ function normalizeStoreKey(v) {
   return String(v || '').trim().toLowerCase().replace(/\s+/g, '');
 }
 
+function normalizeStoreAliasKey(v) {
+  return normalizeStoreKey(v).replace(/(上海|北京|深圳|广州|大宁|门店|店铺|店|商场|广场|购物中心)/g, '');
+}
+
+function isExactSameStore(a, b) {
+  return normalizeStoreKey(a) && normalizeStoreKey(a) === normalizeStoreKey(b);
+}
+
+function isLikelySameStore(a, b) {
+  const x = normalizeStoreKey(a);
+  const y = normalizeStoreKey(b);
+  if (!x || !y) return false;
+  if (x === y) return true;
+  if (x.includes(y) || y.includes(x)) return true;
+  const ax = normalizeStoreAliasKey(a);
+  const by = normalizeStoreAliasKey(b);
+  if (ax && by && (ax === by || ax.includes(by) || by.includes(ax))) return true;
+  return false;
+}
+
+function normalizeBitableDateValue(v, fallback = '') {
+  if (v === null || v === undefined || v === '') return toDateOnly(fallback);
+  if (typeof v === 'number' && Number.isFinite(v)) {
+    const ms = v > 1e12 ? v : v * 1000;
+    return toDateOnly(new Date(ms).toISOString());
+  }
+  const s = String(v || '').trim();
+  if (!s) return toDateOnly(fallback);
+  if (/^\d{13}$/.test(s) || /^\d{10}$/.test(s)) {
+    const n = Number(s);
+    if (Number.isFinite(n)) {
+      const ms = s.length === 13 ? n : n * 1000;
+      return toDateOnly(new Date(ms).toISOString());
+    }
+  }
+  return toDateOnly(s) || toDateOnly(fallback);
+}
+
+// 从飞书多维表格的复杂字段值中提取纯文本
+// 支持格式: string, [{text_arr:[...]}, ...], [{text:"..."}], array等
+function extractBitableFieldText(val) {
+  if (!val) return '';
+  if (typeof val === 'string') return val.trim();
+  if (typeof val === 'number') return String(val);
+  if (Array.isArray(val)) {
+    const parts = [];
+    for (const item of val) {
+      if (typeof item === 'string') { parts.push(item); continue; }
+      if (item && typeof item === 'object') {
+        if (Array.isArray(item.text_arr) && item.text_arr.length) {
+          parts.push(...item.text_arr.map(t => String(t || '').trim()).filter(Boolean));
+        } else if (item.text) {
+          parts.push(String(item.text).trim());
+        }
+      }
+    }
+    return parts.join('，').trim();
+  }
+  if (typeof val === 'object' && val.text) return String(val.text).trim();
+  return String(val).trim();
+}
+
+// 从飞书 fields 中按优先级提取桌访不满意菜品字段
+function extractDissatisfactionDishFromFields(fields) {
+  // 优先级：精确匹配 > 模糊匹配
+  const candidates = [
+    fields['今天 不满意菜品'],        // 实际飞书字段名(有空格)
+    fields['今天不满意菜品'],          // 无空格变体
+    fields['今日不满意菜品'],          // 旧代码变体
+    fields['不满意菜品'],
+    fields['不满意菜品/问题'],
+  ];
+  for (const v of candidates) {
+    const text = extractBitableFieldText(v);
+    if (text) return text;
+  }
+  return '';
+}
+
+// 从飞书 fields 中提取不满意原因
+function extractDissatisfactionReasonFromFields(fields) {
+  const candidates = [
+    fields['满意或不满意的主要原因是什么？'],
+    fields['满意或不满意的主要原因'],
+    fields['不满意项'],
+    fields['不满意原因'],
+    fields['备注'],
+  ];
+  for (const v of candidates) {
+    const text = extractBitableFieldText(v);
+    if (text) return text;
+  }
+  return '';
+}
+
+function extractTableVisitItems(row) {
+  const raw = `${String(row?.dissatisfaction_dish || '').trim()} ${String(row?.unsatisfied_items || '').trim()}`.trim();
+  if (!raw) return [];
+  return raw
+    .split(/[，,、\/;；|\n\r\t\s]+/)
+    .map((k) => String(k || '').trim())
+    .filter(Boolean);
+}
+
+function extractTableVisitDishes(row) {
+  const raw = String(row?.dissatisfaction_dish || '').trim();
+  if (!raw) return [];
+  const blocked = new Set(['无', '没有', '暂无', '无菜品', '不清楚', '未知', '其他']);
+  return raw
+    .split(/[，,、\/;；|\n\r\t\s]+/)
+    .map((k) => String(k || '').trim())
+    .filter((k) => k && !blocked.has(k));
+}
+
+async function loadUnifiedTableVisitRowsByStore(store, startDate, endDate) {
+  const normalizedStore = normalizeStoreKey(store);
+  if (!normalizedStore) return [];
+
+  // 1) Structured table first (preferred)
+  let structured = [];
+  try {
+    const r = await pool().query(
+      `SELECT date::text AS date, store, dissatisfaction_dish, unsatisfied_items
+       FROM table_visit_records
+       WHERE date >= $1::date
+         AND date <= $2::date
+       ORDER BY date DESC
+       LIMIT 5000`,
+      [startDate, endDate]
+    );
+    const candidates = Array.isArray(r.rows) ? r.rows : [];
+    structured = candidates.filter((row) => isLikelySameStore(row?.store, store));
+  } catch (e) {
+    structured = [];
+  }
+  if (structured.length) return structured;
+
+  // 2) Fallback to generic sync cache (more robust when structured sync is delayed)
+  try {
+    const tableId = String(BITABLE_CONFIGS?.table_visit?.tableId || '').trim();
+    if (!tableId) return [];
+
+    const g = await pool().query(
+      `SELECT record_id, fields, created_at
+       FROM feishu_generic_records
+       WHERE table_id = $1
+         AND created_at >= CURRENT_DATE - INTERVAL '40 days'
+       ORDER BY updated_at DESC
+       LIMIT 4000`,
+      [tableId]
+    );
+
+    const seenRecordIds = new Set();
+    const exactOut = [];
+    const likelyOut = [];
+    for (const row of (g.rows || [])) {
+      const recordId = String(row?.record_id || '').trim();
+      if (!recordId || seenRecordIds.has(recordId)) continue;
+      seenRecordIds.add(recordId);
+      const fields = row?.fields && typeof row.fields === 'object' ? row.fields : {};
+      const rowStore = String(fields['所属门店'] || fields['门店'] || '').trim();
+      const exact = isExactSameStore(rowStore, store);
+      const likely = isLikelySameStore(rowStore, store);
+      if (!exact && !likely) continue;
+      const date = normalizeBitableDateValue(fields['日期'] || fields['营业日期'], row?.created_at);
+      if (!inDateRangeInclusive(date, startDate, endDate)) continue;
+      const normalized = {
+        date,
+        dissatisfaction_dish: extractDissatisfactionDishFromFields(fields),
+        unsatisfied_items: extractDissatisfactionReasonFromFields(fields)
+      };
+      if (exact) exactOut.push(normalized);
+      else likelyOut.push(normalized);
+    }
+    return exactOut.length ? exactOut : likelyOut;
+  } catch (e) {
+    return [];
+  }
+}
+
 function getMonthlyTarget(state, ym, store) {
   const settings = state?.settings && typeof state.settings === 'object' ? state.settings : {};
   const monthlyTargets = Array.isArray(settings?.monthlyTargets)
     ? settings.monthlyTargets
     : (Array.isArray(state?.monthlyTargets) ? state.monthlyTargets : []);
+  const normalizedStore = normalizeStoreKey(store);
   return monthlyTargets.find((x) =>
     String(x?.ym || x?.month || '').trim() === ym &&
-    String(x?.store || '').trim() === String(store || '').trim()
+    normalizeStoreKey(x?.store) === normalizedStore
   ) || null;
 }
 
@@ -1204,8 +2341,9 @@ function isConsecutiveDate(prevDate, currDate) {
 
 function buildGrossProfileMap(profiles, store) {
   const map = new Map();
+  const normalizedStore = normalizeStoreKey(store);
   (Array.isArray(profiles) ? profiles : [])
-    .filter((x) => String(x?.store || '').trim() === String(store || '').trim())
+    .filter((x) => normalizeStoreKey(x?.store) === normalizedStore)
     .forEach((x) => {
       const bizType = String(x?.bizType || '').trim().toLowerCase();
       const productKey = normProductKey(x?.product);
@@ -1226,8 +2364,9 @@ function buildGrossProfileMap(profiles, store) {
 }
 
 function estimateMarginMetricsForRange({ state, store, startDate, endDate }) {
+  const normalizedStore = normalizeStoreKey(store);
   const historyRows = (Array.isArray(state?.inventoryForecastHistory) ? state.inventoryForecastHistory : [])
-    .filter((x) => String(x?.store || '').trim() === String(store || '').trim())
+    .filter((x) => normalizeStoreKey(x?.store) === normalizedStore)
     .filter((x) => inDateRangeInclusive(x?.date, startDate, endDate));
   const profiles = Array.isArray(state?.forecastGrossProfitProfiles) ? state.forecastGrossProfitProfiles : [];
   const profileMap = buildGrossProfileMap(profiles, store);
@@ -1297,36 +2436,22 @@ async function loadTableVisitMetricsByStore(store, startDate, endDate) {
   };
   try {
     const normalizedStore = normalizeStoreKey(store);
-    const r = await pool().query(
-      `SELECT date::text AS date, dissatisfaction_dish, unsatisfied_items
-       FROM table_visit_records
-       WHERE lower(regexp_replace(store, '\\s+', '', 'g')) = $1
-         AND date >= $2::date
-         AND date <= $3::date`,
-      [normalizedStore, startDate, endDate]
-    );
-
-    for (const row of (r.rows || [])) {
+    const rows = await loadUnifiedTableVisitRowsByStore(store, startDate, endDate);
+    for (const row of rows) {
       const d = toDateOnly(row?.date);
       if (!d) continue;
       out.countByDate.set(d, (out.countByDate.get(d) || 0) + 1);
 
-      const rawDish = `${String(row?.dissatisfaction_dish || '').trim()} ${String(row?.unsatisfied_items || '').trim()}`.trim();
-      if (!rawDish) continue;
-      rawDish
-        .split(/[，,、\/;；|\n\r\t\s]+/)
-        .map((x) => String(x || '').trim())
-        .filter(Boolean)
-        .forEach((product) => {
-          const productKey = normProductKey(product);
-          if (!productKey) return;
-          const key = `${normalizedStore}||${productKey}`;
-          out.dissatisfiedProducts.set(key, (out.dissatisfiedProducts.get(key) || 0) + 1);
-          if (!out.productLabelByKey.has(productKey)) out.productLabelByKey.set(productKey, product);
-          const dateSet = out.dissatisfiedByDate.get(d) || new Set();
-          dateSet.add(productKey);
-          out.dissatisfiedByDate.set(d, dateSet);
-        });
+      extractTableVisitItems(row).forEach((product) => {
+        const productKey = normProductKey(product);
+        if (!productKey) return;
+        const key = `${normalizedStore}||${productKey}`;
+        out.dissatisfiedProducts.set(key, (out.dissatisfiedProducts.get(key) || 0) + 1);
+        if (!out.productLabelByKey.has(productKey)) out.productLabelByKey.set(productKey, product);
+        const dateSet = out.dissatisfiedByDate.get(d) || new Set();
+        dateSet.add(productKey);
+        out.dissatisfiedByDate.set(d, dateSet);
+      });
     }
   } catch (e) {
     // table may not exist in some envs; keep auditor running
@@ -1424,7 +2549,15 @@ export async function getBitableRecords(configKey = 'ops_checklist', options = {
   
   if (pageToken) params.page_token = pageToken;
   if (filter) params.filter = filter;
-  if (sort.length > 0) params.sort = JSON.stringify(sort);
+  if (sort.length > 0) {
+    params.sort = JSON.stringify(sort);
+  } else if (config.sortField) {
+    params.sort = config.sortField;
+  } else {
+    params.sort = JSON.stringify(["_id DESC"]);
+  }
+  
+  
 
   try {
     const resp = await axios.get(
@@ -1515,7 +2648,7 @@ async function processTableVisitData(records) {
       customerCount: fields['就餐人数'] || fields['人数'] || 0,
       consumption: fields['消费金额'] || 0,
       hasReservation: fields['是否有预订'] || '',
-      dissatisfactionDish: fields['今日不满意菜品'] || '',
+      dissatisfactionDish: extractDissatisfactionDishFromFields(fields),
       remarks: fields['备注'] || '',
       submitter: fields['提交人'] || '',
       fields
@@ -1539,11 +2672,96 @@ async function processTableVisitData(records) {
       ]);
       
       console.log(`[table_visit] saved record: ${tableVisitData.recordId}`);
+
+      // 稳定同步：同时写入结构化表，便于BI精确查询
+      const visitDate = normalizeBitableDateValue(fields['日期'] || fields['营业日期'], record.created_time);
+      const visitStore = String(fields['所属门店'] || fields['门店'] || '').trim();
+      if (visitDate && visitStore) {
+        await pool().query(
+          `INSERT INTO table_visit_records (
+            date, store, brand, table_number, guest_count, amount,
+            has_reservation, dissatisfaction_dish, unsatisfied_items, feedback,
+            feishu_record_id, updated_at
+          ) VALUES (
+            $1::date,$2,$3,$4,$5,$6,
+            $7,$8,$9,$10,
+            $11,NOW()
+          )
+          ON CONFLICT (feishu_record_id) DO UPDATE SET
+            date = EXCLUDED.date,
+            store = EXCLUDED.store,
+            brand = EXCLUDED.brand,
+            table_number = EXCLUDED.table_number,
+            guest_count = EXCLUDED.guest_count,
+            amount = EXCLUDED.amount,
+            has_reservation = EXCLUDED.has_reservation,
+            dissatisfaction_dish = EXCLUDED.dissatisfaction_dish,
+            unsatisfied_items = EXCLUDED.unsatisfied_items,
+            feedback = EXCLUDED.feedback,
+            updated_at = NOW()`,
+          [
+            visitDate,
+            visitStore,
+            String(fields['所属品牌'] || fields['品牌'] || '').trim(),
+            String(fields['桌号'] || '').trim(),
+            Number(fields['就餐人数'] || fields['人数'] || 0) || 0,
+            Number(fields['消费金额'] || 0) || 0,
+            String(fields['是否有预订'] || '').includes('是'),
+            extractDissatisfactionDishFromFields(fields),
+            extractDissatisfactionReasonFromFields(fields),
+            String(fields['备注'] || '').trim(),
+            String(record.record_id || '').trim()
+          ]
+        );
+      }
     } catch (e) {
       // 忽略重复记录错误
       if (!e?.message?.includes('duplicate')) {
         console.error(`[table_visit] save failed for ${tableVisitData.recordId}:`, e?.message);
       }
+    }
+  }
+}
+
+async function processBadReviewData(records) {
+  for (const record of records) {
+    try {
+      const fields = record.fields || {};
+      const recordId = record.record_id;
+      const createdTime = record.created_time;
+      const dateVal = fields['差评日期'] || fields['创建日期'] || createdTime;
+      
+      const tableData = {
+        recordId: recordId,
+        date: dateVal,
+        store: fields['差评门店'] || '',
+        platform: Array.isArray(fields['差评平台']) ? fields['差评平台'].join(',') : (fields['差评平台'] || ''),
+        product: fields['差评产品'] || '',
+        reason: fields['差评原因'] || '',
+        keywords: fields['差评关键词'] || '',
+        rating: fields['星级'] || '',
+        extractedInfo: fields['提取信息'] || ''
+      };
+      
+      await pool().query(`
+        WITH updated AS (
+          UPDATE agent_messages
+          SET content = $1,
+              agent_data = $2::jsonb,
+              updated_at = CURRENT_TIMESTAMP
+          WHERE record_id = $3
+          RETURNING id
+        )
+        INSERT INTO agent_messages (direction, channel, content_type, content, agent_data, record_id)
+        SELECT 'in','feishu','negative_review',$1,$2::jsonb,$3
+        WHERE NOT EXISTS (SELECT 1 FROM updated)
+      `, [
+        `差评记录 - ${tableData.store}`,
+        JSON.stringify(tableData),
+        recordId
+      ]);
+    } catch(e) {
+      console.error('[bitable] bad review process error:', e?.message);
     }
   }
 }
@@ -1567,6 +2785,8 @@ export async function processBitableData(configKey, records) {
       return await processChecklistData(records);
     case 'table_visit':
       return await processTableVisitData(records);
+    case 'bad_review':
+      return await processBadReviewData(records);
     case 'closing_report':
       return await processClosingReportData(records);
     case 'opening_report':
@@ -1588,15 +2808,21 @@ async function processGenericData(records, configKey) {
     
     try {
       await pool().query(`
-        INSERT INTO agent_messages (direction, channel, content_type, content, agent_data)
-        VALUES ('in','feishu','generic_bitable',$1,$2::jsonb)
-        ON CONFLICT (record_id) DO UPDATE SET
-          content = EXCLUDED.content,
-          agent_data = EXCLUDED.agent_data,
-          updated_at = NOW()
+        WITH updated AS (
+          UPDATE agent_messages
+          SET content = $1,
+              agent_data = $2::jsonb,
+              updated_at = NOW()
+          WHERE record_id = $3
+          RETURNING id
+        )
+        INSERT INTO agent_messages (direction, channel, content_type, content, agent_data, record_id)
+        SELECT 'in','feishu','generic_bitable',$1,$2::jsonb,$3
+        WHERE NOT EXISTS (SELECT 1 FROM updated)
       `, [
         `通用数据 - ${configKey}`,
-        JSON.stringify({ configKey, recordId: record.record_id, fields: record.fields })
+        JSON.stringify({ configKey, recordId: record.record_id, fields: record.fields }),
+        record.record_id
       ]);
     } catch (e) {
       console.error(`[bitable][${configKey}] save generic record failed:`, e?.message);
@@ -1612,12 +2838,17 @@ async function processClosingReportData(records) {
     try {
       const fields = record.fields || {};
       await pool().query(`
-        INSERT INTO agent_messages (direction, channel, content_type, content, agent_data)
-        VALUES ('in','feishu','closing_report',$1,$2::jsonb)
-        ON CONFLICT (record_id) DO UPDATE SET
-          content = EXCLUDED.content,
-          agent_data = EXCLUDED.agent_data,
-          updated_at = CURRENT_TIMESTAMP
+        WITH updated AS (
+          UPDATE agent_messages
+          SET content = $1,
+              agent_data = $2::jsonb,
+              updated_at = CURRENT_TIMESTAMP
+          WHERE record_id = $3
+          RETURNING id
+        )
+        INSERT INTO agent_messages (direction, channel, content_type, content, agent_data, record_id)
+        SELECT 'in','feishu','closing_report',$1,$2::jsonb,$3
+        WHERE NOT EXISTS (SELECT 1 FROM updated)
       `, [
         '收档报告',
         JSON.stringify({ 
@@ -1638,7 +2869,8 @@ async function processClosingReportData(records) {
             issues: fields['异常情况说明'],
             submit_time: fields['提交时间']
           }
-        })
+        }),
+        record.record_id
       ]);
     } catch (e) {
       console.error(`[bitable] save closing report record failed:`, e?.message);
@@ -1654,12 +2886,17 @@ async function processOpeningReportData(records) {
     try {
       const fields = record.fields || {};
       await pool().query(`
-        INSERT INTO agent_messages (direction, channel, content_type, content, agent_data)
-        VALUES ('in','feishu','opening_report',$1,$2::jsonb)
-        ON CONFLICT (record_id) DO UPDATE SET
-          content = EXCLUDED.content,
-          agent_data = EXCLUDED.agent_data,
-          updated_at = CURRENT_TIMESTAMP
+        WITH updated AS (
+          UPDATE agent_messages
+          SET content = $1,
+              agent_data = $2::jsonb,
+              updated_at = CURRENT_TIMESTAMP
+          WHERE record_id = $3
+          RETURNING id
+        )
+        INSERT INTO agent_messages (direction, channel, content_type, content, agent_data, record_id)
+        SELECT 'in','feishu','opening_report',$1,$2::jsonb,$3
+        WHERE NOT EXISTS (SELECT 1 FROM updated)
       `, [
         '开档报告',
         JSON.stringify({ 
@@ -1679,7 +2916,8 @@ async function processOpeningReportData(records) {
             issues: fields['异常情况说明'],
             submit_time: fields['提交时间']
           }
-        })
+        }),
+        record.record_id
       ]);
     } catch (e) {
       console.error(`[bitable] save opening report record failed:`, e?.message);
@@ -1695,12 +2933,17 @@ async function processMeetingReportData(records) {
     try {
       const fields = record.fields || {};
       await pool().query(`
-        INSERT INTO agent_messages (direction, channel, content_type, content, agent_data)
-        VALUES ('in','feishu','meeting_report',$1,$2::jsonb)
-        ON CONFLICT (record_id) DO UPDATE SET
-          content = EXCLUDED.content,
-          agent_data = EXCLUDED.agent_data,
-          updated_at = CURRENT_TIMESTAMP
+        WITH updated AS (
+          UPDATE agent_messages
+          SET content = $1,
+              agent_data = $2::jsonb,
+              updated_at = CURRENT_TIMESTAMP
+          WHERE record_id = $3
+          RETURNING id
+        )
+        INSERT INTO agent_messages (direction, channel, content_type, content, agent_data, record_id)
+        SELECT 'in','feishu','meeting_report',$1,$2::jsonb,$3
+        WHERE NOT EXISTS (SELECT 1 FROM updated)
       `, [
         '例会报告',
         JSON.stringify({ 
@@ -1720,7 +2963,8 @@ async function processMeetingReportData(records) {
             next_meeting: fields['下次会议时间'],
             submit_time: fields['提交时间']
           }
-        })
+        }),
+        record.record_id
       ]);
     } catch (e) {
       console.error(`[bitable] save meeting report record failed:`, e?.message);
@@ -1736,12 +2980,17 @@ async function processMaterialReportData(records, brand) {
     try {
       const fields = record.fields || {};
       await pool().query(`
-        INSERT INTO agent_messages (direction, channel, content_type, content, agent_data)
-        VALUES ('in','feishu','material_report',$1,$2::jsonb)
-        ON CONFLICT (record_id) DO UPDATE SET
-          content = EXCLUDED.content,
-          agent_data = EXCLUDED.agent_data,
-          updated_at = CURRENT_TIMESTAMP
+        WITH updated AS (
+          UPDATE agent_messages
+          SET content = $1,
+              agent_data = $2::jsonb,
+              updated_at = CURRENT_TIMESTAMP
+          WHERE record_id = $3
+          RETURNING id
+        )
+        INSERT INTO agent_messages (direction, channel, content_type, content, agent_data, record_id)
+        SELECT 'in','feishu','material_report',$1,$2::jsonb,$3
+        WHERE NOT EXISTS (SELECT 1 FROM updated)
       `, [
         `${brand}原料收货日报`,
         JSON.stringify({ 
@@ -1764,7 +3013,8 @@ async function processMaterialReportData(records, brand) {
             notes: fields['备注'],
             submit_time: fields['提交时间']
           }
-        })
+        }),
+        record.record_id
       ]);
     } catch (e) {
       console.error(`[bitable] save material report record failed:`, e?.message);
@@ -1890,18 +3140,54 @@ export async function getBitableSubmissionStats() {
 
 const _bitableLastProcessedTime = new Map();
 const _bitableProcessedRecordIds = new Set();
+const BITABLE_DEDUP_MAX_KEYS = 30000;
+const BITABLE_DEDUP_CLEAN_COUNT = 8000;
+let _bitableDedupsSeeded = false;
+
+// 启动时从数据库种子化dedup集合，避免重启后重复发送确认消息
+async function seedBitableDedup() {
+  if (_bitableDedupsSeeded) return;
+  _bitableDedupsSeeded = true;
+  try {
+    const r = await pool().query(
+      `SELECT DISTINCT record_id, table_id FROM feishu_generic_records WHERE created_at > NOW() - INTERVAL '30 days' LIMIT 50000`
+    );
+    for (const row of (r.rows || [])) {
+      // 用通用 key 格式来匹配
+      if (row.record_id) {
+        // 尝试所有可能的 configKey 前缀
+        for (const prefix of ['ops_checklist', 'table_visit_hongchao', 'table_visit_majixian', 'material_hongchao', 'material_majixian', 'meeting_reports', 'loss_reports']) {
+          _bitableProcessedRecordIds.add(`${prefix}_${row.record_id}`);
+        }
+      }
+    }
+    console.log(`[bitable] seeded dedup set with ${_bitableProcessedRecordIds.size} keys from DB`);
+  } catch (e) {
+    console.error('[bitable] seed dedup failed:', e?.message);
+  }
+}
 
 export async function pollBitableSubmissions(configKey = 'ops_checklist') {
+  await seedBitableDedup();
   console.log(`[bitable][${configKey}] polling submissions...`);
   
-  const result = await getBitableRecords(configKey);
-  if (!result.ok) {
-    console.error(`[bitable][${configKey}] poll failed:`, result.error);
-    return;
+  const records = [];
+  let pageToken = '';
+  let page = 0;
+  while (page < 20) {
+    const result = await getBitableRecords(configKey, { pageSize: 200, pageToken });
+    if (!result.ok) {
+      console.error(`[bitable][${configKey}] poll failed:`, result.error);
+      return;
+    }
+    records.push(...(result.records || []));
+    if (!result.hasMore || !result.nextPageToken) break;
+    pageToken = result.nextPageToken;
+    page += 1;
   }
-  
-  const records = result.records || [];
+
   const newSubmissions = [];
+  const newRecords = [];
   
   for (const record of records) {
     const recordId = record.record_id;
@@ -1931,14 +3217,15 @@ export async function pollBitableSubmissions(configKey = 'ops_checklist') {
     
     console.log(`[bitable][${configKey}] new submission:`, submission);
     newSubmissions.push(submission);
+    newRecords.push(record);
     
     // 标记为已处理
     _bitableProcessedRecordIds.add(processedKey);
     _bitableLastProcessedTime.set(processedKey, createdTime);
     
     // 限制内存中的记录数量
-    if (_bitableProcessedRecordIds.size > 1000) {
-      const oldestIds = Array.from(_bitableProcessedRecordIds).slice(0, 500);
+    if (_bitableProcessedRecordIds.size > BITABLE_DEDUP_MAX_KEYS) {
+      const oldestIds = Array.from(_bitableProcessedRecordIds).slice(0, BITABLE_DEDUP_CLEAN_COUNT);
       oldestIds.forEach(id => {
         _bitableProcessedRecordIds.delete(id);
         _bitableLastProcessedTime.delete(id);
@@ -1949,9 +3236,33 @@ export async function pollBitableSubmissions(configKey = 'ops_checklist') {
   
   if (newSubmissions.length > 0) {
     console.log(`[bitable][${configKey}] processed ${newSubmissions.length} new submissions`);
-    
-    // 处理数据（根据配置类型）
-    await processBitableData(configKey, records);
+
+    // 统一写入 feishu_generic_records，确保 BI 可查询所有数据源
+    const config = BITABLE_CONFIGS[configKey];
+    for (const record of newRecords) {
+      try {
+        await pool().query(
+          `INSERT INTO feishu_generic_records (app_token, table_id, record_id, fields, raw, created_at, updated_at)
+           VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, NOW(), NOW())
+           ON CONFLICT (app_token, table_id, record_id) DO UPDATE SET
+             fields = EXCLUDED.fields, raw = EXCLUDED.raw, updated_at = NOW()`,
+          [
+            config?.appToken || '',
+            config?.tableId || '',
+            record.record_id,
+            JSON.stringify(record.fields || {}),
+            JSON.stringify(record)
+          ]
+        );
+      } catch (e) {
+        if (!String(e?.message || '').includes('duplicate')) {
+          console.error(`[bitable][${configKey}] save generic record failed:`, e?.message);
+        }
+      }
+    }
+
+    // 仅处理"本轮新增记录"，避免高量表每轮重复全量处理导致其它表饥饿
+    await processBitableData(configKey, newRecords);
     
     // 如果是检查表类型，继续原有的确认消息逻辑
     if (configKey === 'ops_checklist') {
@@ -2082,7 +3393,22 @@ export async function pollBitableSubmissions(configKey = 'ops_checklist') {
 
 // 多配置轮询调度器
 export async function pollAllBitableSubmissions() {
-  for (const [configKey, config] of Object.entries(BITABLE_CONFIGS)) {
+  const preferredOrder = [
+    'ops_checklist',
+    'bad_reviews',
+    'closing_reports',
+    'opening_reports',
+    'meeting_reports',
+    'material_majixian',
+    'material_hongchao',
+    'table_visit'
+  ];
+  const known = new Set(preferredOrder);
+  const finalKeys = [
+    ...preferredOrder.filter((k) => BITABLE_CONFIGS[k]),
+    ...Object.keys(BITABLE_CONFIGS).filter((k) => !known.has(k))
+  ];
+  for (const configKey of finalKeys) {
     try {
       await pollBitableSubmissions(configKey);
     } catch (e) {
@@ -2108,25 +3434,70 @@ let _scheduledTaskIntervals = new Map();
 const _scheduledTaskRuntimeStatus = new Map();
 
 function buildScheduledTasksFromConfig() {
-  const runtime = { ...DEFAULT_SCHEDULED_TASKS };
+  const runtime = {};
   const inspections = Array.isArray(OPS_AGENT_CONFIG?.scheduledTasks?.dailyInspections)
     ? OPS_AGENT_CONFIG.scheduledTasks.dailyInspections
     : [];
+  const randomInspections = Array.isArray(OPS_AGENT_CONFIG?.scheduledTasks?.randomInspections)
+    ? OPS_AGENT_CONFIG.scheduledTasks.randomInspections
+    : [];
 
   for (const inspection of inspections) {
+    const store = String(inspection?.store || '').trim();
     const brand = String(inspection?.brand || '').trim();
     const type = String(inspection?.type || '').trim();
     const time = String(inspection?.time || '').trim();
-    if (!brand || !type || !time) continue;
-    const key = `${brand}_${type === 'opening' ? '开市' : type === 'closing' ? '收档' : type}`;
+    if (!type || !time || (!brand && !store)) continue;
+    const identity = store || brand;
+    const key = `${identity}_${type === 'opening' ? '开市' : type === 'closing' ? '收档' : type}`;
     runtime[key] = {
+      store,
       time,
+      frequency: String(inspection?.frequency || 'daily').trim(),
+      customIntervalDays: Math.max(1, Math.floor(Number(inspection?.customIntervalDays) || 1)),
       action: 'send_checklist',
       brand,
       checkType: type
     };
   }
+
+  for (let i = 0; i < randomInspections.length; i += 1) {
+    const inspection = randomInspections[i] || {};
+    const type = String(inspection?.type || '').trim();
+    if (!type) continue;
+    const store = String(inspection?.store || '').trim();
+    const brand = String(inspection?.brand || '').trim();
+    const minH = Math.max(1, Math.floor(Number(inspection?.intervalMinHours) || Number(inspection?.interval?.[0]) || 2));
+    const maxH = Math.max(minH, Math.floor(Number(inspection?.intervalMaxHours) || Number(inspection?.interval?.[1]) || 4));
+    const key = `随机抽检_${store || brand || '全门店'}_${type}_${i + 1}`;
+    runtime[key] = {
+      random: true,
+      interval: [minH, maxH],
+      action: 'safety_check',
+      type,
+      description: String(inspection?.description || '食安抽检').trim(),
+      timeWindow: Math.max(1, Math.floor(Number(inspection?.timeWindow) || 15)),
+      store,
+      brand,
+      assigneeRoles: Array.isArray(inspection?.assigneeRoles) && inspection.assigneeRoles.length
+        ? inspection.assigneeRoles.map((r) => String(r || '').trim()).filter(Boolean)
+        : ['store_manager', 'store_production_manager']
+    };
+  }
+
+  if (Object.keys(runtime).length === 0) {
+    return { ...DEFAULT_SCHEDULED_TASKS };
+  }
   return runtime;
+}
+
+function getInspectionIntervalDays(config) {
+  const frequency = String(config?.frequency || 'daily').trim();
+  if (frequency === 'weekly') return 7;
+  if (frequency === 'biweekly') return 14;
+  if (frequency === 'monthly') return 30;
+  if (frequency === 'custom') return Math.max(1, Math.floor(Number(config?.customIntervalDays) || 1));
+  return 1;
 }
 
 export function getScheduledTaskStatus() {
@@ -2175,16 +3546,19 @@ async function startScheduledTasks() {
 
 function scheduleFixedTask(taskKey, config) {
   const [hour, minute] = config.time.split(':').map(Number);
-  
+  const intervalDays = getInspectionIntervalDays(config);
+
   const scheduleNext = () => {
     const now = new Date();
     const nextExecution = new Date(now);
     nextExecution.setHours(hour);
     nextExecution.setMinutes(minute);
+    nextExecution.setSeconds(0);
+    nextExecution.setMilliseconds(0);
     
-    // 如果今天的时间已过，安排到明天
+    // 如果今天时间已过，按频率顺延
     if (nextExecution <= now) {
-      nextExecution.setDate(nextExecution.getDate() + 1);
+      nextExecution.setDate(nextExecution.getDate() + intervalDays);
     }
     
     const msUntilExecution = nextExecution.getTime() - now.getTime();
@@ -2266,13 +3640,17 @@ async function executeScheduledTask(taskKey, config) {
 }
 
 export async function sendScheduledChecklist(config) {
-  // 查找对应品牌的门店
+  // 优先按门店发送；未配置门店时，按品牌发送
   const sharedState = await getSharedState();
   const stores = Object.entries(sharedState.stores || {});
-  const brandStores = stores.filter(([key, store]) => store.brand === config.brand);
+  const configStore = String(config?.store || '').trim();
+  const configBrand = String(config?.brand || '').trim();
+  const targetStores = configStore
+    ? stores.filter(([, s]) => isLikelySameStore(s?.name, configStore))
+    : stores.filter(([, s]) => String(s?.brand || '').trim() === configBrand);
   
-  if (brandStores.length === 0) {
-    console.log(`[ops] no stores found for brand: ${config.brand}`);
+  if (targetStores.length === 0) {
+    console.log(`[ops] no stores found for config: store=${configStore}, brand=${configBrand}`);
     return;
   }
   
@@ -2283,11 +3661,11 @@ export async function sendScheduledChecklist(config) {
   ];
 
   // 向每个门店发送检查表
-  for (const [storeKey, store] of brandStores) {
+  for (const [storeKey, store] of targetStores) {
     try {
       // 同时查找该门店的 店长(store_manager) 和 出品经理(store_production_manager)
       const targets = allStaff.filter(u =>
-        String(u?.store || '').trim() === store.name &&
+        normalizeStoreKey(u?.store) === normalizeStoreKey(store.name) &&
         (u.role === 'store_manager' || u.role === 'store_production_manager')
       );
       const uniqueUsernames = [...new Set(targets.map(u => String(u.username || '').trim()).filter(Boolean))];
@@ -2296,18 +3674,46 @@ export async function sendScheduledChecklist(config) {
         const feishuUser = await lookupFeishuUserByUsername(username);
         if (feishuUser?.open_id) {
           const formUrl = 'https://ycnp8e71t8x8.feishu.cn/base/PtVObRtoPaMAP3stIIFc8DnJngd?table=tblxHI9ZAKONOTpp&view=vewjuqywQu';
-          const typeLabel = config.checkType === 'opening' ? '开市' : '收档';
+          const typeLabel = formatChecklistTypeLabel(config.checkType);
+          const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(formUrl)}`;
+          const headerColor = config.checkType === 'closing' ? 'orange' : 'blue';
+          const timeNow = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
           
           const card = {
             config: { wide_screen_mode: true },
-            header: { title: { tag: 'plain_text', content: `${config.brand}${typeLabel}检查提醒` }, template: 'blue' },
+            header: { title: { tag: 'plain_text', content: `📋 ${typeLabel}检查通知` }, template: headerColor },
             elements: [
               {
                 tag: 'div',
-                text: {
-                  tag: 'lark_md',
-                  content: `**${config.brand} - ${store.name}**\n\n⏰ **时间**: ${config.time}\n**类型**: ${typeLabel}检查\n\n📋 请点击下方链接填写检查表：\n${formUrl}\n\n✅ 填写完成后系统会自动确认\n\n如有问题请联系督导员。`
-                }
+                fields: [
+                  { is_short: true, text: { tag: 'lark_md', content: `**门店**\n${store.name}` } },
+                  { is_short: true, text: { tag: 'lark_md', content: `**品牌**\n${configBrand || store?.brand || '-'}` } },
+                  { is_short: true, text: { tag: 'lark_md', content: `**检查类型**\n${typeLabel}检查` } },
+                  { is_short: true, text: { tag: 'lark_md', content: `**发送时间**\n${timeNow}` } }
+                ]
+              },
+              { tag: 'hr' },
+              {
+                tag: 'div',
+                text: { tag: 'lark_md', content: '请点击下方按钮打开检查表，逐项检查并提交：' }
+              },
+              {
+                tag: 'action',
+                actions: [
+                  {
+                    tag: 'button',
+                    text: { tag: 'plain_text', content: '📝 打开检查表' },
+                    type: 'primary',
+                    url: formUrl
+                  }
+                ]
+              },
+              { tag: 'hr' },
+              {
+                tag: 'note',
+                elements: [
+                  { tag: 'plain_text', content: '填写完成后系统自动确认 · 营运督导 OP Agent' }
+                ]
               }
             ]
           };
@@ -2325,34 +3731,61 @@ export async function sendScheduledChecklist(config) {
 }
 
 async function sendSafetyCheck(config) {
-  // 随机选择一个门店进行食安抽检
   const sharedState = await getSharedState();
   const stores = Object.entries(sharedState.stores || {});
-  
-  if (stores.length === 0) {
+
+  if (!stores.length) {
     console.log('[ops] no stores available for safety check');
     return;
   }
-  
-  const [storeKey, store] = stores[Math.floor(Math.random() * stores.length)];
-  const feishuUser = await lookupFeishuUserByUsername(store.manager || '');
-  
-  if (feishuUser?.open_id) {
-    const safetyTasks = [
-      '请拍摄海鲜池水温计照片',
-      '请检查冰箱温度记录',
-      '请拍摄后厨卫生状况',
-      '请检查食材分装情况',
-      '请拍摄洗手台清洁状况'
-    ];
-    
-    const randomTask = safetyTasks[Math.floor(Math.random() * safetyTasks.length)];
-    
-    const message = `🔔 **食安抽检**\n\n**门店**: ${store.name}\n**任务**: ${randomTask}\n**时间**: ${new Date().toLocaleString()}\n\n请在15分钟内完成并上传照片。`;
-    
-    await sendLarkMessage(feishuUser.open_id, prefixWithAgentName('ops_supervisor', message));
-    console.log(`[ops] sent safety check to ${store.name}: ${randomTask}`);
+
+  const configStore = String(config?.store || '').trim();
+  const configBrand = String(config?.brand || '').trim();
+  const targetStores = configStore
+    ? stores.filter(([, s]) => isLikelySameStore(s?.name, configStore))
+    : (configBrand ? stores.filter(([, s]) => String(s?.brand || '').trim() === configBrand) : stores);
+  if (!targetStores.length) {
+    console.log(`[ops] no stores matched safety check config: store=${configStore}, brand=${configBrand}`);
+    return;
   }
+
+  const [, pickedStore] = targetStores[Math.floor(Math.random() * targetStores.length)];
+  const roles = Array.isArray(config?.assigneeRoles) && config.assigneeRoles.length
+    ? config.assigneeRoles.map((r) => String(r || '').trim()).filter(Boolean)
+    : ['store_manager', 'store_production_manager'];
+  const allStaff = [
+    ...(Array.isArray(sharedState.employees) ? sharedState.employees : []),
+    ...(Array.isArray(sharedState.users) ? sharedState.users : [])
+  ];
+  const assignees = allStaff.filter((u) =>
+    normalizeStoreKey(u?.store) === normalizeStoreKey(pickedStore?.name) &&
+    roles.includes(String(u?.role || '').trim())
+  );
+  const usernames = [...new Set(assignees.map((u) => String(u?.username || '').trim()).filter(Boolean))];
+
+  const taskText = String(config?.description || '').trim() || '请完成本次食安抽检';
+  const timeWindow = Math.max(1, Math.floor(Number(config?.timeWindow) || 15));
+  const taskType = String(config?.type || '').trim() || 'food_safety';
+  const timeNow = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+  const message = `🔔 食安抽检通知\n\n门店：${pickedStore?.name || '-'}\n任务：${taskText}\n时间：${timeNow}\n时限：${timeWindow}分钟内完成\n\n请拍照发送至本对话。`;
+
+  if (!usernames.length) {
+    const fallbackUser = await lookupFeishuUserByUsername(String(pickedStore?.manager || '').trim());
+    if (!fallbackUser?.open_id) {
+      console.log(`[ops] no assignee found for safety check: store=${pickedStore?.name || '-'}, roles=${roles.join(',')}`);
+      return;
+    }
+    await sendLarkMessage(fallbackUser.open_id, prefixWithAgentName('ops_supervisor', message));
+    console.log(`[ops] sent safety check to fallback manager of ${pickedStore?.name || '-'}: ${taskText}`);
+    return;
+  }
+
+  for (const username of usernames) {
+    const feishuUser = await lookupFeishuUserByUsername(username);
+    if (!feishuUser?.open_id) continue;
+    await sendLarkMessage(feishuUser.open_id, prefixWithAgentName('ops_supervisor', message));
+  }
+  console.log(`[ops] sent safety check to ${pickedStore?.name || '-'} (${usernames.join(',')}): ${taskText}`);
 }
 
 // 辅助函数：从AI回复中提取分数
@@ -2482,9 +3915,9 @@ async function validateSubmissionLogic(submission) {
 
 // ─────────────────────────────────────────────
 // Send plain text message to a user by open_id
-export async function sendLarkMessage(openId, text) {
-  // 消息去重检查
-  if (!deduplicateMessage(text, openId)) {
+export async function sendLarkMessage(openId, text, options = {}) {
+  // 消息去重检查（BI确定性回复跳过去重，因为用户可能重复查同一指标）
+  if (!options.skipDedup && !deduplicateMessage(text, openId)) {
     return { ok: true, deduplicated: true };
   }
   
@@ -2602,7 +4035,7 @@ export async function lookupFeishuUserByUsername(username) {
   } catch (e) { return null; }
 }
 
-// 推送督办消息给责任人，并抄送总部营运和管理员
+// 推送督办消息给责任人；仅高优先级异常才抄送总部营运和管理员
 // H6-FIX: 合并为单次 getSharedState 调用，避免批量场景下的DB过载
 async function pushIssueToAssignee(issue, message) {
   const recipients = [];
@@ -2615,33 +4048,36 @@ async function pushIssueToAssignee(issue, message) {
     }
   }
   
-  // 2+3. 一次性查找总部营运和管理员
-  try {
-    const state = await getSharedState();
-    const allUsers = [
-      ...(Array.isArray(state?.employees) ? state.employees : []),
-      ...(Array.isArray(state?.users) ? state.users : [])
-    ];
-    
-    // 总部营运（hq_manager）
-    const hqManagers = allUsers.filter(u => u.role === 'hq_manager');
-    for (const mgr of hqManagers) {
-      const fu = await lookupFeishuUserByUsername(mgr.username);
-      if (fu?.open_id) {
-        recipients.push({ openId: fu.open_id, role: 'hq_manager', username: mgr.username });
+  // 2+3. 仅高优先级异常才抄送总部营运和管理员（避免通知泛滥）
+  const isHighSeverity = String(issue.severity || '').toLowerCase() === 'high';
+  if (isHighSeverity) {
+    try {
+      const state = await getSharedState();
+      const allUsers = [
+        ...(Array.isArray(state?.employees) ? state.employees : []),
+        ...(Array.isArray(state?.users) ? state.users : [])
+      ];
+      
+      // 总部营运（hq_manager）
+      const hqManagers = allUsers.filter(u => u.role === 'hq_manager');
+      for (const mgr of hqManagers) {
+        const fu = await lookupFeishuUserByUsername(mgr.username);
+        if (fu?.open_id) {
+          recipients.push({ openId: fu.open_id, role: 'hq_manager', username: mgr.username });
+        }
       }
-    }
-    
-    // 管理员（admin）
-    const admins = allUsers.filter(u => u.role === 'admin');
-    for (const adm of admins) {
-      const fu = await lookupFeishuUserByUsername(adm.username);
-      if (fu?.open_id) {
-        recipients.push({ openId: fu.open_id, role: 'admin', username: adm.username });
+      
+      // 管理员（admin）
+      const admins = allUsers.filter(u => u.role === 'admin');
+      for (const adm of admins) {
+        const fu = await lookupFeishuUserByUsername(adm.username);
+        if (fu?.open_id) {
+          recipients.push({ openId: fu.open_id, role: 'admin', username: adm.username });
+        }
       }
+    } catch (e) {
+      console.error('[pushIssue] 查找抄送人失败:', e?.message);
     }
-  } catch (e) {
-    console.error('[pushIssue] 查找抄送人失败:', e?.message);
   }
   
   // 发送消息给所有接收人
@@ -2759,10 +4195,22 @@ function buildAlertCard(title, severity, detail, actions) {
 // ─────────────────────────────────────────────
 
 export async function runDataAuditor() {
+  await refreshBiAgentRuntimeConfig();
   const state = await getSharedState();
   const reports = Array.isArray(state?.dailyReports) ? state.dailyReports : [];
   const stores = getStoresFromState(state);
   const issues = [];
+  const enableDailyReports = isBiSourceEnabled('daily_reports');
+  const enableTableVisit = isBiSourceEnabled('table_visit_records') || isBiSourceEnabled('table_visit_bitable');
+  const enableBadReviews = isBiSourceEnabled('bad_reviews');
+  const triggers = BI_AGENT_CONFIG?.anomalyTriggers || {};
+  const productMedium = Math.max(1, Number(triggers.tableVisitProductMedium ?? 2));
+  const productHigh = Math.max(productMedium, Number(triggers.tableVisitProductHigh ?? 4));
+  const ratioMedium = Number(triggers.tableVisitRatioMedium ?? 0.5);
+  const ratioHigh = Number(triggers.tableVisitRatioHigh ?? 0.4);
+  const badReviewMedium = Math.max(1, Number(triggers.badReviewMedium ?? 1));
+  const badReviewHigh = Math.max(badReviewMedium, Number(triggers.badReviewHigh ?? 2));
+  const rechargeHighDays = Math.max(2, Number(triggers.rechargeStreakHighDays ?? 2));
   
   // 重新启用数据源质量检查（带错误处理）
   await checkDataSourceQuality();
@@ -2777,11 +4225,12 @@ export async function runDataAuditor() {
     const weekAgo = new Date(now.getTime() - 7 * 86400000);
     const weekAgoDate = toDateOnly(weekAgo.toISOString());
 
-    const storeReports = reports.filter(r => {
-      if (String(r?.store || '').trim() !== storeName) return false;
+    const normalizedStoreName = normalizeStoreKey(storeName);
+    const storeReports = enableDailyReports ? reports.filter(r => {
+      if (normalizeStoreKey(r?.store) !== normalizedStoreName) return false;
       return inDateRangeInclusive(r?.date, weekAgoDate, nowDate);
-    });
-    if (!storeReports.length) {
+    }) : [];
+    if (enableDailyReports && !storeReports.length) {
       // 报告数据源不足问题
       await AgentCommunicationHelper.reportDataSourceIssue(
         'daily_reports',
@@ -2789,10 +4238,11 @@ export async function runDataAuditor() {
         '无法进行营收异常检测',
         '建议检查数据同步机制'
       );
-      continue;
     }
 
-    const tableVisitMetrics = await loadTableVisitMetricsByStore(storeName, weekAgoDate, nowDate);
+    const tableVisitMetrics = enableTableVisit
+      ? await loadTableVisitMetricsByStore(storeName, weekAgoDate, nowDate)
+      : { countByDate: new Map(), dissatisfiedProducts: new Map(), dissatisfiedByDate: new Map(), productLabelByKey: new Map() };
     const reportsSorted = storeReports
       .slice()
       .sort((a, b) => String(a?.date || '').localeCompare(String(b?.date || '')));
@@ -2800,10 +4250,11 @@ export async function runDataAuditor() {
     // 1) 实收营收异常（按月累计达成率 vs 理论达成率）
     // 规则：每周一早上10点检查，比较当月1号到上周日的累计数据
     // 达成率差值 >10% 为 medium, >20% 为 high
-    const ym = nowDate.slice(0, 7);
-    const target = getMonthlyTarget(state, ym, storeName);
-    const targetActual = toNum(target?.targets?.actual, 0);
-    if (targetActual > 0) {
+    if (enableDailyReports) {
+      const ym = nowDate.slice(0, 7);
+      const target = getMonthlyTarget(state, ym, storeName);
+      const targetActual = toNum(target?.targets?.actual, 0);
+      if (targetActual > 0) {
       // 获取当月1号到当前日期（上周日）的所有数据
       const monthStart = `${ym}-01`;
       const monthReports = storeReports.filter(r => {
@@ -2844,6 +4295,7 @@ export async function runDataAuditor() {
         });
       }
     }
+    }
 
     // 2) 人效值异常（按品牌）
     // 洪潮: <1100为medium, <1000为high; 马己仙: <1400为medium, <1300为high
@@ -2851,7 +4303,7 @@ export async function runDataAuditor() {
       ? { medium: 1400, high: 1300 }
       : { medium: 1100, high: 1000 };
 
-    for (const report of reportsSorted) {
+    if (enableDailyReports) for (const report of reportsSorted) {
       const data = report?.data || {};
       const reportDate = toDateOnly(report?.date);
       if (!reportDate) continue;
@@ -2896,11 +4348,11 @@ export async function runDataAuditor() {
       if (noRecharge && isConsecutiveDate(prevDate, reportDate)) rechargeStreak += 1;
       else rechargeStreak = noRecharge ? 1 : 0;
 
-      if (rechargeStreak >= 2) {
+      if (rechargeStreak >= rechargeHighDays) {
         issues.push({
           agent: 'data_auditor', brand, store: storeName, category: '充值异常',
           severity: 'high',
-          title: `${storeName} 连续2天无充值`,
+          title: `${storeName} 连续${rechargeHighDays}天无充值`,
           detail: `截至 ${reportDate} 已连续 ${rechargeStreak} 天无充值。`,
           data: { date: reportDate, noRechargeDays: rechargeStreak }
         });
@@ -2911,15 +4363,15 @@ export async function runDataAuditor() {
     // 4) 桌访产品异常（同一产品7天内投诉检测）
     // 规则: 1周内同一产品投诉>2次为medium, >4次为high
     const productComplaints = tableVisitMetrics.dissatisfiedProducts;
-    for (const [key, count] of productComplaints) {
-      if (count >= 2) {
+    if (enableTableVisit) for (const [key, count] of productComplaints) {
+      if (count >= productMedium) {
         const [, productKey] = key.split('||');
         const product = tableVisitMetrics.productLabelByKey.get(productKey) || productKey || '未知产品';
         issues.push({
           agent: 'data_auditor', brand, store: storeName, category: '桌访产品异常',
-          severity: count >= 4 ? 'high' : 'medium',
+          severity: count >= productHigh ? 'high' : 'medium',
           title: `${storeName} 近7天「${product}」不满意 ${count} 次`,
-          detail: `同一产品7天内不满意次数 ${count} 次（medium:≥2次, high:≥4次）。`,
+          detail: `同一产品7天内不满意次数 ${count} 次（medium:≥${productMedium}次, high:≥${productHigh}次）。`,
           data: { date: nowDate, dissatisfiedProducts: product, dissatisfiedCount: count }
         });
       }
@@ -2931,12 +4383,12 @@ export async function runDataAuditor() {
     // 从营业日报获取堂食订单数作为总桌数
     const weekDineOrders = storeReports.reduce((s, r) => s + toNum(r?.data?.dine?.orders, 0), 0);
     const tableVisitRatio = weekDineOrders > 0 ? (weekVisits / weekDineOrders) : 0;
-    if (weekDineOrders > 0 && tableVisitRatio < 0.5) {
+    if (enableTableVisit && enableDailyReports && weekDineOrders > 0 && tableVisitRatio < ratioMedium) {
       issues.push({
         agent: 'data_auditor', brand, store: storeName, category: '桌访占比异常',
-        severity: tableVisitRatio < 0.4 ? 'high' : 'medium',
+        severity: tableVisitRatio < ratioHigh ? 'high' : 'medium',
         title: `${storeName} 近7天桌访占比偏低（${(tableVisitRatio * 100).toFixed(1)}%）`,
-        detail: `桌访数量 ${weekVisits}，堂食订单数量 ${weekDineOrders}，桌访占比 ${(tableVisitRatio * 100).toFixed(1)}%（medium:<50%, high:<40%）。`,
+        detail: `桌访数量 ${weekVisits}，堂食订单数量 ${weekDineOrders}，桌访占比 ${(tableVisitRatio * 100).toFixed(1)}%（medium:<${(ratioMedium*100).toFixed(0)}%, high:<${(ratioHigh*100).toFixed(0)}%）。`,
         data: {
           date: nowDate,
           tableVisitCount: weekVisits,
@@ -2983,22 +4435,22 @@ export async function runDataAuditor() {
       const productReviews = await pool().query(
         `SELECT product_name, COUNT(*) as cnt
          FROM bad_reviews
-         WHERE store = $1 AND review_type = 'product'
+         WHERE lower(regexp_replace(store, '\\s+', '', 'g')) = $1 AND review_type = 'product'
            AND date >= $2::date AND date <= $3::date
            AND product_name IS NOT NULL AND product_name != ''
          GROUP BY product_name`,
-        [storeName, day7AgoDate, nowDate]
+        [normalizeStoreKey(storeName), day7AgoDate, nowDate]
       );
 
       for (const row of (productReviews.rows || [])) {
         const product = String(row.product_name || '').trim();
         const count7d = Number(row.cnt || 0);
-        if (count7d >= 1) {
+        if (count7d >= badReviewMedium) {
           issues.push({
             agent: 'data_auditor', brand, store: storeName, category: '产品差评异常',
-            severity: count7d >= 2 ? 'high' : 'medium',
+            severity: count7d >= badReviewHigh ? 'high' : 'medium',
             title: `${storeName} 「${product}」近7天收到 ${count7d} 次产品差评`,
-            detail: `产品「${product}」在7天内收到 ${count7d} 次差评（medium:≥1条, high:≥2条）。`,
+            detail: `产品「${product}」在7天内收到 ${count7d} 次差评（medium:≥${badReviewMedium}条, high:≥${badReviewHigh}条）。`,
             data: {
               date: nowDate,
               productName: product,
@@ -3014,22 +4466,22 @@ export async function runDataAuditor() {
       const serviceReviews = await pool().query(
         `SELECT service_item, COUNT(*) as cnt
          FROM bad_reviews
-         WHERE store = $1 AND review_type = 'service'
+         WHERE lower(regexp_replace(store, '\\s+', '', 'g')) = $1 AND review_type = 'service'
            AND date >= $2::date AND date <= $3::date
            AND service_item IS NOT NULL AND service_item != ''
          GROUP BY service_item`,
-        [storeName, day7AgoDate, nowDate]
+        [normalizeStoreKey(storeName), day7AgoDate, nowDate]
       );
 
       for (const row of (serviceReviews.rows || [])) {
         const service = String(row.service_item || '').trim();
         const count7d = Number(row.cnt || 0);
-        if (count7d >= 1) {
+        if (count7d >= badReviewMedium) {
           issues.push({
             agent: 'data_auditor', brand, store: storeName, category: '服务差评异常',
-            severity: count7d >= 2 ? 'high' : 'medium',
+            severity: count7d >= badReviewHigh ? 'high' : 'medium',
             title: `${storeName} 「${service}」服务近7天收到 ${count7d} 次差评`,
-            detail: `服务项「${service}」在7天内收到 ${count7d} 次差评（medium:≥1条, high:≥2条）。`,
+            detail: `服务项「${service}」在7天内收到 ${count7d} 次差评（medium:≥${badReviewMedium}条, high:≥${badReviewHigh}条）。`,
             data: {
               date: nowDate,
               serviceItem: service,
@@ -3043,6 +4495,66 @@ export async function runDataAuditor() {
     } catch (e) {
       // bad_reviews表可能不存在，忽略
     }
+
+    // 8) 收档得分异常（近7天平均得分<7分为medium, <5分为high）
+    try {
+      const closingTableId = String(BITABLE_CONFIGS?.closing_reports?.tableId || '').trim();
+      if (closingTableId) {
+        const cr = await pool().query(
+          `SELECT fields FROM feishu_generic_records WHERE table_id = $1 AND updated_at > NOW() - INTERVAL '8 days'`,
+          [closingTableId]
+        );
+        const storeClosings = (cr.rows || []).filter(row => {
+          const f = row.fields && typeof row.fields === 'object' ? row.fields : {};
+          return isLikelySameStore(String(f['门店'] || f['所属门店'] || ''), storeName);
+        });
+        if (storeClosings.length > 0) {
+          const scores = storeClosings.map(row => parseFloat(extractBitableFieldText(row.fields['档口收档平均得分']))).filter(n => !isNaN(n));
+          if (scores.length > 0) {
+            const avg = scores.reduce((a, b) => a + b, 0) / scores.length;
+            if (avg < 7) {
+              issues.push({
+                agent: 'data_auditor', brand, store: storeName, category: '收档得分异常',
+                severity: avg < 5 ? 'high' : 'medium',
+                title: `${storeName} 近7天收档平均得分偏低（${avg.toFixed(1)}分）`,
+                detail: `${scores.length}条收档记录，平均得分 ${avg.toFixed(1)}（medium:<7, high:<5）。`,
+                data: { date: nowDate, avgScore: Number(avg.toFixed(1)), recordCount: scores.length }
+              });
+            }
+          }
+        }
+      }
+    } catch (e) { /* ignore */ }
+
+    // 9) 原料收货异常（近7天有异常反馈记录则medium, ≥3条为high）
+    try {
+      const matTableIds = [BITABLE_CONFIGS?.material_hongchao?.tableId, BITABLE_CONFIGS?.material_majixian?.tableId].filter(Boolean);
+      if (matTableIds.length) {
+        const mr = await pool().query(
+          `SELECT fields FROM feishu_generic_records WHERE table_id = ANY($1) AND updated_at > NOW() - INTERVAL '8 days'`,
+          [matTableIds]
+        );
+        const storeMaterials = (mr.rows || []).filter(row => {
+          const f = row.fields && typeof row.fields === 'object' ? row.fields : {};
+          return isLikelySameStore(String(f['所属门店'] || f['门店'] || ''), storeName);
+        });
+        const abnormal = storeMaterials.filter(row => {
+          const f = row.fields || {};
+          const feedback = extractBitableFieldText(f['今日异常反馈'] || f['今天原料情况']);
+          return feedback && !/正常|无|没有/.test(feedback);
+        });
+        if (abnormal.length > 0) {
+          const matNames = abnormal.map(row => extractBitableFieldText(row.fields['异常原料名称'])).filter(Boolean);
+          issues.push({
+            agent: 'data_auditor', brand, store: storeName, category: '原料收货异常',
+            severity: abnormal.length >= 3 ? 'high' : 'medium',
+            title: `${storeName} 近7天${abnormal.length}条原料异常反馈`,
+            detail: `异常原料：${matNames.slice(0, 5).join('、') || '未标注'}。`,
+            data: { date: nowDate, abnormalCount: abnormal.length, materialNames: matNames.slice(0, 10) }
+          });
+        }
+      }
+    } catch (e) { /* ignore */ }
   }
 
   // Persist and return
@@ -3062,13 +4574,46 @@ export async function runDataAuditor() {
       );
       if (existing.rows?.length) continue;
 
-      const assignee = await findStoreManager(state, issue.store);
+      // 按异常类型查找责任人角色（原料异常→出品经理，服务异常→店长等）
+      let assignee = null;
+      try {
+        const roleMap = await getCategoryAssigneeRoleMap();
+        const targetRole = roleMap[issue.category] || 'store_manager';
+        const normalizedStore = normalizeStoreKey(issue.store);
+        const allUsers = [
+          ...(Array.isArray(state?.employees) ? state.employees : []),
+          ...(Array.isArray(state?.users) ? state.users : [])
+        ];
+        let assigneeUser = allUsers.find(u =>
+          normalizeStoreKey(u?.store) === normalizedStore &&
+          String(u?.role || '').trim() === targetRole
+        );
+        // 出品经理找不到则降级到店长
+        if (!assigneeUser && targetRole === 'store_production_manager') {
+          assigneeUser = allUsers.find(u =>
+            normalizeStoreKey(u?.store) === normalizedStore &&
+            String(u?.role || '').trim() === 'store_manager'
+          );
+        }
+        assignee = assigneeUser ? String(assigneeUser.username || '').trim() : null;
+      } catch (e) {
+        assignee = await findStoreManager(state, issue.store);
+      }
       const r = await pool().query(
         `INSERT INTO agent_issues (agent, brand, store, category, severity, title, detail, data, assignee_username)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9) RETURNING id`,
         [issue.agent, issue.brand, issue.store, issue.category, issue.severity,
          issue.title, issue.detail, JSON.stringify(issue.data), assignee]
       );
+
+      // 同步输出标准化 KPI 雷达报警 JSON 给 Master Agent（用于编排调度）
+      const radarPayload = buildKpiRadarAlertJson(issue);
+      await pool().query(
+        `INSERT INTO agent_messages (direction, channel, sender_name, routed_to, content_type, content, agent_data)
+         VALUES ('out', 'system', 'BI Radar', 'master', 'kpi_radar_alert', $1, $2::jsonb)`,
+        [JSON.stringify(radarPayload), JSON.stringify({ route: 'master', kpiRadar: true, payload: radarPayload })]
+      );
+
       created++;
       if (r.rows?.[0]?.id) newIssueIds.push(r.rows[0].id);
     } catch (e) {
@@ -3085,14 +4630,18 @@ export async function runDataAuditor() {
 
 // 营运督导员工作职责配置
 let OPS_AGENT_CONFIG = {
+  llmModels: {
+    reasoningModel: 'deepseek-chat',
+    visionModel: 'doubao-seed-2-0-pro-260215'
+  },
   // 任务调度与主动触发
   scheduledTasks: {
     // 开/收市巡检
     dailyInspections: [
-      { brand: '洪潮', type: 'opening', time: '10:30', checklist: ['地面清洁无积水', '所有设备正常开启', '食材新鲜度检查', '餐具消毒完成', '灯光亮度适中', '背景音乐开启', '空调温度设置合适', '员工仪容仪表检查'] },
-      { brand: '马己仙', type: 'opening', time: '10:00', checklist: ['地面清洁', '设备开启', '食材准备', '餐具消毒', '迎宾准备'] },
-      { brand: '洪潮', type: 'closing', time: '22:00', checklist: ['食材封存', '设备关闭', '垃圾清理', '安全检查', '门窗锁好'] },
-      { brand: '马己仙', type: 'closing', time: '22:30', checklist: ['食材封存', '设备关闭', '垃圾清理', '安全检查', '门窗锁好', '电源关闭'] }
+      { brand: '洪潮', type: 'opening', time: '10:30', frequency: 'daily', checklist: ['地面清洁无积水', '所有设备正常开启', '食材新鲜度检查', '餐具消毒完成', '灯光亮度适中', '背景音乐开启', '空调温度设置合适', '员工仪容仪表检查'] },
+      { brand: '马己仙', type: 'opening', time: '10:00', frequency: 'daily', checklist: ['地面清洁', '设备开启', '食材准备', '餐具消毒', '迎宾准备'] },
+      { brand: '洪潮', type: 'closing', time: '22:00', frequency: 'daily', checklist: ['食材封存', '设备关闭', '垃圾清理', '安全检查', '门窗锁好'] },
+      { brand: '马己仙', type: 'closing', time: '22:30', frequency: 'daily', checklist: ['食材封存', '设备关闭', '垃圾清理', '安全检查', '门窗锁好', '电源关闭'] }
     ],
     // 食安抽检
     randomInspections: [
@@ -3143,8 +4692,8 @@ let OPS_AGENT_CONFIG = {
   loopManagement: {
     // 催办逻辑
     followUpRules: {
-      firstReminder: 15,  // 15分钟内未读信
-      secondReminder: 60, // 60分钟内未首次反馈
+      firstReminder: 60,  // 60分钟内未读信
+      secondReminder: 90, // 90分钟内未首次反馈
       escalationDelay: 120, // 2小时后升级
       maxReminders: 3      // 最多提醒3次
     },
@@ -3373,7 +4922,7 @@ export async function getOpsKnowledgeSupport(query, context = {}) {
         content: `你是资深餐饮营运督导，精通洪潮和马己仙品牌标准。当前门店：${store}（${brand}）。请提供专业、可操作的建议。` 
       },
       { role: 'user', content: query }
-    ]);
+    ], { model: getOpsReasoningModel() });
     
     if (llmResult.ok && llmResult.content) {
       return { 
@@ -3404,18 +4953,17 @@ export async function scheduleOpsTasks() {
   // 检查日常巡检任务
   for (const inspection of config.dailyInspections) {
     if (inspection.time === currentTime) {
-      const stores = await getStoresForBrand(inspection.brand);
-      for (const store of stores) {
-        const task = {
-          type: 'daily_inspection',
-          brand: inspection.brand,
-          store: store.name,
-          inspectionType: inspection.type,
-          checklist: inspection.checklist,
-          scheduledTime: now.toISOString()
-        };
-        scheduledTasks.push(task);
-      }
+      const storeName = String(inspection?.store || '').trim();
+      if (!storeName) continue;
+      const task = {
+        type: 'daily_inspection',
+        brand: String(inspection?.brand || '').trim(),
+        store: storeName,
+        inspectionType: inspection.type,
+        checklist: inspection.checklist,
+        scheduledTime: now.toISOString()
+      };
+      scheduledTasks.push(task);
     }
   }
   
@@ -3469,7 +5017,7 @@ export async function followUpOverdueTasks() {
       WHERE t.status = 'dispatched' 
         AND t.created_at < NOW() - make_interval(mins => $2)
         AND t.reminder_count < $1
-    `, [config.maxReminders, Math.max(1, Math.floor(Number(config.firstReminder) || 15))]);
+    `, [config.maxReminders, Math.max(1, Math.floor(Number(config.firstReminder) || 60))]);
     
     for (const task of unreadTasks.rows) {
       // 发送飞书提醒
@@ -3615,9 +5163,119 @@ export function prefixWithAgentName(route, text) {
   return `${prefix}：${text}`;
 }
 
+async function buildBiGroundingFacts(store, text) {
+  const q = String(text || '').trim();
+  const targetStore = String(store || '').trim();
+  if (!targetStore) return '';
+  const askReviewLike = /(差评|点评|评论|桌访|产品问题|反馈|口味|出品|上菜|服务)/.test(q);
+  if (!askReviewLike) return '';
+
+  const normalizedStore = normalizeStoreKey(targetStore);
+  const sections = [];
+
+  try {
+    const r = await pool().query(
+      `SELECT date::text AS date, review_type, product_name, service_item, content
+       FROM bad_reviews
+       WHERE lower(regexp_replace(store, '\\s+', '', 'g')) = $1
+         AND date >= CURRENT_DATE - INTERVAL '30 days'
+       ORDER BY date DESC
+       LIMIT 200`,
+      [normalizedStore]
+    );
+    const rows = Array.isArray(r.rows) ? r.rows : [];
+    const recent7 = rows.filter((x) => {
+      const d = toDateOnly(x?.date);
+      if (!d) return false;
+      return d >= toDateOnly(formatDate(new Date(Date.now() - 6 * 24 * 60 * 60 * 1000)));
+    });
+
+    if (!rows.length) {
+      sections.push('【差评数据】近30天该门店无差评样本。');
+    } else {
+      const productTop = new Map();
+      const serviceTop = new Map();
+      rows.forEach((x) => {
+        const p = String(x?.product_name || '').trim();
+        const s = String(x?.service_item || '').trim();
+        if (p) productTop.set(p, (productTop.get(p) || 0) + 1);
+        if (s) serviceTop.set(s, (serviceTop.get(s) || 0) + 1);
+      });
+      const topN = (m) => Array.from(m.entries()).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, v]) => `${k}(${v})`).join('、') || '无';
+      const samples = rows.slice(0, 3).map((x) => `- ${toDateOnly(x.date) || '-'}：${String(x.content || '').replace(/\s+/g, ' ').slice(0, 60)}`).join('\n');
+      sections.push(
+        `【差评数据】近7天${recent7.length}条，近30天${rows.length}条；产品Top：${topN(productTop)}；服务Top：${topN(serviceTop)}。\n最近样例：\n${samples}`
+      );
+    }
+  } catch (e) {
+    sections.push('【差评数据】查询失败或数据表不可用。');
+  }
+
+  try {
+    const end = toDateOnly(new Date().toISOString());
+    const start = toDateOnly(new Date(Date.now() - 29 * 86400000).toISOString());
+    const rows = await loadUnifiedTableVisitRowsByStore(targetStore, start, end);
+    if (!rows.length) {
+      sections.push('【桌访数据】近30天无桌访不满意菜品样本。');
+    } else {
+      const itemTop = new Map();
+      rows.forEach((x) => {
+        extractTableVisitItems(x).forEach((k) => {
+          itemTop.set(k, (itemTop.get(k) || 0) + 1);
+        });
+      });
+      const top = Array.from(itemTop.entries()).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, v]) => `${k}(${v})`).join('、') || '无';
+      sections.push(`【桌访数据】近30天样本${rows.length}条；不满意项Top：${top}`);
+    }
+  } catch (e) {
+    sections.push('【桌访数据】查询失败或数据表不可用。');
+  }
+
+  return sections.join('\n');
+}
+
+async function buildBiDeterministicReviewReply(store, text) {
+  const q = String(text || '').trim();
+  const targetStore = String(store || '').trim();
+  if (!targetStore) return '';
+  if (!/(评价|差评|好评|评论)/.test(q)) return '';
+  if (!/(多少|几条|总数|总评价|统计|上周|本周|昨天|昨日|今天|今日|近7天|7天)/.test(q)) return '';
+
+  const normalizedStore = normalizeStoreKey(targetStore);
+  const period = resolveDateRangeFromQuestion(q, 7);
+  const periodLabel = period.label;
+
+  try {
+    const r = await pool().query(
+      `SELECT COUNT(DISTINCT record_id)::int AS c
+       FROM agent_messages
+       WHERE content_type = 'negative_review'
+         AND lower(regexp_replace(coalesce(agent_data->>'store',''), '\\s+', '', 'g')) = $1
+         AND (
+           CASE
+             WHEN coalesce(agent_data->>'date','') ~ '^\\d{4}-\\d{2}-\\d{2}$' THEN (agent_data->>'date')::date
+             WHEN coalesce(agent_data->>'date','') ~ '^\\d{10,13}$' THEN to_timestamp((agent_data->>'date')::bigint / CASE WHEN length(agent_data->>'date')=13 THEN 1000 ELSE 1 END)::date
+             ELSE created_at::date
+           END
+         ) BETWEEN $2::date AND $3::date`,
+      [normalizedStore, period.start, period.end]
+    );
+    const badCount = Number(r.rows?.[0]?.c || 0);
+    return `${periodLabel}评价数据（${targetStore}）\n- 差评数：${badCount}条\n- 好评数：当前系统未接入“好评总量”数据源，无法给出\n- 总评价数：当前系统未接入“全量评价”数据源，无法给出\n\n如需“总评价/好评/差评占比”精确值，请接入平台全量评价表（大众点评/美团）后再查。`;
+  } catch (e) {
+    return `${periodLabel}评价数据暂不可用（查询异常）。当前仅保证“差评表”可统计，建议先检查差评表同步状态后重试。`;
+  }
+}
+
 async function routeMessage(text, hasImage, senderUsername) {
   const t = String(text || '').trim();
   if (hasImage) return { route: 'ops_supervisor' };
+
+  const explicitOpsKeywords = /(拍照|上传照片|巡检|检查表|开市检查|收档检查|开档检查|闭市检查)/;
+  const explicitDataKeywords = /(桌访|差评|点评|大众点评|评价.*(怎么样|结果|情况|差|多少)|营业额|营收|毛利|日报|业绩|达成率|目标.*营|客诉|kpi|人效|收档.*(得分|平均|合格|多少|几次|报告|数据)|开档.*(得分|平均|合格|多少|几次|报告|数据)|原料.*(异常|收货|多少|几次|报告|日报)|食材|进货|例会|早会|班会|报损|订单.*数|客单价|会员.*数|充值)/i;
+  if (explicitDataKeywords.test(t) && !explicitOpsKeywords.test(t)) {
+    return { route: 'data_auditor' };
+  }
   
   // 快速通行：如果是单数字选项回复，直接返回general供后续继承历史路由
   if (/^\d+$/.test(t) || /^[一二三四五六七八九十]$/.test(t)) return { route: 'general' };
@@ -3627,11 +5285,11 @@ async function routeMessage(text, hasImage, senderUsername) {
   if (senderUsername) {
     try {
       const historyRes = await pool().query(
-        `SELECT content_text, direction FROM agent_messages WHERE sender_username = $1 AND content_type IN ('text', 'image') AND created_at > NOW() - INTERVAL '30 minutes' ORDER BY created_at DESC LIMIT 3`,
+        `SELECT content, direction FROM agent_messages WHERE sender_username = $1 AND content_type IN ('text', 'image') AND created_at > NOW() - INTERVAL '30 minutes' ORDER BY created_at DESC LIMIT 3`,
         [senderUsername]
       );
       if (historyRes.rows && historyRes.rows.length > 0) {
-        const msgs = historyRes.rows.reverse().map(r => `${r.direction === 'in' ? '用户' : 'Agent'}: ${r.content_text}`);
+        const msgs = historyRes.rows.reverse().map(r => `${r.direction === 'in' ? '用户' : 'Agent'}: ${r.content}`);
         contextStr = `\n【最近对话上下文】\n${msgs.join('\n')}\n`;
       }
     } catch (e) {
@@ -3829,6 +5487,86 @@ async function handleAgentMessage(senderUsername, senderName, senderStore, sende
   try {
     switch (route) {
       case 'data_auditor': {
+        const deterministicCoverageReply = await buildBiDeterministicDataSourceCoverageReply(text);
+        if (deterministicCoverageReply) {
+          response = deterministicCoverageReply;
+          agentData = { route, store, brand, brandId, brandConfig, grounded: true, deterministic: true, source: 'bi_data_source_coverage' };
+          break;
+        }
+
+        const deterministicDailyReportReply = await buildBiDeterministicDailyReportReply(store, text);
+        if (deterministicDailyReportReply) {
+          response = deterministicDailyReportReply;
+          agentData = { route, store, brand, brandId, brandConfig, grounded: true, deterministic: true, source: 'daily_reports' };
+          break;
+        }
+
+        const deterministicTableVisitReply = await buildBiDeterministicTableVisitReply(store, text);
+        if (deterministicTableVisitReply) {
+          response = deterministicTableVisitReply;
+          agentData = { route, store, brand, brandId, brandConfig, grounded: true, deterministic: true, source: 'table_visit' };
+          break;
+        }
+
+        const deterministicOpsCountReply = await buildBiDeterministicOpsReportCountReply(store, text);
+        if (deterministicOpsCountReply) {
+          response = deterministicOpsCountReply;
+          agentData = { route, store, brand, brandId, brandConfig, grounded: true, deterministic: true, source: 'ops_reports' };
+          break;
+        }
+
+        const deterministicBadReviewReply = await buildBiDeterministicBadReviewReportReply(store, text);
+        if (deterministicBadReviewReply) {
+          response = deterministicBadReviewReply;
+          agentData = { route, store, brand, brandId, brandConfig, grounded: true, deterministic: true, source: 'bad_reviews' };
+          break;
+        }
+
+        const deterministicClosingReply = await buildBiDeterministicClosingReportReply(store, text);
+        if (deterministicClosingReply) {
+          response = deterministicClosingReply;
+          agentData = { route, store, brand, brandId, brandConfig, grounded: true, deterministic: true, source: 'closing_reports' };
+          break;
+        }
+
+        const deterministicOpeningReply = await buildBiDeterministicOpeningReportReply(store, text);
+        if (deterministicOpeningReply) {
+          response = deterministicOpeningReply;
+          agentData = { route, store, brand, brandId, brandConfig, grounded: true, deterministic: true, source: 'opening_reports' };
+          break;
+        }
+
+        const deterministicMaterialReply = await buildBiDeterministicMaterialReportReply(store, text);
+        if (deterministicMaterialReply) {
+          response = deterministicMaterialReply;
+          agentData = { route, store, brand, brandId, brandConfig, grounded: true, deterministic: true, source: 'material_reports' };
+          break;
+        }
+
+        const deterministicMeetingReply = await buildBiDeterministicMeetingReportReply(store, text);
+        if (deterministicMeetingReply) {
+          response = deterministicMeetingReply;
+          agentData = { route, store, brand, brandId, brandConfig, grounded: true, deterministic: true, source: 'meeting_reports' };
+          break;
+        }
+
+        const deterministicLossReply = await buildBiDeterministicLossReportReply(store, text);
+        if (deterministicLossReply) {
+          response = deterministicLossReply;
+          agentData = { route, store, brand, brandId, brandConfig, grounded: true, deterministic: true, source: 'loss_reports' };
+          break;
+        }
+
+        const isFactQuestion = isFactLikeQuestion(text);
+        const sourceAuditRows = isFactQuestion ? await buildBiFactSourceAudit(store, text) : [];
+        const hasUsableSource = sourceAuditRows.some((x) => x.status === 'ok');
+        if (isFactQuestion && sourceAuditRows.length > 0 && !hasUsableSource) {
+          const auditText = buildBiSourceAuditText(sourceAuditRows);
+          response = `当前问题需要的数据源暂无可用样本，无法给出确定性结论。\n\n数据源检查：\n${auditText}\n\n请先完成数据同步/启用后重试。`;
+          agentData = { route, store, brand, brandId, brandConfig, grounded: false, reason: 'insufficient_sources', sourceAuditRows };
+          break;
+        }
+
         // 先查异常数据作为上下文
         let issueContext = '';
         try {
@@ -3840,15 +5578,42 @@ async function handleAgentMessage(senderUsername, senderName, senderStore, sende
           }
         } catch (e) {}
 
+        const groundingFacts = await buildBiGroundingFacts(store, text);
+        const sourceAuditText = buildBiSourceAuditText(sourceAuditRows);
+        const hasInsufficientFacts = /无差评样本|无桌访不满意菜品样本|查询失败|不可用/.test(groundingFacts);
+        const askReviewLike = /(差评|点评|评论|桌访|产品问题|反馈|口味|出品|上菜|服务)/.test(String(text || ''));
+
+        if (askReviewLike && hasInsufficientFacts && !issueContext) {
+          response = '当前系统可用样本不足，暂时无法给出准确的“近7天差评/桌访问题次数”结论。建议先确认飞书差评表与桌访表是否已入库，再让我输出精确明细（含桌号/时段/原文）。';
+          agentData = { route, store, brand, brandId, brandConfig, grounded: false, reason: 'insufficient_facts' };
+          break;
+        }
+
         const biLlm = await callLLM([
-          { role: 'system', content: `你是餐饮企业数据审计专员（BI Agent），负责门店数据分析、异常检测和审计。当前门店：${store}（${brand}）。用户：${senderName}（${senderRole === 'store_manager' ? '店长' : senderRole === 'store_production_manager' ? '出品经理' : '员工'}）。\n\n你的职责：\n- 损耗分析、盘点数据、毛利率监控\n- 营收对账、成本异常检测\n- 差评数据分析\n- 充值数据追踪\n\n${issueContext}\n\n请根据用户问题，结合门店实际数据给出专业、简洁的分析和建议。如果用户问的是具体数据，尽量给出结构化回复。回复不超过300字。` },
+          { role: 'system', content: `你是餐饮企业数据审计专员（BI Agent），负责门店数据分析、异常检测和审计。当前门店：${store}（${brand}）。用户：${senderName}（${senderRole === 'store_manager' ? '店长' : senderRole === 'store_production_manager' ? '出品经理' : '员工'}）。
+
+你的职责：
+- 损耗分析、盘点数据、毛利率监控
+- 营收对账、成本异常检测
+- 差评数据分析
+- 充值数据追踪
+
+强约束：
+- 只能基于已提供事实作答，禁止编造次数、日期、样本来源。
+- 若事实不足，必须明确说“当前系统可用样本不足”，并给出补数建议。
+
+${issueContext}
+${sourceAuditText ? `\n\n当前数据源审计：\n${sourceAuditText}` : ''}
+${groundingFacts ? `\n\n当前可用事实：\n${groundingFacts}` : ''}
+
+请根据用户问题，结合门店实际数据给出专业、简洁的分析和建议。如果用户问的是具体数据，尽量给出结构化回复。回复不超过300字。` },
           ...getContext(senderUsername).slice(-4),
           { role: 'user', content: text }
         ]);
         response = biLlm.content || '收到，我会查看门店数据并尽快回复。';
         updateContext(senderUsername, 'user', text);
         updateContext(senderUsername, 'assistant', response);
-        agentData = { route, store, brand, brandId, brandConfig };
+        agentData = { route, store, brand, brandId, brandConfig, sourceAuditRows, grounded: !!groundingFacts };
         break;
       }
 
@@ -3881,21 +5646,21 @@ async function handleAgentMessage(senderUsername, senderName, senderStore, sende
           let checklistResponse = '';
           
           if (text.includes('开市') || text.includes('开档')) {
-            const brandChecklist = brand === '洪潮' 
-              ? '地面清洁无积水、所有设备正常开启、食材新鲜度检查、餐具消毒完成、灯光亮度适中、背景音乐开启、空调温度设置合适、员工仪容仪表检查'
+            const items = brand === '洪潮' 
+              ? ['地面清洁无积水', '所有设备正常开启', '食材新鲜度检查', '餐具消毒完成', '灯光亮度适中', '背景音乐开启', '空调温度设置合适', '员工仪容仪表检查']
               : brand === '马己仙'
-              ? '地面清洁、设备开启、食材准备、餐具消毒、迎宾准备'
-              : '地面清洁、设备开启、食材准备、餐具消毒';
-            checklistResponse = `【开市检查表 - ${brand}】\n请逐项检查并拍照反馈：\n${brandChecklist.split('、').map(item => `✅ ${item}`).join('\n')}\n\n完成后请发送各项目检查照片。`;
+              ? ['地面清洁', '设备开启', '食材准备', '餐具消毒', '迎宾准备']
+              : ['地面清洁', '设备开启', '食材准备', '餐具消毒'];
+            checklistResponse = `📋 开市检查表（${brand} · ${store}）\n\n检查项目：\n${items.map((item, i) => `${i + 1}. ${item}`).join('\n')}\n\n请逐项完成后拍照发送至本对话。`;
           } else if (text.includes('收档') || text.includes('闭市') || text.includes('收市')) {
-            const brandChecklist = brand === '洪潮'
-              ? '食材封存、设备关闭、垃圾清理、安全检查、门窗锁好'
+            const items = brand === '洪潮'
+              ? ['食材封存', '设备关闭', '垃圾清理', '安全检查', '门窗锁好']
               : brand === '马己仙'
-              ? '食材封存、设备关闭、垃圾清理、安全检查、门窗锁好、电源关闭'
-              : '食材封存、设备关闭、垃圾清理、安全检查';
-            checklistResponse = `【收档检查表 - ${brand}】\n请逐项检查并拍照反馈：\n${brandChecklist.split('、').map(item => `✅ ${item}`).join('\n')}\n\n完成后请发送各项目检查照片。`;
+              ? ['食材封存', '设备关闭', '垃圾清理', '安全检查', '门窗锁好', '电源关闭']
+              : ['食材封存', '设备关闭', '垃圾清理', '安全检查'];
+            checklistResponse = `📋 收档检查表（${brand} · ${store}）\n\n检查项目：\n${items.map((item, i) => `${i + 1}. ${item}`).join('\n')}\n\n请逐项完成后拍照发送至本对话。`;
           } else if (text.includes('巡检')) {
-            checklistResponse = `【营运巡检要求】\n请检查以下项目并拍照反馈：\n✅ 大厅环境整洁\n✅ 服务台规范\n✅ 卫生间清洁\n✅ 后厨卫生\n✅ 安全设施\n\n请发送各区域检查照片。`;
+            checklistResponse = `📋 营运巡检（${store}）\n\n检查项目：\n1. 大厅环境整洁\n2. 服务台规范\n3. 卫生间清洁\n4. 后厨卫生\n5. 安全设施\n\n请拍照发送至本对话。`;
           }
           
           if (checklistResponse) {
@@ -3911,7 +5676,7 @@ async function handleAgentMessage(senderUsername, senderName, senderStore, sende
               const llm = await callLLM([
                 { role: 'system', content: `你是餐饮营运督导员，当前门店：${store}（${brand}，brand_id=${brandId || 'n/a'}）。简洁专业，注重实操。` },
                 { role: 'user', content: text }
-              ]);
+              ], { model: getOpsReasoningModel() });
               response = llm.content || '收到，我会跟进处理。';
             }
           }
@@ -3958,7 +5723,7 @@ async function handleAgentMessage(senderUsername, senderName, senderStore, sende
           updateContext(senderUsername, 'user', text);
           updateContext(senderUsername, 'assistant', response);
         }
-        agentData = { route, brandId, brandConfig };
+        agentData = { route, brandId, brandConfig, dataBacked: isScoreQuery };
         break;
       }
 
@@ -4084,6 +5849,11 @@ ${kbContext}${trainingTasksContext}
     agentData = { route, error: String(e?.message || e) };
   }
 
+  if (isFactLikeQuestion(text) && !isDataBackedReply(agentData)) {
+    response = FACTUAL_DATA_UNAVAILABLE_MESSAGE;
+    agentData = { ...agentData, factualGuardrailBlocked: true };
+  }
+
   return { route, response, agentData };
 }
 
@@ -4151,6 +5921,7 @@ async function runWithCheckAgent(userQuery, route, generateFn, maxRetries = 2) {
 }
 
 let _bitablePollingInterval = null;
+let _bitablePollingInProgress = false;
 
 export function startBitablePolling(intervalMs = 60000) {
   if (_bitablePollingInterval) {
@@ -4159,12 +5930,27 @@ export function startBitablePolling(intervalMs = 60000) {
   
   console.log('[bitable] starting multi-config polling with interval:', intervalMs, 'ms');
   
+  const runPollingOnce = async () => {
+    if (_bitablePollingInProgress) {
+      console.log('[bitable] previous polling cycle still running, skip this tick');
+      return;
+    }
+    _bitablePollingInProgress = true;
+    try {
+      await pollAllBitableSubmissions();
+    } catch (e) {
+      console.error('[bitable] pollAllBitableSubmissions error:', e?.message || e);
+    } finally {
+      _bitablePollingInProgress = false;
+    }
+  };
+
   // 立即执行一次
-  pollAllBitableSubmissions().catch(console.error);
+  runPollingOnce().catch(console.error);
   
   // 设置定时器
   _bitablePollingInterval = setInterval(() => {
-    pollAllBitableSubmissions().catch(console.error);
+    runPollingOnce().catch(console.error);
   }, intervalMs);
   
   // 启动归档定时任务（每天检查一次）
@@ -4422,40 +6208,53 @@ export async function onFeishuEvent(body) {
       const storeName = String(feishuUser.store || '').trim();
       const typeLabel = checklistType === 'opening' ? '开市' : '收档';
       
-      // 发送 Bitable 表单二维码和链接
+      // 发送 Bitable 表单卡片（含按钮）
       const formUrl = 'https://ycnp8e71t8x8.feishu.cn/base/PtVObRtoPaMAP3stIIFc8DnJngd?table=tblxHI9ZAKONOTpp&view=vewjuqywQu';
+      const headerColor = checklistType === 'closing' ? 'orange' : 'blue';
+      const timeNow = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
       
-      // 生成二维码图片
-      let qrCard = null;
-      try {
-        // 使用简单的文本卡片模拟二维码
-        qrCard = {
-          config: { wide_screen_mode: true },
-          header: { title: { tag: 'plain_text', content: `${typeLabel}检查表` }, template: 'blue' },
-          elements: [
-            {
-              tag: 'div',
-              text: {
-                tag: 'lark_md',
-                content: `**门店**：${storeName || '-'}\n**类型**：${typeLabel}\n\n📱 请扫描下方二维码或点击链接填写检查表\n\n🔗 ${formUrl}\n\n✅ 填写完成后系统会自动确认`
+      const checkCard = {
+        config: { wide_screen_mode: true },
+        header: { title: { tag: 'plain_text', content: `📋 ${typeLabel}检查通知` }, template: headerColor },
+        elements: [
+          {
+            tag: 'div',
+            fields: [
+              { is_short: true, text: { tag: 'lark_md', content: `**门店**\n${storeName || '-'}` } },
+              { is_short: true, text: { tag: 'lark_md', content: `**检查类型**\n${typeLabel}检查` } },
+              { is_short: true, text: { tag: 'lark_md', content: `**时间**\n${timeNow}` } }
+            ]
+          },
+          { tag: 'hr' },
+          {
+            tag: 'div',
+            text: { tag: 'lark_md', content: '请点击下方按钮打开检查表，逐项检查并提交：' }
+          },
+          {
+            tag: 'action',
+            actions: [
+              {
+                tag: 'button',
+                text: { tag: 'plain_text', content: '📝 打开检查表' },
+                type: 'primary',
+                url: formUrl
               }
-            }
-          ]
-        };
-      } catch (e) {
-        console.error('[ops] generate qr card failed:', e?.message);
-      }
+            ]
+          },
+          { tag: 'hr' },
+          {
+            tag: 'note',
+            elements: [
+              { tag: 'plain_text', content: '填写完成后系统自动确认 · 营运督导 OP Agent' }
+            ]
+          }
+        ]
+      };
       
-      if (qrCard) {
-        const cardResult = await sendLarkCard(openId, qrCard);
-        if (!cardResult.ok) {
-          // 降级到文本消息
-          const qrText = `📋 请填写${typeLabel}检查表\n\n🔗 表单链接：${formUrl}\n\n📱 或扫描二维码填写\n（二维码图片请参考群公告）\n\n✅ 填写完成后系统会自动确认\n如有问题请联系管理员`;
-          await sendLarkMessage(openId, prefixWithAgentName('ops_supervisor', qrText));
-        }
-      } else {
-        const qrText = `📋 请填写${typeLabel}检查表\n\n🔗 表单链接：${formUrl}\n\n📱 或扫描二维码填写\n（二维码图片请参考群公告）\n\n✅ 填写完成后系统会自动确认\n如有问题请联系管理员`;
-        await sendLarkMessage(openId, prefixWithAgentName('ops_supervisor', qrText));
+      const cardResult = await sendLarkCard(openId, checkCard);
+      if (!cardResult.ok) {
+        // 降级到文本消息
+        await sendLarkMessage(openId, prefixWithAgentName('ops_supervisor', `📋 请填写${typeLabel}检查表\n\n🔗 ${formUrl}\n\n✅ 填写完成后系统会自动确认`));
       }
 
       try {
@@ -4507,15 +6306,39 @@ export async function onFeishuEvent(body) {
     // Route and handle
     const sharedState = await getSharedState();
     const brandContext = resolveBrandContextByStore(sharedState, feishuUser.store || '');
+
+    // 预路由权限检查
+    const hasImg = Array.isArray(imageUrls) && imageUrls.length > 0;
+    const preRoute = await routeMessage(text, hasImg, feishuUser.username);
+    const userRole = String(feishuUser.role || '').trim();
+    if (preRoute?.route && userRole) {
+      const permCheck = checkAgentPermission(userRole, preRoute.route);
+      if (!permCheck.allowed) {
+        await sendLarkMessage(openId, `⚠️ ${permCheck.reason}`);
+        return { ok: true, denied: true, route: preRoute.route, role: userRole };
+      }
+    }
+
     const result = await handleAgentMessage(
       feishuUser.username, feishuUser.name || feishuUser.username,
       feishuUser.store || '', feishuUser.role || '', brandContext,
       text, imageUrls
     );
 
-    // Reply via Feishu (with agent name prefix)
+    // Reply via Feishu — 优先发送结构化卡片，降级到文本
     if (result.response) {
-      await sendLarkMessage(openId, prefixWithAgentName(result.route, result.response));
+      const isDeterministic = result.agentData?.deterministic === true;
+      const card = buildFeishuCardFromAgentReply(result.route, result.response, result.agentData);
+      let sent = false;
+      if (card) {
+        try {
+          const cardRes = await sendLarkCard(openId, card);
+          sent = cardRes.ok;
+        } catch (e) { console.error('[feishu] card send failed, fallback to text:', e?.message); }
+      }
+      if (!sent) {
+        await sendLarkMessage(openId, prefixWithAgentName(result.route, result.response), { skipDedup: isDeterministic });
+      }
     }
 
     // Log response
@@ -5162,12 +6985,24 @@ export function registerAgentRoutes(app, authRequired) {
 
 // Data Auditor 数据源质量检查
 async function checkDataSourceQuality() {
+  await refreshBiAgentRuntimeConfig();
   return safeExecute('data_auditor_quality_check', async () => {
     const issues = [];
     
     // 检查 Bitable 数据同步状态
     try {
+      const sourceKeyByConfig = {
+        ops_checklist: 'ops_checklist_bitable',
+        table_visit: 'table_visit_bitable',
+        opening_reports: 'opening_reports_bitable',
+        closing_reports: 'closing_reports_bitable',
+        meeting_reports: 'meeting_reports_bitable',
+        material_majixian: 'material_majixian_bitable',
+        material_hongchao: 'material_hongchao_bitable'
+      };
       for (const [configKey, config] of Object.entries(BITABLE_CONFIGS)) {
+        const sourceKey = sourceKeyByConfig[configKey];
+        if (sourceKey && !isBiSourceEnabled(sourceKey)) continue;
         const lastSync = await getLastSyncTime(configKey);
         const syncAge = Date.now() - lastSync;
         
@@ -5193,7 +7028,7 @@ async function checkDataSourceQuality() {
       const state = await getSharedState();
       const reportCount = Array.isArray(state?.dailyReports) ? state.dailyReports.length : 0;
       
-      if (reportCount < 100) {
+      if (isBiSourceEnabled('daily_reports') && reportCount < 100) {
         await safeExecute('data_completeness_report', async () => {
           await AgentCommunicationHelper.reportDataSourceIssue(
             'daily_reports',
