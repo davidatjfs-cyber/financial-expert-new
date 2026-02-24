@@ -25,6 +25,10 @@ import { startDailyFeishuSync } from './feishu-sync.js';
 import { calculateStoreRating, calculateEmployeeScore } from './new-scoring-model.js';
 import { registerNewScoringRoutes } from './new-scoring-api.js';
 import { handleMarginMessage } from './margin-message-handler.js';
+import { ensureRAGSchema, ragQuery, ragMultiQuery, ragUpdateScope, ragStats } from './rag-tool.js';
+import { ensureTaskBoardSchema, checkTimeoutsAndEscalate, registerTaskBoardRoutes } from './task-board-api.js';
+import { ensureHRMSApiSchema, registerHRMSApiRoutes } from './hrms-api-tools.js';
+import { ensureSOPDistributionSchema, registerSOPDistributionRoutes } from './sop-distribution.js';
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = String(process.env.HOST || '0.0.0.0');
@@ -4838,9 +4842,54 @@ function normalizeForecastUploadDate(input) {
   return '';
 }
 
-function parseInventoryForecastRowsFromTableMatrix(matrix, fallbackBizType = '') {
+function inferForecastUploadDateFromFilename(input, now = new Date()) {
+  const raw = String(input || '').trim();
+  if (!raw) return '';
+  const basename = raw.replace(/\.[^.]+$/, '');
+
+  // 1) Full date patterns in filename: YYYY-MM-DD / YYYY_MM_DD / YYYY.MM.DD
+  const full = basename.match(/(20\d{2})[-_.\/年](\d{1,2})[-_.\/月](\d{1,2})/);
+  if (full) {
+    const y = Number(full[1]);
+    const m = Number(full[2]);
+    const d = Number(full[3]);
+    if (y >= 2000 && m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+      return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    }
+  }
+
+  // 2) Range-like pattern: 2-16-22 => interpret as M-D1-D2, choose D2
+  const mdRange = basename.match(/(^|\D)(\d{1,2})[-_.\/](\d{1,2})[-_.\/](\d{1,2})(\D|$)/);
+  if (mdRange) {
+    const m = Number(mdRange[2]);
+    const d1 = Number(mdRange[3]);
+    const d2 = Number(mdRange[4]);
+    if (m >= 1 && m <= 12 && d1 >= 1 && d1 <= 31 && d2 >= 1 && d2 <= 31) {
+      const y = now.getFullYear();
+      const day = Math.max(d1, d2);
+      return `${y}-${String(m).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    }
+  }
+
+  // 3) Single month-day pattern: 2-16 / 2_16 / 2.16
+  const md = basename.match(/(^|\D)(\d{1,2})[-_.\/](\d{1,2})(\D|$)/);
+  if (md) {
+    const m = Number(md[2]);
+    const d = Number(md[3]);
+    if (m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+      const y = now.getFullYear();
+      return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    }
+  }
+
+  return '';
+}
+
+function parseInventoryForecastRowsFromTableMatrix(matrix, fallbackBizType = '', options = {}) {
   const rows = Array.isArray(matrix) ? matrix : [];
   if (!rows.length) return [];
+  const fallbackDate = normalizeForecastUploadDate(options?.fallbackDate || '');
+  const allowTodayFallbackDate = options?.allowTodayFallbackDate !== false;
   const norm = (x) => String(x || '').trim();
   const normHead = (x) => norm(x).toLowerCase().replace(/\s+/g, '');
   const cleanHead = (x) => normHead(x).replace(/[\/:：()（）\[\]【】_\-~～]/g, '');
@@ -4865,10 +4914,10 @@ function parseInventoryForecastRowsFromTableMatrix(matrix, fallbackBizType = '')
     const hasSlot = heads.some((h) => /餐时段名称|时段名称|餐时段|时段/.test(h));
     const hasProduct = heads.some((h) => /菜品名称|商品名称|产品名称|产品|菜品|品名/.test(h));
     const hasQty = heads.some((h) => /销售数量|数量|qty|quantity/.test(h));
-    const hasAmount = heads.some((h) => /销售金额|销售额|金额/.test(h));
+    const hasAmount = heads.some((h) => /销售金额|销售额|销售收入|折前营收|折前营业额|折前收入|金额/.test(h));
     const hasSeqNo = heads.some((h) => /^序号$/.test(h));
     const hasDate = heads.some((h) => /营业日期|销售日期|日期/.test(h));
-    const hasActualRevenue = heads.some((h) => /实际收入|实收|实际营收|家品收入/.test(h));
+    const hasActualRevenue = heads.some((h) => /实际收入|实收|实际营收|菜品收入|家品收入|折后营收|折后收入/.test(h));
     const hasOrderTime = heads.some((h) => /下单时间|点单时间|订单时间/.test(h));
     const hasCheckoutTime = heads.some((h) => /结账时间|结算时间/.test(h));
     const hasDiscount = heads.some((h) => /优惠金额|优惠|折扣/.test(h));
@@ -4897,7 +4946,7 @@ function parseInventoryForecastRowsFromTableMatrix(matrix, fallbackBizType = '')
   }
   const dataStartIndex = headerRowIndex >= 0 ? (headerRowIndex + 1) : 0;
 
-  let defaultDate = '';
+  let defaultDate = fallbackDate || '';
   let defaultBizType = normalizeForecastBizType(fallbackBizType);
   let defaultStore = '';
   let defaultWeather = '';
@@ -4920,6 +4969,9 @@ function parseInventoryForecastRowsFromTableMatrix(matrix, fallbackBizType = '')
       if (v) defaultWeather = normalizeForecastWeather(v);
     }
   }
+  if (!defaultDate && allowTodayFallbackDate) {
+    defaultDate = normalizeForecastUploadDate(new Date().toISOString());
+  }
 
   const headersRaw = headerRowIndex >= 0 && Array.isArray(rows[headerRowIndex]) ? rows[headerRowIndex] : [];
   const headers = headersRaw.map(cleanHead);
@@ -4936,11 +4988,11 @@ function parseInventoryForecastRowsFromTableMatrix(matrix, fallbackBizType = '')
   const iSlot = idx(['餐/时段名称', '时段名称', '餐时段', '时段']);
   const iProduct = idx(['菜品名称', '商品名称', '品名', '产品', 'product']);
   const iQty = idx(['销售数量', '数量', 'qty', 'quantity']);
-  const iAmount = idx(['销售金额', '销售额', 'amount']);
+  const iAmount = idx(['销售金额', '销售额', '销售收入', '折前营收', '折前营业额', '折前收入', 'amount']);
   const iStore = idx(['门店', '店铺', '商户', '销售门店', '门店名称', 'store']);
   const iWeather = idx(['天气', 'weather']);
   // New format columns
-  const iActualRevenue = idx(['实际收入', '实收', '实际营收', '实收金额', '实收营业额', '实收金额元', '家品收入']);
+  const iActualRevenue = idx(['实际收入', '实收', '实际营收', '实收金额', '实收营业额', '实收金额元', '菜品收入', '家品收入', '折后营收', '折后收入']);
   const iDiscount = idx(['优惠金额', '优惠', '折扣']);
   const iMenuPrice = idx(['菜谱售价', '售价', '单价', '菜品售价']);
   const iOrderTime = idx(['下单时间', '点单时间', '订单时间']);
@@ -5000,9 +5052,10 @@ function parseInventoryForecastRowsFromTableMatrix(matrix, fallbackBizType = '')
     if (!slot) continue;
     const weather = normalizeForecastWeather(iWeather >= 0 ? line[iWeather] : '') || defaultWeather;
 
+    // 约定：销售收入 = 折前营收（expectedRevenue）
     const amount = parseNumCell(iAmount >= 0 ? line[iAmount] : 0);
     const expectedRevenueInc = Number.isFinite(amount) && amount > 0 ? amount : 0;
-    // Track actual revenue (实际收入) for 实收毛利率 calculation
+    // 约定：菜品收入 = 折后营收（actualRevenue），用于实收毛利率计算
     const actualRevenueRaw = parseNumCell(iActualRevenue >= 0 ? line[iActualRevenue] : 0);
     const discountRaw = parseNumCell(iDiscount >= 0 ? line[iDiscount] : 0);
     const discountInc = Number.isFinite(discountRaw) ? Math.abs(discountRaw) : 0;
@@ -7025,6 +7078,7 @@ app.post('/api/reports/inventory-forecast/history/upload-file', authRequired, up
     if (!selectedBizType) return res.status(400).json({ error: 'invalid_biz_type', message: '请选择业务类型（外卖/堂食）后再上传。' });
     // Strict mode: do not inject selected bizType as parser fallback, otherwise we cannot detect wrong-file uploads.
     const fallbackBizType = '';
+    const fallbackDateFromName = inferForecastUploadDateFromFilename(String(file.originalname || file.path || ''));
     let parsedRows = [];
     let parseMode = '';
     const parseErrors = [];
@@ -7045,7 +7099,10 @@ app.post('/api/reports/inventory-forecast/history/upload-file', authRequired, up
           __debugMatrixSample = matrix.slice(0, 12).map(r => Array.isArray(r) ? r.map(c => String(c ?? '').slice(0, 40)) : []);
           console.log('[inventory-upload] Excel matrix sample (first 12 rows):', JSON.stringify(__debugMatrixSample));
         }
-        const out = parseInventoryForecastRowsFromTableMatrix(matrix, fallbackBizType);
+        const out = parseInventoryForecastRowsFromTableMatrix(matrix, fallbackBizType, {
+          fallbackDate: fallbackDateFromName,
+          allowTodayFallbackDate: true
+        });
         if (out.length) return out;
       }
       return [];
@@ -7058,7 +7115,10 @@ app.post('/api/reports/inventory-forecast/history/upload-file', authRequired, up
         .map((line) => String(line || '').trim())
         .filter(Boolean)
         .map((line) => String(line).split(','));
-      return parseInventoryForecastRowsFromTableMatrix(matrix, fallbackBizType);
+      return parseInventoryForecastRowsFromTableMatrix(matrix, fallbackBizType, {
+        fallbackDate: fallbackDateFromName,
+        allowTodayFallbackDate: true
+      });
     };
 
     const extLooksExcel = ext === '.xlsx' || ext === '.xls';
@@ -7081,12 +7141,18 @@ app.post('/api/reports/inventory-forecast/history/upload-file', authRequired, up
         parseMode = parseMode ? `${parseMode}|pdf_attempt` : 'pdf_attempt';
         try {
           console.log('[inventory-upload] Trying pdftotext path for:', file.path);
-          parsedRows = parseInventoryForecastRowsFromPdfPath(file.path, fallbackBizType);
+          parsedRows = parseInventoryForecastRowsFromPdfPath(file.path, fallbackBizType, {
+            fallbackDate: fallbackDateFromName,
+            allowTodayFallbackDate: true
+          });
           console.log('[inventory-upload] pdftotext result rows:', parsedRows.length);
           if (!parsedRows.length) {
             console.log('[inventory-upload] Trying built-in PDF buffer parser');
             const pdfBuffer = fs.readFileSync(file.path);
-            parsedRows = parseInventoryForecastRowsFromPdfBuffer(pdfBuffer, fallbackBizType);
+            parsedRows = parseInventoryForecastRowsFromPdfBuffer(pdfBuffer, fallbackBizType, {
+              fallbackDate: fallbackDateFromName,
+              allowTodayFallbackDate: true
+            });
             console.log('[inventory-upload] buffer parser result rows:', parsedRows.length);
           }
           if (parsedRows.length) parseMode = 'pdf';
@@ -7123,7 +7189,7 @@ app.post('/api/reports/inventory-forecast/history/upload-file', authRequired, up
         hint: {
           slotRule: '10-14午市,14-17下午茶,17-22晚市（可由下单时间/结账时间自动推导）',
           requiredHeaders: ['菜品名称', '销售数量'],
-          optionalHeaders: ['销售金额', '实际收入', '优惠金额', '销售类型', '营业日期', '下单时间', '结账时间', '天气']
+          optionalHeaders: ['销售金额/销售收入/折前营收/折前营业额', '实际收入/实收营业额/菜品收入/折后营收', '优惠金额', '销售类型', '营业日期', '下单时间/订单时间', '结账时间', '天气']
         },
         debug: {
           originalName: String(file.originalname || ''),
@@ -9562,7 +9628,7 @@ app.get('/api/knowledge', authRequired, async (req, res) => {
     const qBrand = buildKnowledgeBrandScopeTag(req.query?.brandId || req.query?.brandScope || 'all');
     const withBrandFilter = qBrand && qBrand !== 'brand:all';
     const r = await pool.query(
-      `select id, title, category, tags, file_path, file_type, file_size, access_roles, access_departments, created_by, created_at, updated_at
+      `select id, title, category, tags, scope, file_path, file_type, file_size, access_roles, access_departments, created_by, created_at, updated_at
        from knowledge_base
        ${withBrandFilter ? 'where tags @> $1::text[] or tags @> ARRAY[\'brand:all\']::text[]' : ''}
        order by created_at desc`,
@@ -9607,6 +9673,31 @@ app.delete('/api/knowledge/:id', authRequired, async (req, res) => {
     console.error('DELETE /api/knowledge/:id error:', e);
     return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
   }
+});
+
+// ─── RAG 多维知识库 API ───
+app.put('/api/knowledge/:id/scope', authRequired, async (req, res) => {
+  if (!['admin', 'hq_manager', 'hr_manager'].includes(req.user?.role)) return res.status(403).json({ error: 'forbidden' });
+  const result = await ragUpdateScope(req.params.id, req.body.scope);
+  res.json(result);
+});
+
+app.get('/api/rag/stats', authRequired, async (req, res) => {
+  res.json(await ragStats());
+});
+
+app.post('/api/rag/query', authRequired, async (req, res) => {
+  const { query, scope, category, brandTag, limit } = req.body;
+  if (!query) return res.status(400).json({ error: 'query required' });
+  const result = await ragQuery({ agentName: req.body.agentName || 'master_agent', userRole: req.user?.role, query, scope, category, brandTag, limit });
+  res.json(result);
+});
+
+app.post('/api/rag/multi-query', authRequired, async (req, res) => {
+  const { queries, scope, brandTag, limit } = req.body;
+  if (!Array.isArray(queries)) return res.status(400).json({ error: 'queries array required' });
+  const result = await ragMultiQuery({ agentName: req.body.agentName || 'master_agent', userRole: req.user?.role, queries, scope, brandTag, limit });
+  res.json(result);
 });
 
 app.post('/api/knowledge/presign', authRequired, async (req, res) => {
@@ -9673,11 +9764,12 @@ app.post('/api/knowledge/direct', authRequired, async (req, res) => {
 
   try {
     const createdBy = normalizeCreatedByUuid(req.user?.id);
+    const kbScope = ['public','business','sensitive'].includes(req.body?.scope) ? req.body.scope : 'public';
     const r = await pool.query(
-      `insert into knowledge_base (title, content, category, tags, file_path, file_type, file_size, access_roles, access_departments, created_by)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-       returning id, title, category, tags, file_path, file_type, file_size, access_roles, access_departments, created_by, created_at, updated_at`,
-      [title, '', category || null, tags, filePath, fileType || null, size || null, null, null, createdBy]
+      `insert into knowledge_base (title, content, category, tags, file_path, file_type, file_size, access_roles, access_departments, created_by, scope)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+       returning id, title, category, tags, scope, file_path, file_type, file_size, access_roles, access_departments, created_by, created_at, updated_at`,
+      [title, '', category || null, tags, filePath, fileType || null, size || null, null, null, createdBy, kbScope]
     );
     return res.json({ item: r.rows?.[0] || null });
   } catch (e) {
@@ -9708,11 +9800,12 @@ app.post('/api/knowledge', authRequired, knowledgeUpload.single('file'), async (
   let inserted = null;
   try {
     const createdBy = normalizeCreatedByUuid(req.user?.id);
+    const kbScope = ['public','business','sensitive'].includes(req.body?.scope) ? req.body.scope : 'public';
     const r = await pool.query(
-      `insert into knowledge_base (title, content, category, tags, file_path, file_type, file_size, access_roles, access_departments, created_by)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-       returning id, title, category, tags, file_path, file_type, file_size, access_roles, access_departments, created_by, created_at, updated_at`,
-      [title, '', category || null, tags, filePath, fileType || null, size || null, null, null, createdBy]
+      `insert into knowledge_base (title, content, category, tags, file_path, file_type, file_size, access_roles, access_departments, created_by, scope)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+       returning id, title, category, tags, scope, file_path, file_type, file_size, access_roles, access_departments, created_by, created_at, updated_at`,
+      [title, '', category || null, tags, filePath, fileType || null, size || null, null, null, createdBy, kbScope]
     );
     inserted = r.rows?.[0] || null;
   } catch (e) {
@@ -10642,6 +10735,9 @@ registerAgentConfigRoutes(app, authRequired);
 
 registerMasterRoutes(app, authRequired);
 registerNewScoringRoutes(app, authRequired);
+registerTaskBoardRoutes(app, authRequired);
+registerHRMSApiRoutes(app, authRequired);
+registerSOPDistributionRoutes(app, authRequired);
 
 app.listen(PORT, HOST, async () => {
   console.log(`hrms-server listening on ${HOST}:${PORT}`);
@@ -10655,9 +10751,9 @@ app.listen(PORT, HOST, async () => {
     console.log('[agents] Multi-agent system initialized');
 
     // Start Bitable polling for checklist submissions (暂时禁用)
-    // startBitablePolling();
+    startBitablePolling();
     startScheduledTasks();
-    console.log('[agents] Bitable polling disabled, scheduled tasks started');
+    console.log('[agents] Bitable polling started, scheduled tasks started');
 
     // Initialize Master Agent orchestration
     setMasterPool(pool);
@@ -10665,7 +10761,17 @@ app.listen(PORT, HOST, async () => {
     await ensureMasterTables();
     startMasterAgent();
     console.log('[master] Master Agent orchestration initialized');
-    
+
+    // Initialize new modules (RAG, TaskBoard, HRMS API, SOP Distribution)
+    await ensureRAGSchema();
+    await ensureTaskBoardSchema();
+    await ensureHRMSApiSchema();
+    await ensureSOPDistributionSchema();
+    console.log('[modules] RAG + TaskBoard + HRMS-API + SOP-Distribution initialized');
+
+    // 定时检查任务超时 & 升级 (每5分钟)
+    setInterval(() => { checkTimeoutsAndEscalate().catch(e => console.error('[TaskBoard] timeout check error:', e?.message)); }, 5 * 60 * 1000);
+
     // Start Feishu daily sync
     startDailyFeishuSync();
     console.log('[feishu] Daily sync scheduler started');

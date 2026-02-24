@@ -1955,15 +1955,23 @@ export async function callVisionLLM(imageUrl, prompt) {
 }
 
 export async function queryKnowledgeBase(agent, query, limit = 5, options = {}) {
+  // 委托给 RAG 多维知识库工具（兼容旧调用签名）
   try {
+    let ragModule;
+    try { ragModule = await import('./rag-tool.js'); } catch (e) { /* fallback below */ }
+    if (ragModule?.ragQuery) {
+      const agentName = Array.isArray(agent) ? 'sop_advisor' : String(agent || 'master_agent').trim();
+      const queryStr = Array.isArray(query) ? query : (Array.isArray(agent) ? agent.join(' ') : String(query || ''));
+      const result = await ragModule.ragQuery({
+        agentName, userRole: options?.userRole || 'admin',
+        query: queryStr, brandTag: options?.brandTag, limit
+      });
+      return (result?.results || []).map(r => ({ title: r.title, content: r.content, tags: r.tags, created_at: r.createdAt }));
+    }
+    // fallback: 直接查询
     const brandTag = String(options?.brandTag || '').trim();
     const r = await pool().query(
-      `SELECT title, content, tags, created_at 
-       FROM knowledge_base 
-       WHERE ($1 = '' OR tags && $1) 
-         AND (content ILIKE $2 OR title ILIKE $2)
-       ORDER BY created_at DESC 
-       LIMIT $3`,
+      `SELECT title, content, tags, created_at FROM knowledge_base WHERE ($1 = '' OR tags && $1) AND (content ILIKE $2 OR title ILIKE $2) ORDER BY created_at DESC LIMIT $3`,
       [brandTag, `%${query}%`, limit]
     );
     return r.rows || [];
