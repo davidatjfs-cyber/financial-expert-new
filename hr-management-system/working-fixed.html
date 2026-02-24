@@ -6846,6 +6846,15 @@
                                     暂无异常规则，点击「+ 添加规则」开始配置
                                 </div>
                             </div>
+                            <div class="acm-card">
+                                <div class="acm-card-hd">
+                                    <div class="acm-card-title">🏪 门店级别阈值覆盖</div>
+                                </div>
+                                <div style="font-size:12px;color:#94a3b8;margin-bottom:10px;line-height:1.5;">
+                                    为特定门店设置不同的异常阈值。留空表示使用上方全局默认值。
+                                </div>
+                                <div id="bi-store-overrides-area"></div>
+                            </div>
                             <button class="acm-save" onclick="saveBiAgentConfig()">保存 BI 配置</button>
                         </div>
 
@@ -7896,11 +7905,20 @@
                             </div>
 
                             <div class="ui-form-group">
+                                <label class="ui-label">知识库范围 <span class="req">*</span></label>
+                                <select id="knowledge-upload-scope">
+                                    <option value="public">📢 公共库（品牌愿景、通用规章，全员可见）</option>
+                                    <option value="business">📋 业务库（SOP、技术手册，TRAIN/OP 可见）</option>
+                                    <option value="sensitive">🔒 敏感库（薪资、隐私、申诉，仅 HR/REF/Master 可见）</option>
+                                </select>
+                            </div>
+
+                            <div class="ui-form-group">
                                 <label class="ui-label">品牌选择 <span class="req">*</span></label>
                                 <select id="knowledge-upload-brand-id" onchange="syncKnowledgeUploadFields()">
                                     <option value="all">全部品牌（公司制度）</option>
                                 </select>
-                                <div class="ui-file-hint" style="margin-top: 6px;">可指定单一品牌，或选择“全部品牌”作为通用制度文档。</div>
+                                <div class="ui-file-hint" style="margin-top: 6px;">可指定单一品牌，或选择"全部品牌"作为通用制度文档。</div>
                             </div>
 
                             <div class="ui-form-group">
@@ -17202,19 +17220,19 @@ ${knowledgeContent.slice(0, 30000)}`;
             }
         }
 
-        // BI异常规则预设类型
+        // BI异常规则预设类型 - 所有规则均可配置，支持门店级别覆盖
         const BI_ANOMALY_RULE_PRESETS = [
-            { id: 'revenue_vs_target', label: '实收营业额 vs 目标营业额', category: '实收营收异常', compareMode: 'ratio_below', unit: '%', defaultMedium: 90, defaultHigh: 80, description: '实际实收营业额低于目标的百分比' },
-            { id: 'gross_margin', label: '总实收毛利率异常', category: '总实收毛利率异常', compareMode: 'below', unit: '%', defaultMedium: 55, defaultHigh: 50, description: '毛利率低于设定阈值触发' },
-            { id: 'table_visit_product', label: '桌访产品不满意', category: '桌访产品异常', compareMode: 'above_count', unit: '次/周', defaultMedium: 2, defaultHigh: 4, description: '同一产品7天内不满意次数' },
-            { id: 'table_visit_ratio', label: '桌访占比', category: '桌访占比异常', compareMode: 'below', unit: '%', defaultMedium: 50, defaultHigh: 40, description: '桌访覆盖率低于设定百分比' },
-            { id: 'bad_review', label: '差评数量', category: '产品差评异常', compareMode: 'above_count', unit: '条/周', defaultMedium: 1, defaultHigh: 2, description: '周累计差评数' },
-            { id: 'recharge_streak', label: '充值连续为零', category: '充值异常', compareMode: 'above_days', unit: '天', defaultMedium: 2, defaultHigh: 3, description: '连续N天无充值' },
-            { id: 'labor_efficiency', label: '人效值异常', category: '人效值异常', compareMode: 'below', unit: '元/人', defaultMedium: 800, defaultHigh: 600, description: '每日人均产值低于阈值' },
-            { id: 'material_abnormal', label: '原料收货异常', category: '原料收货异常', compareMode: 'above_count', unit: '条/周', defaultMedium: 1, defaultHigh: 3, description: '原料异常反馈记录数' },
-            { id: 'checklist_score', label: '检查表平均分', category: '检查表异常', compareMode: 'below', unit: '分', defaultMedium: 80, defaultHigh: 70, description: '开/收档检查平均分低于阈值' }
+            { id: 'revenue_gap', label: '实收营收达成率差值', category: '实收营收异常', compareMode: 'ratio_below', unit: '%', defaultMedium: 10, defaultHigh: 20, description: '月累计达成率与理论达成率的差值百分比', configKeys: ['revenueGapMedium', 'revenueGapHigh'], isPercent: true },
+            { id: 'labor_efficiency', label: '人效值异常', category: '人效值异常', compareMode: 'below', unit: '元/人', defaultMedium: 1100, defaultHigh: 1000, description: '每日人均产值低于阈值', configKeys: ['efficiencyMedium', 'efficiencyHigh'] },
+            { id: 'gross_margin', label: '总实收毛利率异常', category: '总实收毛利率异常', compareMode: 'below', unit: '%', defaultMedium: 69, defaultHigh: 68, description: '毛利率低于设定阈值触发', configKeys: ['marginMedium', 'marginHigh'], isPercent: true },
+            { id: 'table_visit_product', label: '桌访产品不满意', category: '桌访产品异常', compareMode: 'above_count', unit: '次/周', defaultMedium: 2, defaultHigh: 4, description: '同一产品7天内不满意次数', configKeys: ['tableVisitProductMedium', 'tableVisitProductHigh'] },
+            { id: 'table_visit_ratio', label: '桌访占比', category: '桌访占比异常', compareMode: 'below', unit: '%', defaultMedium: 50, defaultHigh: 40, description: '桌访覆盖率低于设定百分比', configKeys: ['tableVisitRatioMedium', 'tableVisitRatioHigh'], isPercent: true },
+            { id: 'bad_review', label: '差评数量', category: '产品差评异常', compareMode: 'above_count', unit: '条/周', defaultMedium: 1, defaultHigh: 2, description: '周累计差评数', configKeys: ['badReviewMedium', 'badReviewHigh'] },
+            { id: 'recharge_streak', label: '充值连续为零', category: '充值异常', compareMode: 'above_days', unit: '天', defaultMedium: 2, defaultHigh: 3, description: '连续N天无充值', configKeys: ['rechargeStreakHighDays', 'rechargeStreakHighDays'] }
         ];
         let __BI_ANOMALY_RULES = [];
+        let __BI_STORE_OVERRIDES = {}; // { storeName: { key: value, ... } }
+        const __BI_KNOWN_STORES = ['洪潮大宁久光店', '马己仙上海音乐广场店'];
 
         function renderBiAnomalyRules() {
             const list = document.getElementById('bi-anomaly-rules-list');
@@ -17274,16 +17292,54 @@ ${knowledgeContent.slice(0, 30000)}`;
         function removeBiAnomalyRule(idx) {
             __BI_ANOMALY_RULES.splice(idx, 1);
             renderBiAnomalyRules();
+            renderBiStoreOverrides();
+        }
+
+        function setBiStoreOverride(s,k,v,pct){
+            if(!k)return;if(!__BI_STORE_OVERRIDES[s])__BI_STORE_OVERRIDES[s]={};
+            if(v===''||v==null){delete __BI_STORE_OVERRIDES[s][k];return;}
+            __BI_STORE_OVERRIDES[s][k]=pct?Number(v)/100:Number(v);
+        }
+
+        function renderBiStoreOverrides(){
+            var el=document.getElementById('bi-store-overrides-area');
+            if(!el)return;
+            if(!__BI_ANOMALY_RULES.length||!__BI_KNOWN_STORES.length){el.innerHTML='<div style="color:#64748b;font-size:12px;padding:12px">请先添加全局规则</div>';return;}
+            var h='';
+            for(var i=0;i<__BI_KNOWN_STORES.length;i++){
+                var s=__BI_KNOWN_STORES[i],ov=__BI_STORE_OVERRIDES[s]||{},cells='';
+                for(var j=0;j<__BI_ANOMALY_RULES.length;j++){
+                    var r=__BI_ANOMALY_RULES[j],p=BI_ANOMALY_RULE_PRESETS.find(function(x){return x.id===r.presetId;});
+                    if(!p||!p.configKeys)continue;
+                    var mk=p.configKeys[0],hk=p.configKeys[1],ip=!!p.isPercent;
+                    var mv=ov[mk]!=null?(ip?+(ov[mk]*100).toFixed(2):ov[mk]):'';
+                    var hv=ov[hk]!=null?(ip?+(ov[hk]*100).toFixed(2):ov[hk]):'';
+                    cells+='<div style="display:flex;gap:4px;align-items:center;margin:2px 0"><span style="font-size:10px;color:#64748b;width:68px;flex-shrink:0">'+escapeHtml(p.label.slice(0,6))+'</span>';
+                    cells+='<input type="number" class="acm-inp acm-inp-sm" style="width:58px;font-size:11px" placeholder="中" value="'+mv+'" onchange="setBiStoreOverride(\''+s.replace(/'/g,"\\'")+'\',\''+mk+'\',this.value,'+ip+')" step="any">';
+                    cells+='<input type="number" class="acm-inp acm-inp-sm" style="width:58px;font-size:11px" placeholder="高" value="'+hv+'" onchange="setBiStoreOverride(\''+s.replace(/'/g,"\\'")+'\',\''+hk+'\',this.value,'+ip+')" step="any"></div>';
+                }
+                h+='<div style="background:#1e293b;border-radius:8px;padding:10px;border:1px solid #334155;margin-bottom:8px"><div style="font-weight:600;color:#e2e8f0;font-size:12px;margin-bottom:4px">🏪 '+escapeHtml(s)+'</div><div style="font-size:10px;color:#64748b;margin-bottom:4px">留空=使用全局默认值</div>'+cells+'</div>';
+            }
+            el.innerHTML=h;
         }
 
         // 将旧格式anomalyTriggers迁移为新rules数组
         function migrateOldTriggersToRules(t) {
             const rules = [];
-            if (t.tableVisitProductMedium || t.tableVisitProductHigh) rules.push({ presetId: 'table_visit_product', category: '桌访产品异常', compareMode: 'above_count', unit: '次/周', medium: t.tableVisitProductMedium ?? 2, high: t.tableVisitProductHigh ?? 4, enabled: true });
-            if (t.tableVisitRatioMedium || t.tableVisitRatioHigh) rules.push({ presetId: 'table_visit_ratio', category: '桌访占比异常', compareMode: 'below', unit: '%', medium: (t.tableVisitRatioMedium ?? 0.5) * 100, high: (t.tableVisitRatioHigh ?? 0.4) * 100, enabled: true });
-            if (t.badReviewMedium || t.badReviewHigh) rules.push({ presetId: 'bad_review', category: '产品差评异常', compareMode: 'above_count', unit: '条/周', medium: t.badReviewMedium ?? 1, high: t.badReviewHigh ?? 2, enabled: true });
-            if (t.rechargeStreakHighDays) rules.push({ presetId: 'recharge_streak', category: '充值异常', compareMode: 'above_days', unit: '天', medium: 2, high: t.rechargeStreakHighDays ?? 2, enabled: true });
-            return rules;
+            const g = t.global || t; // 兼容新旧格式
+            for (const p of BI_ANOMALY_RULE_PRESETS) {
+                const mk = p.configKeys?.[0], hk = p.configKeys?.[1];
+                if (!mk) continue;
+                const mv = g[mk], hv = g[hk];
+                if (mv == null && hv == null) continue;
+                let medium = mv ?? p.defaultMedium, high = hv ?? p.defaultHigh;
+                if (p.isPercent) { medium = +(medium * 100).toFixed(2); high = +(high * 100).toFixed(2); }
+                rules.push({ presetId: p.id, category: p.category, compareMode: p.compareMode, unit: p.unit, medium, high, enabled: true });
+            }
+            return rules.length ? rules : BI_ANOMALY_RULE_PRESETS.map(p => ({
+                presetId: p.id, category: p.category, compareMode: p.compareMode,
+                unit: p.unit, medium: p.defaultMedium, high: p.defaultHigh, enabled: true
+            }));
         }
 
         async function loadBiAgentConfig() {
@@ -17311,7 +17367,11 @@ ${knowledgeContent.slice(0, 30000)}`;
                         unit: p.unit, medium: p.defaultMedium, high: p.defaultHigh, enabled: true
                     }));
                 }
+                // 加载门店覆盖
+                const triggers = cfg?.anomalyTriggers || {};
+                __BI_STORE_OVERRIDES = (triggers.storeOverrides && typeof triggers.storeOverrides === 'object') ? JSON.parse(JSON.stringify(triggers.storeOverrides)) : {};
                 renderBiAnomalyRules();
+                renderBiStoreOverrides();
             } catch (e) {
                 if (String(e?.name || '') === 'AbortError') return;
                 console.error('loadBiAgentConfig error:', e);
@@ -17327,15 +17387,25 @@ ${knowledgeContent.slice(0, 30000)}`;
                 const enabledMap = new Set(Array.from(dsSelect?.selectedOptions || []).map((opt) => String(opt.value || '').trim()));
                 const dataSources = currentDs.map((x) => ({ ...x, enabled: enabledMap.has(String(x?.key || '').trim()) }));
 
-                // 同时保存新格式anomalyRules和兼容旧格式anomalyTriggers
+                // 构建 anomalyTriggers: global + storeOverrides
                 const anomalyRules = __BI_ANOMALY_RULES.map(r => ({ ...r }));
-                const anomalyTriggers = {};
+                const globalTriggers = {};
                 for (const r of anomalyRules) {
-                    if (r.presetId === 'table_visit_product') { anomalyTriggers.tableVisitProductMedium = r.medium; anomalyTriggers.tableVisitProductHigh = r.high; }
-                    if (r.presetId === 'table_visit_ratio') { anomalyTriggers.tableVisitRatioMedium = (r.medium || 50) / 100; anomalyTriggers.tableVisitRatioHigh = (r.high || 40) / 100; }
-                    if (r.presetId === 'bad_review') { anomalyTriggers.badReviewMedium = r.medium; anomalyTriggers.badReviewHigh = r.high; }
-                    if (r.presetId === 'recharge_streak') { anomalyTriggers.rechargeStreakHighDays = r.high; }
+                    const p = BI_ANOMALY_RULE_PRESETS.find(x => x.id === r.presetId);
+                    if (!p || !p.configKeys) continue;
+                    const mk = p.configKeys[0], hk = p.configKeys[1];
+                    if (mk) globalTriggers[mk] = p.isPercent ? (r.medium || 0) / 100 : r.medium;
+                    if (hk && hk !== mk) globalTriggers[hk] = p.isPercent ? (r.high || 0) / 100 : r.high;
+                    else if (hk === mk) globalTriggers[hk] = p.isPercent ? (r.high || 0) / 100 : r.high;
                 }
+                // 清理空的门店覆盖
+                const storeOv = {};
+                for (const [s, ov] of Object.entries(__BI_STORE_OVERRIDES || {})) {
+                    const cleaned = {};
+                    for (const [k, v] of Object.entries(ov || {})) { if (v != null && v !== '') cleaned[k] = v; }
+                    if (Object.keys(cleaned).length) storeOv[s] = cleaned;
+                }
+                const anomalyTriggers = { global: globalTriggers, storeOverrides: storeOv };
 
                 const config = { ...current, dataSources, anomalyRules, anomalyTriggers };
 
@@ -17594,29 +17664,33 @@ ${knowledgeContent.slice(0, 30000)}`;
                 const storeSel = document.getElementById('hr-rating-store');
                 if (storeSel) {
                     const stores = [];
-                    // 来源1: /api/stores
+                    const addStore = (n) => { const s = String(n || '').trim(); if (s && !stores.includes(s)) stores.push(s); };
+                    // 来源1: /api/stores → {items:[{name:...}]}
                     try {
                         if (storesResp?.ok) {
                             const sd = await storesResp.json();
-                            const storeList = Array.isArray(sd) ? sd : (Array.isArray(sd?.stores) ? sd.stores : []);
-                            storeList.forEach(s => { const n = s?.name || s; if (n && !stores.includes(n)) stores.push(n); });
+                            const storeList = Array.isArray(sd?.items) ? sd.items : (Array.isArray(sd) ? sd : (Array.isArray(sd?.stores) ? sd.stores : []));
+                            storeList.forEach(s => addStore(typeof s === 'string' ? s : s?.name));
                         }
                     } catch (e) {}
-                    // 来源2: /api/state
+                    // 来源2: /api/state → {data:{stores:["name1","name2"], employees:[{store:"..."}]}}
                     try {
                         if (stateResp?.ok) {
                             const stateData = await stateResp.json();
                             const st = stateData?.data || stateData || {};
-                            Object.values(st?.stores || {}).forEach(s => { if (s?.name && !stores.includes(s.name)) stores.push(s.name); });
-                            const emps = Array.isArray(st?.employees) ? st.employees : [];
-                            emps.forEach(e => { if (e?.store && !stores.includes(e.store)) stores.push(e.store); });
+                            const rawStores = st?.stores || {};
+                            if (Array.isArray(rawStores)) rawStores.forEach(s => addStore(typeof s === 'string' ? s : s?.name));
+                            else Object.values(rawStores).forEach(s => addStore(typeof s === 'string' ? s : s?.name));
+                            (Array.isArray(st?.employees) ? st.employees : []).forEach(e => addStore(e?.store));
                         }
                     } catch (e) {}
-                    // 来源3: 本地 hrmsState
+                    // 来源3: 本地 hrmsState / HRMS_STORE
                     try {
-                        const state = typeof hrmsState !== 'undefined' ? hrmsState : {};
-                        Object.values(state?.stores || {}).forEach(s => { if (s?.name && !stores.includes(s.name)) stores.push(s.name); });
-                        (Array.isArray(state?.employees) ? state.employees : []).forEach(e => { if (e?.store && !stores.includes(e.store)) stores.push(e.store); });
+                        const state = typeof hrmsState !== 'undefined' ? hrmsState : (typeof HRMS_STORE !== 'undefined' ? HRMS_STORE.ensure() : {});
+                        const ls = state?.stores || {};
+                        if (Array.isArray(ls)) ls.forEach(s => addStore(typeof s === 'string' ? s : s?.name));
+                        else Object.values(ls).forEach(s => addStore(typeof s === 'string' ? s : s?.name));
+                        (Array.isArray(state?.employees) ? state.employees : []).forEach(e => addStore(e?.store));
                     } catch (e) {}
                     storeSel.innerHTML = '<option value="">请选择门店</option>' + stores.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('');
                     if (!stores.length) {
@@ -21027,6 +21101,7 @@ ${knowledgeContent.slice(0, 30000)}`;
             const feedAgent = (document.getElementById('knowledge-upload-agent')?.value || '').trim();
             const brandId = normalizeBrandIdInput(document.getElementById('knowledge-upload-brand-id')?.value || 'all') || 'all';
             const audType = (document.getElementById('knowledge-upload-audience-type')?.value || '').trim();
+            const kbScope = (document.getElementById('knowledge-upload-scope')?.value || 'public').trim();
             const fileInput = document.getElementById('knowledge-upload-file');
             const statusEl = document.getElementById('knowledge-upload-file-status');
             const feedTags = getKnowledgeAgentTags(feedAgent);
@@ -21126,7 +21201,8 @@ ${knowledgeContent.slice(0, 30000)}`;
                             brandId,
                             tags: feedTags,
                             filePath: publicUrl,
-                            size
+                            size,
+                            scope: kbScope
                         });
 
                         setKnowledgeUploadBusy(false);
@@ -21145,6 +21221,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                         fd.append('feedAgent', feedAgent);
                         fd.append('brandId', brandId);
                         fd.append('tags', JSON.stringify(feedTags));
+                        fd.append('scope', kbScope);
                         fd.append('audienceType', String(audience.type || 'all'));
                         if (audience.type === 'store') fd.append('audienceStore', String(audience.store || ''));
                         if (audience.type === 'position') fd.append('audiencePosition', String(audience.position || ''));
@@ -21167,6 +21244,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                     fd.append('feedAgent', feedAgent);
                     fd.append('brandId', brandId);
                     fd.append('tags', JSON.stringify(feedTags));
+                    fd.append('scope', kbScope);
 
                     // Audience scope
                     fd.append('audienceType', String(audience.type || 'all'));

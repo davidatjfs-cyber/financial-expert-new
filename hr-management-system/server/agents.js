@@ -988,26 +988,52 @@ let BI_AGENT_CONFIG = {
     { key: 'loss_reports_bitable', enabled: true }
   ],
   anomalyTriggers: {
-    tableVisitProductMedium: 2,
-    tableVisitProductHigh: 4,
-    tableVisitRatioMedium: 0.5,
-    tableVisitRatioHigh: 0.4,
-    badReviewMedium: 1,
-    badReviewHigh: 2,
-    rechargeStreakHighDays: 2
+    global: {
+      revenueGapMedium: 0.10,
+      revenueGapHigh: 0.20,
+      efficiencyMedium: 1100,
+      efficiencyHigh: 1000,
+      marginMedium: 0.69,
+      marginHigh: 0.68,
+      tableVisitProductMedium: 2,
+      tableVisitProductHigh: 4,
+      tableVisitRatioMedium: 0.5,
+      tableVisitRatioHigh: 0.4,
+      badReviewMedium: 1,
+      badReviewHigh: 2,
+      rechargeStreakHighDays: 2
+    },
+    storeOverrides: {}
   }
 };
+
+// 获取门店级别的异常阈值，门店覆盖 > 全局默认
+function getStoreThreshold(storeName, key, fallback) {
+  const triggers = BI_AGENT_CONFIG?.anomalyTriggers || {};
+  const overrides = triggers.storeOverrides && typeof triggers.storeOverrides === 'object' ? triggers.storeOverrides : {};
+  const storeConfig = overrides[storeName];
+  if (storeConfig && storeConfig[key] !== undefined && storeConfig[key] !== null) {
+    return Number(storeConfig[key]);
+  }
+  const globalConfig = triggers.global && typeof triggers.global === 'object' ? triggers.global : {};
+  if (globalConfig[key] !== undefined && globalConfig[key] !== null) {
+    return Number(globalConfig[key]);
+  }
+  return fallback;
+}
 
 async function refreshBiAgentRuntimeConfig() {
   try {
     const remote = await getBiAgentConfig();
     if (remote && typeof remote === 'object') {
+      const remoteT = remote.anomalyTriggers || {};
+      const localT = BI_AGENT_CONFIG?.anomalyTriggers || {};
       BI_AGENT_CONFIG = {
         ...BI_AGENT_CONFIG,
         ...remote,
         anomalyTriggers: {
-          ...(BI_AGENT_CONFIG?.anomalyTriggers || {}),
-          ...(remote?.anomalyTriggers || {})
+          global: { ...(localT.global || {}), ...(remoteT.global || {}) },
+          storeOverrides: { ...(localT.storeOverrides || {}), ...(remoteT.storeOverrides || {}) }
         }
       };
     }
@@ -4211,14 +4237,6 @@ export async function runDataAuditor() {
   const enableDailyReports = isBiSourceEnabled('daily_reports');
   const enableTableVisit = isBiSourceEnabled('table_visit_records') || isBiSourceEnabled('table_visit_bitable');
   const enableBadReviews = isBiSourceEnabled('bad_reviews');
-  const triggers = BI_AGENT_CONFIG?.anomalyTriggers || {};
-  const productMedium = Math.max(1, Number(triggers.tableVisitProductMedium ?? 2));
-  const productHigh = Math.max(productMedium, Number(triggers.tableVisitProductHigh ?? 4));
-  const ratioMedium = Number(triggers.tableVisitRatioMedium ?? 0.5);
-  const ratioHigh = Number(triggers.tableVisitRatioHigh ?? 0.4);
-  const badReviewMedium = Math.max(1, Number(triggers.badReviewMedium ?? 1));
-  const badReviewHigh = Math.max(badReviewMedium, Number(triggers.badReviewHigh ?? 2));
-  const rechargeHighDays = Math.max(2, Number(triggers.rechargeStreakHighDays ?? 2));
   
   // 重新启用数据源质量检查（带错误处理）
   await checkDataSourceQuality();
@@ -4255,9 +4273,9 @@ export async function runDataAuditor() {
       .slice()
       .sort((a, b) => String(a?.date || '').localeCompare(String(b?.date || '')));
 
-    // 1) 实收营收异常（按月累计达成率 vs 理论达成率）
-    // 规则：每周一早上10点检查，比较当月1号到上周日的累计数据
-    // 达成率差值 >10% 为 medium, >20% 为 high
+    // 1) 实收营收异常 - 阈值从配置中心读取，支持门店级别覆盖
+    const revenueGapMedium = getStoreThreshold(storeName, 'revenueGapMedium', 0.10);
+    const revenueGapHigh = getStoreThreshold(storeName, 'revenueGapHigh', 0.20);
     if (enableDailyReports) {
       const ym = nowDate.slice(0, 7);
       const target = getMonthlyTarget(state, ym, storeName);
@@ -4281,8 +4299,8 @@ export async function runDataAuditor() {
       const theoryAchieveRate = daysPassed / monthDays;
       const gap = theoryAchieveRate - actualAchieveRate;
       
-      if (gap > 0.10) {
-        const severity = gap > 0.20 ? 'high' : 'medium';
+      if (gap > revenueGapMedium) {
+        const severity = gap > revenueGapHigh ? 'high' : 'medium';
         issues.push({
           agent: 'data_auditor', brand, store: storeName, category: '实收营收异常',
           severity,
@@ -4305,11 +4323,11 @@ export async function runDataAuditor() {
     }
     }
 
-    // 2) 人效值异常（按品牌）
-    // 洪潮: <1100为medium, <1000为high; 马己仙: <1400为medium, <1300为high
-    const efficiencyThresholds = brand.includes('马己仙')
-      ? { medium: 1400, high: 1300 }
-      : { medium: 1100, high: 1000 };
+    // 2) 人效值异常 - 阈值从配置中心读取，支持门店级别覆盖
+    const efficiencyThresholds = {
+      medium: getStoreThreshold(storeName, 'efficiencyMedium', 1100),
+      high: getStoreThreshold(storeName, 'efficiencyHigh', 1000)
+    };
 
     if (enableDailyReports) for (const report of reportsSorted) {
       const data = report?.data || {};
@@ -4334,7 +4352,8 @@ export async function runDataAuditor() {
       });
     }
 
-    // 3) 充值异常（单日无充值 / 连续2天无充值）
+    // 3) 充值异常 - 阈值从配置中心读取
+    const rechargeHighDays = Math.max(2, getStoreThreshold(storeName, 'rechargeStreakHighDays', 2));
     let rechargeStreak = 0;
     let prevDate = '';
     for (const report of reportsSorted) {
@@ -4368,8 +4387,9 @@ export async function runDataAuditor() {
       prevDate = reportDate;
     }
 
-    // 4) 桌访产品异常（同一产品7天内投诉检测）
-    // 规则: 1周内同一产品投诉>2次为medium, >4次为high
+    // 4) 桌访产品异常 - 阈值从配置中心读取
+    const productMedium = Math.max(1, getStoreThreshold(storeName, 'tableVisitProductMedium', 2));
+    const productHigh = Math.max(productMedium, getStoreThreshold(storeName, 'tableVisitProductHigh', 4));
     const productComplaints = tableVisitMetrics.dissatisfiedProducts;
     if (enableTableVisit) for (const [key, count] of productComplaints) {
       if (count >= productMedium) {
@@ -4385,8 +4405,9 @@ export async function runDataAuditor() {
       }
     }
 
-    // 5) 桌访占比异常（每周桌访占比）
-    // 规则: 桌访率<50%为medium, <40%为high; 数据来源: 堂食订单数
+    // 5) 桌访占比异常 - 阈值从配置中心读取
+    const ratioMedium = getStoreThreshold(storeName, 'tableVisitRatioMedium', 0.5);
+    const ratioHigh = getStoreThreshold(storeName, 'tableVisitRatioHigh', 0.4);
     const weekVisits = Array.from(tableVisitMetrics.countByDate.values()).reduce((s, n) => s + toNum(n, 0), 0);
     // 从营业日报获取堂食订单数作为总桌数
     const weekDineOrders = storeReports.reduce((s, r) => s + toNum(r?.data?.dine?.orders, 0), 0);
@@ -4406,8 +4427,9 @@ export async function runDataAuditor() {
       });
     }
 
-    // 6) 总实收毛利率异常（每周按品牌阈值）
-    // 马己仙: <64%为medium, <63%为high; 洪潮: <69%为medium, <68%为high
+    // 6) 总实收毛利率异常 - 阈值从配置中心读取，支持门店级别覆盖
+    const marginMedium = getStoreThreshold(storeName, 'marginMedium', 0.69);
+    const marginHigh = getStoreThreshold(storeName, 'marginHigh', 0.68);
     const marginMetrics = estimateMarginMetricsForRange({
       state,
       store: storeName,
@@ -4415,9 +4437,7 @@ export async function runDataAuditor() {
       endDate: nowDate
     });
     const totalMarginRate = toNum(marginMetrics?.total?.marginRate, 0);
-    const marginThresholds = brand.includes('马己仙')
-      ? { medium: 0.64, high: 0.63 }
-      : { medium: 0.69, high: 0.68 };
+    const marginThresholds = { medium: marginMedium, high: marginHigh };
     if (marginMetrics.total.actualRevenue > 0 && totalMarginRate < marginThresholds.medium) {
       issues.push({
         agent: 'data_auditor', brand, store: storeName, category: '总实收毛利率异常',
@@ -4433,8 +4453,9 @@ export async function runDataAuditor() {
       });
     }
 
-    // 7) 产品差评异常 / 服务差评异常（从差评报告DB检测，每周统计）
-    // 规则: 1周内1条差评为medium, 2条为high; 洪潮马己仙一样
+    // 7) 产品差评异常 / 服务差评异常 - 阈值从配置中心读取
+    const badReviewMedium = Math.max(1, getStoreThreshold(storeName, 'badReviewMedium', 1));
+    const badReviewHigh = Math.max(badReviewMedium, getStoreThreshold(storeName, 'badReviewHigh', 2));
     try {
       const day7Ago = new Date(now.getTime() - 7 * 86400000);
       const day7AgoDate = toDateOnly(day7Ago.toISOString());
@@ -4504,65 +4525,8 @@ export async function runDataAuditor() {
       // bad_reviews表可能不存在，忽略
     }
 
-    // 8) 收档得分异常（近7天平均得分<7分为medium, <5分为high）
-    try {
-      const closingTableId = String(BITABLE_CONFIGS?.closing_reports?.tableId || '').trim();
-      if (closingTableId) {
-        const cr = await pool().query(
-          `SELECT fields FROM feishu_generic_records WHERE table_id = $1 AND updated_at > NOW() - INTERVAL '8 days'`,
-          [closingTableId]
-        );
-        const storeClosings = (cr.rows || []).filter(row => {
-          const f = row.fields && typeof row.fields === 'object' ? row.fields : {};
-          return isLikelySameStore(String(f['门店'] || f['所属门店'] || ''), storeName);
-        });
-        if (storeClosings.length > 0) {
-          const scores = storeClosings.map(row => parseFloat(extractBitableFieldText(row.fields['档口收档平均得分']))).filter(n => !isNaN(n));
-          if (scores.length > 0) {
-            const avg = scores.reduce((a, b) => a + b, 0) / scores.length;
-            if (avg < 7) {
-              issues.push({
-                agent: 'data_auditor', brand, store: storeName, category: '收档得分异常',
-                severity: avg < 5 ? 'high' : 'medium',
-                title: `${storeName} 近7天收档平均得分偏低（${avg.toFixed(1)}分）`,
-                detail: `${scores.length}条收档记录，平均得分 ${avg.toFixed(1)}（medium:<7, high:<5）。`,
-                data: { date: nowDate, avgScore: Number(avg.toFixed(1)), recordCount: scores.length }
-              });
-            }
-          }
-        }
-      }
-    } catch (e) { /* ignore */ }
-
-    // 9) 原料收货异常（近7天有异常反馈记录则medium, ≥3条为high）
-    try {
-      const matTableIds = [BITABLE_CONFIGS?.material_hongchao?.tableId, BITABLE_CONFIGS?.material_majixian?.tableId].filter(Boolean);
-      if (matTableIds.length) {
-        const mr = await pool().query(
-          `SELECT fields FROM feishu_generic_records WHERE table_id = ANY($1) AND updated_at > NOW() - INTERVAL '8 days'`,
-          [matTableIds]
-        );
-        const storeMaterials = (mr.rows || []).filter(row => {
-          const f = row.fields && typeof row.fields === 'object' ? row.fields : {};
-          return isLikelySameStore(String(f['所属门店'] || f['门店'] || ''), storeName);
-        });
-        const abnormal = storeMaterials.filter(row => {
-          const f = row.fields || {};
-          const feedback = extractBitableFieldText(f['今日异常反馈'] || f['今天原料情况']);
-          return feedback && !/正常|无|没有/.test(feedback);
-        });
-        if (abnormal.length > 0) {
-          const matNames = abnormal.map(row => extractBitableFieldText(row.fields['异常原料名称'])).filter(Boolean);
-          issues.push({
-            agent: 'data_auditor', brand, store: storeName, category: '原料收货异常',
-            severity: abnormal.length >= 3 ? 'high' : 'medium',
-            title: `${storeName} 近7天${abnormal.length}条原料异常反馈`,
-            detail: `异常原料：${matNames.slice(0, 5).join('、') || '未标注'}。`,
-            data: { date: nowDate, abnormalCount: abnormal.length, materialNames: matNames.slice(0, 10) }
-          });
-        }
-      }
-    } catch (e) { /* ignore */ }
+    // 8) 收档得分异常 - 已按用户要求取消
+    // 9) 原料收货异常 - 已按用户要求取消
   }
 
   // Persist and return
@@ -4850,17 +4814,7 @@ export async function auditImage(imageUrl, auditType, context = {}) {
     auditId = r.rows?.[0]?.id || null;
   } catch (e) { console.error('[ops_supervisor] insert audit failed:', e?.message); }
 
-  // 如果审核失败，创建异常记录
-  if (result === 'fail') {
-    try {
-      await pool().query(
-        `INSERT INTO agent_issues (agent, brand, store, category, severity, title, detail, data, assignee_username)
-         VALUES ('ops_supervisor',$1,$2,'图片审核不合格','medium',$3,$4,$5::jsonb,$6)`,
-        [brand, store, `${store} 图片审核不合格（${auditType || '通用'}）`, findings,
-         JSON.stringify({ auditId, auditType, result, confidence, duplicateOf, clarity }), username]
-      );
-    } catch (e) {}
-  }
+  // 图片审核不合格异常记录 - 已按用户要求取消自动创建
 
   return { auditId, result, confidence, findings, duplicate: !!duplicateOf, imageHash, clarity };
 }

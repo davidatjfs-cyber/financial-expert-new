@@ -89,8 +89,6 @@ const DEFAULT_AGENTS = [
 ];
 
 const DEFAULT_RULES = [
-  { category: '桌访异常', assignee_role: 'store_production_manager', normal_deduction: 2, major_deduction: 5 },
-  { category: '桌访连续投诉', assignee_role: 'store_production_manager', normal_deduction: 5, major_deduction: 10 },
   { category: '桌访占比异常', assignee_role: 'store_manager', normal_deduction: 2, major_deduction: 5 },
   { category: '实收营收异常', assignee_role: 'store_manager', normal_deduction: 2, major_deduction: 5 },
   { category: '人效值异常', assignee_role: 'store_manager', normal_deduction: 2, major_deduction: 5 },
@@ -98,11 +96,11 @@ const DEFAULT_RULES = [
   { category: '总实收毛利率异常', assignee_role: 'store_production_manager', normal_deduction: 5, major_deduction: 10 },
   { category: '产品差评异常', assignee_role: 'store_production_manager', normal_deduction: 10, major_deduction: 15 },
   { category: '服务差评异常', assignee_role: 'store_manager', normal_deduction: 10, major_deduction: 15 },
-  { category: '图片审核不合格', assignee_role: 'store_production_manager', normal_deduction: 2, major_deduction: 5 },
-  { category: '原料收货异常', assignee_role: 'store_production_manager', normal_deduction: 5, major_deduction: 10 },
-  { category: '原料不满意', assignee_role: 'store_production_manager', normal_deduction: 5, major_deduction: 10 },
   { category: '桌访产品异常', assignee_role: 'store_production_manager', normal_deduction: 5, major_deduction: 10 }
 ];
+
+// 部署时需要从DB删除已移除的规则类别
+const REMOVED_RULE_CATEGORIES = ['图片审核不合格', '原料收货异常', '原料不满意', '桌访异常', '桌访连续投诉'];
 
 const DEFAULT_PROMPT_TEMPLATES = [
   { template_key: 'master_default_v1', agent_id: 'master', name: 'Master 默认模板', content: '你是 HRMS 系统的 Master Agent，负责调度和任务流转。', enabled: true, is_builtin: true },
@@ -147,7 +145,16 @@ function normalizeBiAnomalyDictionary(v) {
 const DEFAULT_EMPLOYEE_RATING_CONFIG = {
   levelLabels: { A: 'A', B: 'B', C: 'C', D: 'D' },
   execution: {
-    store_production_manager: { A_max_missing: 6, B_max_missing: 13, C_max_missing: 20, D_min_missing: 21 },
+    store_production_manager: {
+      hongchao: {
+        dataSources: ['收档报告DB', '开档报告', '洪潮原料收货日报'],
+        A_max_missing: 6, B_max_missing: 13, C_max_missing: 20, D_min_missing: 22
+      },
+      majixian: {
+        dataSources: ['收档报告DB', '开档报告', '马己仙原料收货日报'],
+        A_max_missing: 6, B_max_missing: 13, C_max_missing: 20, D_min_missing: 22
+      }
+    },
     store_manager: {
       hongchao: { A_min_new_members: 300, B_min_new_members: 249, C_min_new_members: 200, D_max_new_members: 199 },
       majixian: { low_score_threshold: 7, A_max_missing: 2, A_max_low_score: 2, B_max_missing: 4, B_max_low_score: 4, C_max_missing: 6, C_max_low_score: 6, D_min_missing: 7, D_min_low_score: 7 }
@@ -218,6 +225,24 @@ function normalizeOpsAgentConfig(cfg) {
   };
 }
 
+function normalizeBiAnomalyTriggers(raw) {
+  const defaults = DEFAULT_BI_AGENT_CONFIG.anomalyTriggers;
+  if (!raw || typeof raw !== 'object') return { ...defaults };
+  // 兼容旧的flat格式：如果没有global key，整个对象就是global
+  if (!raw.global && !raw.storeOverrides) {
+    return { global: { ...defaults.global, ...raw }, storeOverrides: { ...(defaults.storeOverrides || {}) } };
+  }
+  const global = { ...defaults.global, ...(raw.global || {}) };
+  const storeOverrides = {};
+  const rawOverrides = raw.storeOverrides && typeof raw.storeOverrides === 'object' ? raw.storeOverrides : {};
+  for (const [store, overrides] of Object.entries(rawOverrides)) {
+    if (overrides && typeof overrides === 'object') {
+      storeOverrides[store] = { ...overrides };
+    }
+  }
+  return { global, storeOverrides };
+}
+
 function normalizeBiAgentConfig(cfg) {
   const c = cfg && typeof cfg === 'object' ? cfg : {};
   const sourceMap = new Map((Array.isArray(c?.dataSources) ? c.dataSources : []).map((x) => [String(x?.key || '').trim(), x]));
@@ -235,10 +260,7 @@ function normalizeBiAgentConfig(cfg) {
         enabled: hit.enabled === undefined ? base.enabled : !!hit.enabled
       };
     }),
-    anomalyTriggers: {
-      ...DEFAULT_BI_AGENT_CONFIG.anomalyTriggers,
-      ...(c?.anomalyTriggers || {})
-    },
+    anomalyTriggers: normalizeBiAnomalyTriggers(c?.anomalyTriggers),
     anomalyDictionary: normalizeBiAnomalyDictionary(c?.anomalyDictionary)
   };
 }
@@ -257,13 +279,29 @@ export const DEFAULT_BI_AGENT_CONFIG = {
     { key: 'ops_checklist_bitable', label: '开-收档检查表（飞书）', sourceType: 'bitable', enabled: true }
   ],
   anomalyTriggers: {
-    tableVisitProductMedium: 2,
-    tableVisitProductHigh: 4,
-    tableVisitRatioMedium: 0.5,
-    tableVisitRatioHigh: 0.4,
-    badReviewMedium: 1,
-    badReviewHigh: 2,
-    rechargeStreakHighDays: 2
+    global: {
+      revenueGapMedium: 0.10,
+      revenueGapHigh: 0.20,
+      efficiencyMedium: 1100,
+      efficiencyHigh: 1000,
+      marginMedium: 0.69,
+      marginHigh: 0.68,
+      tableVisitProductMedium: 2,
+      tableVisitProductHigh: 4,
+      tableVisitRatioMedium: 0.5,
+      tableVisitRatioHigh: 0.4,
+      badReviewMedium: 1,
+      badReviewHigh: 2,
+      rechargeStreakHighDays: 2
+    },
+    storeOverrides: {
+      '马己仙上海音乐广场店': {
+        efficiencyMedium: 1400,
+        efficiencyHigh: 1300,
+        marginMedium: 0.64,
+        marginHigh: 0.63
+      }
+    }
   },
   anomalyDictionary: DEFAULT_RULES.map((r) => ({
     key: `rule_${String(r.category).replace(/[^a-zA-Z0-9\u4e00-\u9fa5]+/g, '_')}`,
@@ -561,6 +599,12 @@ export async function ensureAgentConfigTables() {
           [replyTemplateId, agent.agent_id]
         );
       }
+    }
+
+    // 删除已移除的规则类别
+    if (REMOVED_RULE_CATEGORIES.length) {
+      await pool().query(`DELETE FROM agent_rules WHERE category = ANY($1)`, [REMOVED_RULE_CATEGORIES]);
+      console.log('[AgentConfig] Removed deprecated rule categories:', REMOVED_RULE_CATEGORIES.join(', '));
     }
 
     // 初始化默认 Rule 数据
