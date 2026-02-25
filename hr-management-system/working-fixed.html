@@ -7922,6 +7922,12 @@
                             </div>
 
                             <div class="ui-form-group">
+                                <label class="ui-label">版本号</label>
+                                <input id="knowledge-upload-version" type="text" placeholder="例如: v1.0、2024Q1、第2版" style="width:100%;">
+                                <div class="ui-file-hint" style="margin-top: 4px;">可选，用于文件版本管理</div>
+                            </div>
+
+                            <div class="ui-form-group">
                                 <label class="ui-label">分发范围 <span class="req">*</span></label>
                                 <select id="knowledge-upload-audience-type" onchange="syncKnowledgeUploadFields()">
                                     <option value="all">全体员工</option>
@@ -8193,6 +8199,7 @@
                                             <th>姓名</th>
                                             <th>性别</th>
                                             <th>生日</th>
+                                            <th>年龄</th>
                                             <th>所属门店</th>
                                             <th>岗位</th>
                                             <th>工资</th>
@@ -8349,32 +8356,77 @@
             </div>
 
             <div id="agents-page" class="hidden">
-                <div class="page-header" style="display:flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap;">
+                <div class="page-header" style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
                     <div>
-                        <h2 style="margin: 0;">Agent 中心</h2>
-                        <div style="margin-top: 6px; color:#777; font-size: 12px;">统一管理 Agent 监控、规则、模板与 HR 评级模型</div>
-                    </div>
-                    <div style="display:flex; gap:10px; flex-wrap:wrap;">
-                        <button class="btn btn-secondary" id="btn-agents-monitor-main" onclick="openAgentMonitorModal()" style="background: linear-gradient(135deg, #0f766e, #0ea5a0);"><i>🤖</i> Agent监控</button>
-                        <button class="btn" id="btn-agents-config-main" onclick="openAgentConfigModal()" style="background: linear-gradient(135deg, #6366f1, #4f46e5); display:none;"><i>⚙️</i> Agent配置中心</button>
+                        <h2 style="margin:0;">Agent 中心</h2>
+                        <div style="margin-top:6px;color:#777;font-size:12px;">监控运营态势 · 配置智能规则</div>
                     </div>
                 </div>
-
-                <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px;">
-                    <div class="card">
-                        <div class="card-icon" style="background: linear-gradient(135deg, rgba(15,118,110,0.25), rgba(20,184,166,0.18));">📡</div>
-                        <h4 style="margin:0;">Agent监控</h4>
-                        <div style="margin-top:8px; color:#94a3b8; font-size:12px;">查看异常、绩效、审核、飞书消息与品牌态势。</div>
-                        <div style="margin-top:12px;"><button class="btn btn-secondary" onclick="openAgentMonitorModal()">打开监控台</button></div>
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px;">
+                    <div class="card" style="cursor:pointer;text-align:center;padding:16px 10px;" onclick="openAgentMonitorModal();setTimeout(()=>switchAmTab('overview'),100)">
+                        <div style="font-size:24px;margin-bottom:6px;">📡</div>
+                        <div style="font-size:13px;font-weight:600;color:#e2e8f0;">运营概览</div>
+                        <div style="font-size:11px;color:#64748b;margin-top:4px;">品牌态势总览</div>
                     </div>
-                    <div class="card">
-                        <div class="card-icon" style="background: linear-gradient(135deg, rgba(99,102,241,0.25), rgba(79,70,229,0.18));">🛠️</div>
-                        <h4 style="margin:0;">Agent配置</h4>
-                        <div style="margin-top:8px; color:#94a3b8; font-size:12px;">维护模型参数、责任规则、模板库与 HR 评级模型。</div>
-                        <div style="margin-top:12px;"><button class="btn" id="btn-agents-config-card" onclick="openAgentConfigModal()" style="display:none;">打开配置中心</button></div>
-                        <div id="agents-config-lock-tip" style="margin-top:10px; color:#f59e0b; font-size:12px; display:none;">仅管理员/总部营运可进入配置中心</div>
+                    <div class="card" style="cursor:pointer;text-align:center;padding:16px 10px;" onclick="openAgentMonitorModal();setTimeout(()=>switchAmTab('issues'),100)">
+                        <div style="font-size:24px;margin-bottom:6px;">🚨</div>
+                        <div style="font-size:13px;font-weight:600;color:#e2e8f0;">异常告警</div>
+                        <div style="font-size:11px;color:#64748b;margin-top:4px;">实时异常追踪</div>
+                    </div>
+                    <div class="card" style="cursor:pointer;text-align:center;padding:16px 10px;" onclick="openAgentMonitorModal();setTimeout(()=>switchAmTab('scores'),100)">
+                        <div style="font-size:24px;margin-bottom:6px;">📊</div>
+                        <div style="font-size:13px;font-weight:600;color:#e2e8f0;">绩效看板</div>
+                        <div style="font-size:11px;color:#64748b;margin-top:4px;">员工评分汇总</div>
+                    </div>
+                    <div class="card" style="cursor:pointer;text-align:center;padding:16px 10px;" onclick="openAgentMonitorModal();setTimeout(()=>switchAmTab('audits'),100)">
+                        <div style="font-size:24px;margin-bottom:6px;">🔍</div>
+                        <div style="font-size:13px;font-weight:600;color:#e2e8f0;">审核记录</div>
+                        <div style="font-size:11px;color:#64748b;margin-top:4px;">图片/视觉审核</div>
+                    </div>
+                    <div class="card" style="cursor:pointer;text-align:center;padding:16px 10px;" onclick="openAgentMonitorModal();setTimeout(()=>switchAmTab('messages'),100)">
+                        <div style="font-size:24px;margin-bottom:6px;">��</div>
+                        <div style="font-size:13px;font-weight:600;color:#e2e8f0;">消息日志</div>
+                        <div style="font-size:11px;color:#64748b;margin-top:4px;">Agent收发记录</div>
+                    </div>
+                    <div class="card" style="cursor:pointer;text-align:center;padding:16px 10px;" onclick="openAgentMonitorModal();setTimeout(()=>switchAmTab('users'),100)">
+                        <div style="font-size:24px;margin-bottom:6px;">👥</div>
+                        <div style="font-size:13px;font-weight:600;color:#e2e8f0;">飞书用户</div>
+                        <div style="font-size:11px;color:#64748b;margin-top:4px;">用户绑定管理</div>
                     </div>
                 </div>
+                <div id="agents-config-section" style="display:none;">
+                    <div style="font-size:13px;font-weight:700;color:#94a3b8;margin-bottom:10px;letter-spacing:.5px;">⚙️ 配置管理</div>
+                    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;">
+                        <div class="card" style="cursor:pointer;text-align:center;padding:14px 10px;" onclick="openAgentConfigModal();setTimeout(()=>switchAgentConfigTab('configs'),100)">
+                            <div style="font-size:20px;margin-bottom:4px;">🤖</div>
+                            <div style="font-size:12px;font-weight:600;color:#e2e8f0;">基础配置</div>
+                        </div>
+                        <div class="card" style="cursor:pointer;text-align:center;padding:14px 10px;" onclick="openAgentConfigModal();setTimeout(()=>switchAgentConfigTab('op_config'),100)">
+                            <div style="font-size:20px;margin-bottom:4px;">🔍</div>
+                            <div style="font-size:12px;font-weight:600;color:#e2e8f0;">OP巡检</div>
+                        </div>
+                        <div class="card" style="cursor:pointer;text-align:center;padding:14px 10px;" onclick="openAgentConfigModal();setTimeout(()=>switchAgentConfigTab('bi_config'),100)">
+                            <div style="font-size:20px;margin-bottom:4px;">📊</div>
+                            <div style="font-size:12px;font-weight:600;color:#e2e8f0;">BI规则</div>
+                        </div>
+                        <div class="card" style="cursor:pointer;text-align:center;padding:14px 10px;" onclick="openAgentConfigModal();setTimeout(()=>switchAgentConfigTab('rules'),100)">
+                            <div style="font-size:20px;margin-bottom:4px;">👤</div>
+                            <div style="font-size:12px;font-weight:600;color:#e2e8f0;">责任人规则</div>
+                        </div>
+                        <div class="card" style="cursor:pointer;text-align:center;padding:14px 10px;" onclick="openAgentConfigModal();setTimeout(()=>switchAgentConfigTab('templates'),100)">
+                            <div style="font-size:20px;margin-bottom:4px;">📝</div>
+                            <div style="font-size:12px;font-weight:600;color:#e2e8f0;">模板库</div>
+                        </div>
+                        <div class="card" style="cursor:pointer;text-align:center;padding:14px 10px;" onclick="openAgentConfigModal();setTimeout(()=>switchAgentConfigTab('hr_rating'),100)">
+                            <div style="font-size:20px;margin-bottom:4px;">⭐</div>
+                            <div style="font-size:12px;font-weight:600;color:#e2e8f0;">HR评级</div>
+                        </div>
+                    </div>
+                </div>
+                <div id="agents-config-lock-tip" style="display:none;"></div>
+                <button class="btn btn-secondary" id="btn-agents-monitor-main" style="display:none;" onclick="openAgentMonitorModal()">Agent监控</button>
+                <button class="btn" id="btn-agents-config-main" style="display:none;" onclick="openAgentConfigModal()">Agent配置中心</button>
+                <button class="btn" id="btn-agents-config-card" style="display:none;" onclick="openAgentConfigModal()">打开配置中心</button>
             </div>
 
             <div id="exam-page" class="hidden">
@@ -9792,8 +9844,20 @@
                         <input id="employee-form-joinDate" type="date" required style="width: 100%; padding: 12px;">
                     </div>
                     <div class="ui-form-group">
-                        <label class="ui-label">工资卡号</label>
-                        <input id="employee-form-bankCard" type="text" placeholder="银行卡号" style="width: 100%; padding: 12px;">
+                        <label class="ui-label">工资卡号公</label>
+                        <input id="employee-form-bankCardCompany" type="text" placeholder="工资卡号公" style="width: 100%; padding: 12px;">
+                    </div>
+                    <div class="ui-form-group">
+                        <label class="ui-label">工资银行公</label>
+                        <input id="employee-form-bankNameCompany" type="text" placeholder="工资银行公" style="width: 100%; padding: 12px;">
+                    </div>
+                    <div class="ui-form-group">
+                        <label class="ui-label">工资卡号私</label>
+                        <input id="employee-form-bankCardPersonal" type="text" placeholder="工资卡号私" style="width: 100%; padding: 12px;">
+                    </div>
+                    <div class="ui-form-group">
+                        <label class="ui-label">工资银行私</label>
+                        <input id="employee-form-bankNamePersonal" type="text" placeholder="工资银行私" style="width: 100%; padding: 12px;">
                     </div>
                     <div class="ui-form-group">
                         <label class="ui-label">电话</label>
@@ -15921,9 +15985,11 @@ ${r.approvalNote ? '审批备注：' + r.approvalNote : ''}
             const btnMain = document.getElementById('btn-agents-config-main');
             const btnCard = document.getElementById('btn-agents-config-card');
             const lockTip = document.getElementById('agents-config-lock-tip');
+            const cfgSection = document.getElementById('agents-config-section');
             if (btnMain) btnMain.style.display = canManageAgents ? '' : 'none';
             if (btnCard) btnCard.style.display = canManageAgents ? '' : 'none';
             if (lockTip) lockTip.style.display = canManageAgents ? 'none' : '';
+            if (cfgSection) cfgSection.style.display = canManageAgents ? '' : 'none';
         }
 
         function applyKnowledgeFiltersVisibility() {
@@ -16850,7 +16916,7 @@ ${knowledgeContent.slice(0, 30000)}`;
             'doubao-seed-2-0-pro-260215',
             'doubao-vision-pro-32k'
         ];
-        const OP_INSPECTION_TYPE_OPTIONS = ['opening', 'closing'];
+        const OP_INSPECTION_TYPE_OPTIONS = ['opening', 'closing', 'hygiene', 'food_safety', 'equipment', 'custom'];
         const OP_RANDOM_TYPE_OPTIONS = [
             { key: 'seafood_pool_temperature', label: '海鲜池温度' },
             { key: 'fridge_label_check', label: '冰箱标签检查' },
@@ -16886,8 +16952,11 @@ ${knowledgeContent.slice(0, 30000)}`;
 
         function getOpInspectionTypeSelectHtml(value, cls) {
             const v = String(value || 'opening').trim();
-            const label = { opening: '开市', closing: '收档' };
-            return `<select class="${cls}" style="width:100%; padding: 8px; border-radius: 6px; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.1); color: #fff;">${OP_INSPECTION_TYPE_OPTIONS.map((k)=>`<option value="${k}" ${k===v?'selected':''}>${label[k]||k}</option>`).join('')}</select>`;
+            const label = { opening: '开市', closing: '收档', hygiene: '卫生巡检', food_safety: '食安检查', equipment: '设备巡检', custom: '自定义…' };
+            const isCustom = !OP_INSPECTION_TYPE_OPTIONS.includes(v);
+            let opts = OP_INSPECTION_TYPE_OPTIONS.map((k)=>`<option value="${k}" ${k===v?'selected':''}>${label[k]||k}</option>`).join('');
+            if (isCustom) opts += `<option value="${v}" selected>${v}</option>`;
+            return `<select class="${cls}" style="width:100%; padding: 8px; border-radius: 6px; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.1); color: #fff;" onchange="if(this.value==='custom'){const n=prompt('请输入自定义巡检类型英文标识(如 fire_safety)');if(n){const o=document.createElement('option');o.value=n;o.text=n;o.selected=true;this.appendChild(o);}else{this.value='opening';}}">${opts}</select>`;
         }
 
         function getOpRandomTypeSelectHtml(value, cls) {
@@ -17009,6 +17078,10 @@ ${knowledgeContent.slice(0, 30000)}`;
                                     <input type="number" class="op-daily-custom-days" min="1" value="${Number(item.customIntervalDays || 1)}" placeholder="间隔天数" style="width:100%;padding:10px 12px;border-radius:8px;background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.1);color:#fff;font-size:13px;">
                                 </div>
                             </div>
+                            <div style="grid-column:span 2;">
+                                <label style="font-size:11px;color:#94a3b8;display:block;margin-bottom:4px;font-weight:600;">检查表链接（可选，留空则在聊天中回复）</label>
+                                <input class="op-daily-formurl" value="${item.formUrl || ''}" placeholder="https://xxx.feishu.cn/base/..." style="width:100%;padding:10px 12px;border-radius:8px;background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.1);color:#fff;font-size:13px;">
+                            </div>
                             <div style="display:flex;align-items:flex-end;">
                                 <button class="btn btn-secondary" onclick="this.closest('[data-checklist]').remove()" style="width:100%;padding:10px;border-radius:8px;background:rgba(239,68,68,0.15);color:#fca5a5;border:1px solid rgba(239,68,68,0.25);font-size:13px;">删除</button>
                             </div>
@@ -17094,6 +17167,10 @@ ${knowledgeContent.slice(0, 30000)}`;
                                 <input type="number" class="op-daily-custom-days" min="1" value="1" placeholder="间隔天数" style="width:100%;padding:10px 12px;border-radius:8px;background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.1);color:#fff;font-size:13px;">
                             </div>
                         </div>
+                        <div style="grid-column:span 2;">
+                            <label style="font-size:11px;color:#94a3b8;display:block;margin-bottom:4px;font-weight:600;">检查表链接（可选，留空则在聊天中回复）</label>
+                            <input class="op-daily-formurl" value="" placeholder="https://xxx.feishu.cn/base/..." style="width:100%;padding:10px 12px;border-radius:8px;background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.1);color:#fff;font-size:13px;">
+                        </div>
                         <div style="display:flex;align-items:flex-end;">
                             <button class="btn btn-secondary" onclick="this.closest('.am-card').remove()" style="width:100%;padding:10px;border-radius:8px;background:rgba(239,68,68,0.15);color:#fca5a5;border:1px solid rgba(239,68,68,0.25);font-size:13px;">删除</button>
                         </div>
@@ -17170,6 +17247,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                 const dailyCards = document.querySelectorAll('#op-config-daily-list > div');
                 const dailyInspections = Array.from(dailyCards).map(card => {
                     const store = String(card.querySelector('.op-daily-store')?.value || '').trim();
+                    const formUrl = String(card.querySelector('.op-daily-formurl')?.value || '').trim();
                     return {
                         store,
                         brand: getOpStoreBrandByName(store),
@@ -17177,7 +17255,8 @@ ${knowledgeContent.slice(0, 30000)}`;
                         time: card.querySelector('.op-daily-time').value,
                         frequency: String(card.querySelector('.op-daily-frequency')?.value || 'daily').trim(),
                         customIntervalDays: Number(card.querySelector('.op-daily-custom-days')?.value || 1),
-                        checklist: parseChecklistFromCard(card)
+                        checklist: parseChecklistFromCard(card),
+                        ...(formUrl ? { formUrl } : {})
                     };
                 }).filter(item => item.store && item.type && item.time);
                 
@@ -21102,6 +21181,7 @@ ${knowledgeContent.slice(0, 30000)}`;
             const brandId = normalizeBrandIdInput(document.getElementById('knowledge-upload-brand-id')?.value || 'all') || 'all';
             const audType = (document.getElementById('knowledge-upload-audience-type')?.value || '').trim();
             const kbScope = (document.getElementById('knowledge-upload-scope')?.value || 'public').trim();
+            const version = (document.getElementById('knowledge-upload-version')?.value || '').trim();
             const fileInput = document.getElementById('knowledge-upload-file');
             const statusEl = document.getElementById('knowledge-upload-file-status');
             const feedTags = getKnowledgeAgentTags(feedAgent);
@@ -21202,7 +21282,8 @@ ${knowledgeContent.slice(0, 30000)}`;
                             tags: feedTags,
                             filePath: publicUrl,
                             size,
-                            scope: kbScope
+                            scope: kbScope,
+                            version: version || undefined
                         });
 
                         setKnowledgeUploadBusy(false);
@@ -21222,6 +21303,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                         fd.append('brandId', brandId);
                         fd.append('tags', JSON.stringify(feedTags));
                         fd.append('scope', kbScope);
+                        if (version) fd.append('version', version);
                         fd.append('audienceType', String(audience.type || 'all'));
                         if (audience.type === 'store') fd.append('audienceStore', String(audience.store || ''));
                         if (audience.type === 'position') fd.append('audiencePosition', String(audience.position || ''));
@@ -21245,6 +21327,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                     fd.append('brandId', brandId);
                     fd.append('tags', JSON.stringify(feedTags));
                     fd.append('scope', kbScope);
+                    if (version) fd.append('version', version);
 
                     // Audience scope
                     fd.append('audienceType', String(audience.type || 'all'));
@@ -24555,6 +24638,8 @@ ${knowledgeContent.slice(0, 30000)}`;
                 const salary = (salaryRaw === null || salaryRaw === undefined || salaryRaw === '') ? '-' : String(salaryRaw);
                 const gender = String(emp.gender || '').trim() || '-';
                 const birthday = String(emp.birthday || '').trim() || '-';
+                const age = empCalcAgeFromBirthday(emp?.birthday);
+                const ageDisp = age !== null ? `${age}岁` : '-';
                 const mgrU = String(emp.managerUsername || '').trim();
                 let mgrDisp = '-';
                 if (mgrU) {
@@ -24580,6 +24665,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                     <td>${name}${newBadge}${coreTalentBadge}</td>
                     <td>${gender}</td>
                     <td>${birthday}</td>
+                    <td>${ageDisp}</td>
                     <td>${store}</td>
                     <td>${pos}</td>
                     <td>${salary}</td>
@@ -24623,6 +24709,8 @@ ${knowledgeContent.slice(0, 30000)}`;
                         const salary = (salaryRaw === null || salaryRaw === undefined || salaryRaw === '') ? '-' : String(salaryRaw);
                         const gender = String(emp.gender || '').trim() || '-';
                         const birthday = String(emp.birthday || '').trim() || '-';
+                        const ageM = empCalcAgeFromBirthday(emp?.birthday);
+                        const ageDispM = ageM !== null ? `${ageM}岁` : '-';
                         const role = String(roleLabels[emp.role] || emp.role || '-');
                         const st = String(statusText[emp.status] || emp.status || '-');
                         const statusBadge = st === '在职' ? '在职' : (st === '离职' ? '离职' : st);
@@ -24667,6 +24755,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                                     <div class="emp-card-grid">
                                         <div class="emp-card-item"><div class="k">性别</div><div class="v">${escapeHtml(gender)}</div></div>
                                         <div class="emp-card-item"><div class="k">生日</div><div class="v">${escapeHtml(birthday)}</div></div>
+                                        <div class="emp-card-item"><div class="k">年龄</div><div class="v">${escapeHtml(ageDispM)}</div></div>
                                         <div class="emp-card-item"><div class="k">工资</div><div class="v">${escapeHtml(salary)}</div></div>
                                         <div class="emp-card-item"><div class="k">部门</div><div class="v">${escapeHtml(dept)}</div></div>
                                         <div class="emp-card-item"><div class="k">级别</div><div class="v">${escapeHtml(level)}</div></div>
@@ -24913,7 +25002,10 @@ ${knowledgeContent.slice(0, 30000)}`;
             const salaryEl = document.getElementById('employee-form-salary');
             const educationEl = document.getElementById('employee-form-education');
             const joinDateEl = document.getElementById('employee-form-joinDate');
-            const bankCardEl = document.getElementById('employee-form-bankCard');
+            const bankCardCompanyEl = document.getElementById('employee-form-bankCardCompany');
+            const bankNameCompanyEl = document.getElementById('employee-form-bankNameCompany');
+            const bankCardPersonalEl = document.getElementById('employee-form-bankCardPersonal');
+            const bankNamePersonalEl = document.getElementById('employee-form-bankNamePersonal');
             const phoneEl = document.getElementById('employee-form-phone');
             const emailEl = document.getElementById('employee-form-email');
             const ecNameEl = document.getElementById('employee-form-emergencyContactName');
@@ -25082,7 +25174,10 @@ ${knowledgeContent.slice(0, 30000)}`;
                 if (salaryEl) salaryEl.value = emp.salary === null || emp.salary === undefined ? '' : String(emp.salary);
                 if (educationEl) educationEl.value = String(emp.education || '');
                 if (joinDateEl) joinDateEl.value = String(emp.joinDate || '');
-                if (bankCardEl) bankCardEl.value = String(emp.bankCard || '');
+                if (bankCardCompanyEl) bankCardCompanyEl.value = String(emp.bankCardCompany || '');
+                if (bankNameCompanyEl) bankNameCompanyEl.value = String(emp.bankNameCompany || '');
+                if (bankCardPersonalEl) bankCardPersonalEl.value = String(emp.bankCardPersonal || emp.bankCard || '');
+                if (bankNamePersonalEl) bankNamePersonalEl.value = String(emp.bankNamePersonal || '');
                 if (phoneEl) phoneEl.value = String(emp.phone || '');
                 if (emailEl) emailEl.value = String(emp.email || '');
                 if (ecNameEl) ecNameEl.value = String(emp.emergencyContactName || '');
@@ -25181,7 +25276,10 @@ ${knowledgeContent.slice(0, 30000)}`;
                 if (salaryEl) salaryEl.value = '';
                 if (educationEl) educationEl.value = '';
                 if (joinDateEl) joinDateEl.value = '';
-                if (bankCardEl) bankCardEl.value = '';
+                if (bankCardCompanyEl) bankCardCompanyEl.value = '';
+                if (bankNameCompanyEl) bankNameCompanyEl.value = '';
+                if (bankCardPersonalEl) bankCardPersonalEl.value = '';
+                if (bankNamePersonalEl) bankNamePersonalEl.value = '';
                 if (phoneEl) phoneEl.value = '';
                 if (emailEl) emailEl.value = '';
                 if (ecNameEl) ecNameEl.value = '';
@@ -25234,7 +25332,10 @@ ${knowledgeContent.slice(0, 30000)}`;
             if (salaryEl) salaryEl.disabled = lock;
             if (educationEl) educationEl.disabled = lock;
             if (joinDateEl) joinDateEl.disabled = lock;
-            if (bankCardEl) bankCardEl.disabled = lock;
+            if (bankCardCompanyEl) bankCardCompanyEl.disabled = lock;
+            if (bankNameCompanyEl) bankNameCompanyEl.disabled = lock;
+            if (bankCardPersonalEl) bankCardPersonalEl.disabled = lock;
+            if (bankNamePersonalEl) bankNamePersonalEl.disabled = lock;
             if (phoneEl) phoneEl.disabled = lock;
             if (emailEl) emailEl.disabled = lock;
             if (ecNameEl) ecNameEl.disabled = lock;
@@ -25457,7 +25558,10 @@ ${knowledgeContent.slice(0, 30000)}`;
             const salaryEl = document.getElementById('employee-form-salary');
             const educationEl = document.getElementById('employee-form-education');
             const joinDateEl = document.getElementById('employee-form-joinDate');
-            const bankCardEl = document.getElementById('employee-form-bankCard');
+            const bankCardCompanyEl = document.getElementById('employee-form-bankCardCompany');
+            const bankNameCompanyEl = document.getElementById('employee-form-bankNameCompany');
+            const bankCardPersonalEl = document.getElementById('employee-form-bankCardPersonal');
+            const bankNamePersonalEl = document.getElementById('employee-form-bankNamePersonal');
             const phoneEl = document.getElementById('employee-form-phone');
             const emailEl = document.getElementById('employee-form-email');
             const ecNameEl = document.getElementById('employee-form-emergencyContactName');
@@ -25501,7 +25605,11 @@ ${knowledgeContent.slice(0, 30000)}`;
             const level = String(levelEl?.value || '').trim();
             let managerUsername = String(managerEl?.value || '').trim();
             const joinDate = String(joinDateEl?.value || '').trim();
-            const bankCard = String(bankCardEl?.value || '').trim();
+            const bankCardCompany = String(bankCardCompanyEl?.value || '').trim();
+            const bankNameCompany = String(bankNameCompanyEl?.value || '').trim();
+            const bankCardPersonal = String(bankCardPersonalEl?.value || '').trim();
+            const bankNamePersonal = String(bankNamePersonalEl?.value || '').trim();
+            const bankCard = bankCardPersonal;
             const phone = String(phoneEl?.value || '').trim();
             const email = String(emailEl?.value || '').trim();
             const education = String(educationEl?.value || '').trim();
@@ -25599,7 +25707,7 @@ ${knowledgeContent.slice(0, 30000)}`;
 
             if (isStoreMgrCreate) {
                 const pwd = passwordInput || '123456';
-                const employee = { id, username, name, password: pwd, gender, birthday, idCardNumber, hometown, registeredResidence, maritalStatus, wechat, store, role, department, position, level, managerUsername, salary, education, bankCard, emergencyContactName, emergencyContactPhone, emergencyContactRelation, idCardFrontUrl, idCardBackUrl, joinDate, phone, email, coreTalent };
+                const employee = { id, username, name, password: pwd, gender, birthday, idCardNumber, hometown, registeredResidence, maritalStatus, wechat, store, role, department, position, level, managerUsername, salary, education, bankCardCompany, bankNameCompany, bankCardPersonal, bankNamePersonal, bankCard, emergencyContactName, emergencyContactPhone, emergencyContactRelation, idCardFrontUrl, idCardBackUrl, joinDate, phone, email, coreTalent };
                 HRMS_API.createApproval('onboarding', { employee })
                     .then(() => {
                         closeEmployeeFormModal();
@@ -25632,10 +25740,10 @@ ${knowledgeContent.slice(0, 30000)}`;
                 }
                 const old = employees[idx] || {};
                 const nextPwd = passwordInput ? passwordInput : (old.password || '');
-                employees[idx] = { ...old, id, username, name, password: nextPwd, gender, birthday, idCardNumber, hometown, registeredResidence, maritalStatus, wechat, store, role, department, position, level, managerUsername, salary, education, bankCard, emergencyContactName, emergencyContactPhone, emergencyContactRelation, idCardFrontUrl, idCardBackUrl, joinDate, phone, email, status, coreTalent };
+                employees[idx] = { ...old, id, username, name, password: nextPwd, gender, birthday, idCardNumber, hometown, registeredResidence, maritalStatus, wechat, store, role, department, position, level, managerUsername, salary, education, bankCardCompany, bankNameCompany, bankCardPersonal, bankNamePersonal, bankCard, emergencyContactName, emergencyContactPhone, emergencyContactRelation, idCardFrontUrl, idCardBackUrl, joinDate, phone, email, status, coreTalent };
             } else {
                 const pwd = passwordInput || '123456';
-                employees.push({ id, username, name, password: pwd, gender, birthday, idCardNumber, hometown, registeredResidence, maritalStatus, wechat, store, role, department, position, level, managerUsername, salary, education, bankCard, emergencyContactName, emergencyContactPhone, emergencyContactRelation, idCardFrontUrl, idCardBackUrl, joinDate, phone, email, status, coreTalent, promotionHistory: [], createdAt: new Date().toISOString().slice(0, 10), lastLogin: null });
+                employees.push({ id, username, name, password: pwd, gender, birthday, idCardNumber, hometown, registeredResidence, maritalStatus, wechat, store, role, department, position, level, managerUsername, salary, education, bankCardCompany, bankNameCompany, bankCardPersonal, bankNamePersonal, bankCard, emergencyContactName, emergencyContactPhone, emergencyContactRelation, idCardFrontUrl, idCardBackUrl, joinDate, phone, email, status, coreTalent, promotionHistory: [], createdAt: new Date().toISOString().slice(0, 10), lastLogin: null });
             }
 
             HRMS_STORE.setEmployees(employees);
@@ -26508,8 +26616,12 @@ ${knowledgeContent.slice(0, 30000)}`;
                 '工资': 'salary',
                 '学历': 'education',
                 '入职日期': 'joinDate',
-                '工资卡号': 'bankCard',
-                '银行卡号': 'bankCard',
+                '工资卡号公': 'bankCardCompany',
+                '工资银行公': 'bankNameCompany',
+                '工资卡号私': 'bankCardPersonal',
+                '工资银行私': 'bankNamePersonal',
+                '工资卡号': 'bankCardPersonal',
+                '银行卡号': 'bankCardPersonal',
                 '电话': 'phone',
                 '手机号': 'phone',
                 '邮箱': 'email',
@@ -26536,7 +26648,7 @@ ${knowledgeContent.slice(0, 30000)}`;
         }
 
         function hrmsImportEmployeesFromCsvObjects(objs) {
-            const templateHeaders = ['username', 'password', 'name', 'gender', 'birthday', 'idCardNumber', 'hometown', 'registeredResidence', 'maritalStatus', 'wechat', 'role', 'store', 'managerUsername', 'department', 'position', 'level', 'salary', 'education', 'joinDate', 'bankCard', 'phone', 'email', 'emergencyContactName', 'emergencyContactPhone', 'emergencyContactRelation', 'status', 'id'];
+            const templateHeaders = ['username', 'password', 'name', 'gender', 'birthday', 'idCardNumber', 'hometown', 'registeredResidence', 'maritalStatus', 'wechat', 'role', 'store', 'managerUsername', 'department', 'position', 'level', 'salary', 'education', 'joinDate', 'bankCardCompany', 'bankNameCompany', 'bankCardPersonal', 'bankNamePersonal', 'bankCard', 'phone', 'email', 'emergencyContactName', 'emergencyContactPhone', 'emergencyContactRelation', 'status', 'id'];
             const employees = HRMS_STORE.getEmployees();
             const byUsername = new Map((employees || []).map(e => [String(e?.username || ''), e]));
             let added = 0;
@@ -26557,6 +26669,8 @@ ${knowledgeContent.slice(0, 30000)}`;
                     const n = Number(next.salary);
                     next.salary = Number.isFinite(n) ? n : '';
                 }
+                if (!next.bankCardPersonal && next.bankCard) next.bankCardPersonal = next.bankCard;
+                if (!next.bankCard) next.bankCard = next.bankCardPersonal;
 
                 if (!next.id) next.id = hrmsGenerateEmployeeId();
                 if (!next.password) next.password = '123456';
@@ -26577,7 +26691,7 @@ ${knowledgeContent.slice(0, 30000)}`;
         }
 
         function hrmsImportUsersFromCsvObjects(objs) {
-            const templateHeaders = ['username', 'password', 'name', 'gender', 'birthday', 'idCardNumber', 'hometown', 'registeredResidence', 'maritalStatus', 'wechat', 'role', 'store', 'managerUsername', 'department', 'position', 'level', 'salary', 'education', 'joinDate', 'bankCard', 'phone', 'email', 'emergencyContactName', 'emergencyContactPhone', 'emergencyContactRelation', 'status'];
+            const templateHeaders = ['username', 'password', 'name', 'gender', 'birthday', 'idCardNumber', 'hometown', 'registeredResidence', 'maritalStatus', 'wechat', 'role', 'store', 'managerUsername', 'department', 'position', 'level', 'salary', 'education', 'joinDate', 'bankCardCompany', 'bankNameCompany', 'bankCardPersonal', 'bankNamePersonal', 'bankCard', 'phone', 'email', 'emergencyContactName', 'emergencyContactPhone', 'emergencyContactRelation', 'status'];
             const users = HRMS_STORE.getUsers();
             const byUname = new Map((users || []).map(u => [String(u?.username || ''), u]));
             let added = 0;
@@ -26596,6 +26710,8 @@ ${knowledgeContent.slice(0, 30000)}`;
                     const n = Number(next.salary);
                     next.salary = Number.isFinite(n) ? n : '';
                 }
+                if (!next.bankCardPersonal && next.bankCard) next.bankCardPersonal = next.bankCard;
+                if (!next.bankCard) next.bankCard = next.bankCardPersonal;
 
                 if (byUname.has(username)) {
                     const old = byUname.get(username) || {};

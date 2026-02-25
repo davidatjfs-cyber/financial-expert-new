@@ -17,10 +17,12 @@ import { Readable } from 'stream';
 import zlib from 'zlib';
 import XLSX from 'xlsx';
 import axios from 'axios';
-import { setPool as setAgentPool, ensureAgentTables, registerAgentRoutes, startAgentScheduler, setTaskResponseHook, startBitablePolling, startScheduledTasks } from './agents.js';
+import { setPool as setAgentPool, ensureAgentTables, registerAgentRoutes, startAgentScheduler, setTaskResponseHook, startBitablePolling, startScheduledTasks, assertCriticalFunctions, getAgentHealthStatus, startWeeklyReportScheduler, sendWeeklyReports } from './agents.js';
 import { ensureAgentConfigTables, registerAgentConfigRoutes } from "./agent-config-manager.js";
 
 import { setMasterPool, ensureMasterTables, startMasterAgent, registerMasterRoutes, handleTaskResponse } from './master-agent.js';
+import { setReportPool, generateWeeklyReport, formatReportMarkdown } from './bi-weekly-report.js';
+import { setSalesRawPool, parseSalesRawRows, insertSalesRawRows } from './sales-raw-upload.js';
 import { startDailyFeishuSync } from './feishu-sync.js';
 import { calculateStoreRating, calculateEmployeeScore } from './new-scoring-model.js';
 import { registerNewScoringRoutes } from './new-scoring-api.js';
@@ -7309,6 +7311,41 @@ app.post('/api/reports/inventory-forecast/history/upload-image', authRequired, u
   });
 });
 
+// ─── Sales Raw Upload ───
+app.post('/api/reports/sales-raw/upload', authRequired, upload.single('file'), async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const role = String(req.user?.role || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  if (!canAccessAnalyticsReports(role)) return res.status(403).json({ error: 'forbidden' });
+  try {
+    const qStore = String(req.body?.store || '').trim();
+    if (!qStore) return res.status(400).json({ error: 'missing_store', message: '请指定门店名称' });
+    const selBiz = normalizeForecastBizType(req.body?.bizType) || '';
+    if (!selBiz) return res.status(400).json({ error: 'invalid_biz_type', message: '请选择业务类型（外卖/堂食）' });
+    const file = req.file || null;
+    if (!file?.path) return res.status(400).json({ error: 'missing_file' });
+    const fallbackDate = inferForecastUploadDateFromFilename(String(file.originalname || ''));
+    let parsed = [];
+    const wb = XLSX.readFile(file.path, { raw: false });
+    for (const sn of (wb.SheetNames || [])) {
+      const ws = wb.Sheets[sn]; if (!ws) continue;
+      const mx = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' });
+      console.log(`[sales-raw] sheet "${sn}" ${mx.length} rows`);
+      const out = parseSalesRawRows(mx, selBiz, qStore, { fallbackDate });
+      if (out.length) { parsed = out; break; }
+    }
+    if (!parsed.length) return res.status(400).json({ error: 'no_valid_rows', message: '未识别到有效销售明细，请确保包含菜品名称、销售数量等列' });
+    parsed.forEach(r => { r.biz_type = selBiz; r.store = qStore; });
+    const dates = [...new Set(parsed.map(r => r.date).filter(Boolean))].sort();
+    const ret = await insertSalesRawRows(parsed, qStore, selBiz, dates[0], dates[dates.length - 1]);
+    return res.json({ ok: true, store: qStore, bizType: selBiz, dateRange: `${dates[0]}~${dates[dates.length-1]}`, rows: parsed.length, ...ret });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e).slice(0, 300) });
+  } finally {
+    try { if (req.file?.path) fs.unlinkSync(req.file.path); } catch (e) {}
+  }
+});
+
 // ─── Core Products Management ───
 app.get('/api/reports/inventory-forecast/core-products', authRequired, async (req, res) => {
   const username = String(req.user?.username || '').trim();
@@ -9019,7 +9056,9 @@ app.get('/api/health', async (req, res) => {
     const ossConfigured = !!getOssClient();
     const cosConfigured = !!getCosClient();
     const uploads = ensureUploadsDir();
-    return res.json({ ok: true, now: new Date().toISOString(), storage: { ossConfigured, cosConfigured }, uploads });
+    let agentHealth = {};
+    try { agentHealth = getAgentHealthStatus(); } catch (e) {}
+    return res.json({ ok: true, now: new Date().toISOString(), storage: { ossConfigured, cosConfigured }, uploads, agents: agentHealth });
   } catch (e) {
     return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
@@ -9628,7 +9667,7 @@ app.get('/api/knowledge', authRequired, async (req, res) => {
     const qBrand = buildKnowledgeBrandScopeTag(req.query?.brandId || req.query?.brandScope || 'all');
     const withBrandFilter = qBrand && qBrand !== 'brand:all';
     const r = await pool.query(
-      `select id, title, category, tags, scope, file_path, file_type, file_size, access_roles, access_departments, created_by, created_at, updated_at
+      `select id, title, category, tags, scope, file_path, file_type, file_size, access_roles, access_departments, created_by, version, created_at, updated_at
        from knowledge_base
        ${withBrandFilter ? 'where tags @> $1::text[] or tags @> ARRAY[\'brand:all\']::text[]' : ''}
        order by created_at desc`,
@@ -9757,6 +9796,7 @@ app.post('/api/knowledge/direct', authRequired, async (req, res) => {
   const tags = normalizeKnowledgeTags(req.body?.tags, feedAgent, brandScopeTag);
   const filePath = String(req.body?.filePath || '').trim();
   const size = Number(req.body?.size || 0);
+  const version = String(req.body?.version || '').trim() || null;
 
   if (!title) return res.status(400).json({ error: 'missing_title' });
   if (!category) return res.status(400).json({ error: 'missing_category' });
@@ -9766,10 +9806,10 @@ app.post('/api/knowledge/direct', authRequired, async (req, res) => {
     const createdBy = normalizeCreatedByUuid(req.user?.id);
     const kbScope = ['public','business','sensitive'].includes(req.body?.scope) ? req.body.scope : 'public';
     const r = await pool.query(
-      `insert into knowledge_base (title, content, category, tags, file_path, file_type, file_size, access_roles, access_departments, created_by, scope)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-       returning id, title, category, tags, scope, file_path, file_type, file_size, access_roles, access_departments, created_by, created_at, updated_at`,
-      [title, '', category || null, tags, filePath, fileType || null, size || null, null, null, createdBy, kbScope]
+      `insert into knowledge_base (title, content, category, tags, file_path, file_type, file_size, access_roles, access_departments, created_by, scope, version)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+       returning id, title, category, tags, scope, file_path, file_type, file_size, access_roles, access_departments, created_by, version, created_at, updated_at`,
+      [title, '', category || null, tags, filePath, fileType || null, size || null, null, null, createdBy, kbScope, version]
     );
     return res.json({ item: r.rows?.[0] || null });
   } catch (e) {
@@ -9789,6 +9829,7 @@ app.post('/api/knowledge', authRequired, knowledgeUpload.single('file'), async (
   const tags = normalizeKnowledgeTags(req.body?.tags, feedAgent, brandScopeTag);
   const fileType = String(req.body?.type || '').trim() || String(req.file?.mimetype || '').trim();
   const size = Number(req.file?.size || 0);
+  const version = String(req.body?.version || '').trim() || null;
   if (!title) return res.status(400).json({ error: 'missing_title' });
   if (!category) return res.status(400).json({ error: 'missing_category' });
   if (!req.file) return res.status(400).json({ error: 'missing_file' });
@@ -9802,10 +9843,10 @@ app.post('/api/knowledge', authRequired, knowledgeUpload.single('file'), async (
     const createdBy = normalizeCreatedByUuid(req.user?.id);
     const kbScope = ['public','business','sensitive'].includes(req.body?.scope) ? req.body.scope : 'public';
     const r = await pool.query(
-      `insert into knowledge_base (title, content, category, tags, file_path, file_type, file_size, access_roles, access_departments, created_by, scope)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-       returning id, title, category, tags, scope, file_path, file_type, file_size, access_roles, access_departments, created_by, created_at, updated_at`,
-      [title, '', category || null, tags, filePath, fileType || null, size || null, null, null, createdBy, kbScope]
+      `insert into knowledge_base (title, content, category, tags, file_path, file_type, file_size, access_roles, access_departments, created_by, scope, version)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+       returning id, title, category, tags, scope, file_path, file_type, file_size, access_roles, access_departments, created_by, version, created_at, updated_at`,
+      [title, '', category || null, tags, filePath, fileType || null, size || null, null, null, createdBy, kbScope, version]
     );
     inserted = r.rows?.[0] || null;
   } catch (e) {
@@ -10746,7 +10787,10 @@ app.listen(PORT, HOST, async () => {
   try {
     // Runtime migration: 企微会员新增字段（避免旧库缺字段导致评分数据源为空）
     await pool.query(`ALTER TABLE daily_reports ADD COLUMN IF NOT EXISTS new_wechat_members INTEGER DEFAULT 0`);
+    // Runtime migration: 知识库文件版本号
+    await pool.query(`ALTER TABLE knowledge_base ADD COLUMN IF NOT EXISTS version VARCHAR(50) DEFAULT NULL`);
     await ensureAgentTables();
+    assertCriticalFunctions();
     startAgentScheduler();
     console.log('[agents] Multi-agent system initialized');
 
@@ -10757,6 +10801,8 @@ app.listen(PORT, HOST, async () => {
 
     // Initialize Master Agent orchestration
     setMasterPool(pool);
+    setReportPool(pool);
+    setSalesRawPool(pool);
     setTaskResponseHook(handleTaskResponse);
     await ensureMasterTables();
     startMasterAgent();
@@ -10775,6 +10821,9 @@ app.listen(PORT, HOST, async () => {
     // Start Feishu daily sync
     startDailyFeishuSync();
     console.log('[feishu] Daily sync scheduler started');
+
+    // Weekly BI report (Monday 10:00 CST)
+    startWeeklyReportScheduler();
   } catch (e) {
     console.error('[agents] init failed:', e?.message || e);
   }

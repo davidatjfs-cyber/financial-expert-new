@@ -1,0 +1,635 @@
+let _pool = null;
+export function setReportPool(p) { _pool = p; }
+function pool() { if (!_pool) throw new Error('bi-weekly-report: pool not set'); return _pool; }
+
+const EXCLUDE_DISHES_EXACT = [
+  '打包盒','打包袋','餐具费','米饭','白米饭','赠品','饮品','赠品生日面',
+  '咸蛋','烧鹅头','烧鸭头','咖喱鱼蛋','鹅颈',
+  '腊味煲仔饭','肉饼蒸膏蟹','白灼基围虾','汤圆','赠-桂花姜汤番薯糖水',
+  '莲藕发菜猪手','北菇扒菜胆','清蒸老虎斑','点评抽奖-港式柠檬茶（冰）','五指毛桃炖老鸡'
+];
+const EXCLUDE_DISH_PATTERNS = ['赠', '饮品', '饮料', '点评抽奖'];
+const WEEKDAY_CN = {1:"周一",2:"周二",3:"周三",4:"周四",5:"周五",6:"周六",7:"周日"};
+const BIZ_TYPES = ['dinein', 'takeaway'];
+const BIZ_CN = { dinein: '堂食', takeaway: '外卖' };
+const SLOT_TYPES = ['lunch', 'afternoon', 'dinner'];
+const SLOT_CN = { lunch: '午市', afternoon: '下午茶', dinner: '晚市', other: '其他时段' };
+
+// 门店级配置：哪些门店没有外卖业务
+const STORE_NO_TAKEAWAY = new Set(['洪潮大宁久光店']);
+
+const BIZ_NORMALIZE_SQL = `
+  CASE
+    WHEN lower(regexp_replace(COALESCE(s.biz_type, ''), '\\s+', '', 'g')) IN ('takeaway','delivery','外卖','外送') THEN 'takeaway'
+    WHEN lower(regexp_replace(COALESCE(s.biz_type, ''), '\\s+', '', 'g')) IN ('dinein','堂食','店内','堂食点餐') THEN 'dinein'
+    ELSE lower(regexp_replace(COALESCE(s.biz_type, ''), '\\s+', '', 'g'))
+  END
+`;
+
+const SLOT_NORMALIZE_SQL = `
+  CASE
+    WHEN lower(regexp_replace(COALESCE(s.slot, ''), '\\s+', '', 'g')) IN ('lunch','午市','午餐') THEN 'lunch'
+    WHEN lower(regexp_replace(COALESCE(s.slot, ''), '\\s+', '', 'g')) IN ('afternoon','afternoontea','下午茶') THEN 'afternoon'
+    WHEN lower(regexp_replace(COALESCE(s.slot, ''), '\\s+', '', 'g')) IN ('dinner','晚市','晚餐') THEN 'dinner'
+    ELSE 'other'
+  END
+`;
+
+function toNum(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function pct(numerator, denominator) {
+  if (!denominator) return null;
+  return (numerator / denominator) * 100;
+}
+
+function fmtDate(d) {
+  return new Date(d).toISOString().slice(0, 10);
+}
+
+function daysBetweenInclusive(start, end) {
+  const a = new Date(start);
+  const b = new Date(end);
+  return Math.max(1, Math.round((b - a) / 86400000) + 1);
+}
+
+function shiftRangeBackward(start, end, days) {
+  const ds = Math.max(1, Number(days) || 1);
+  const s = new Date(start);
+  const e = new Date(end);
+  s.setDate(s.getDate() - ds);
+  e.setDate(e.getDate() - ds);
+  return { start: fmtDate(s), end: fmtDate(e) };
+}
+
+function normalizeDishName(v) {
+  return String(v || '').replace(/\s+/g, '').trim();
+}
+
+function shouldExcludeDish(name = '') {
+  const normalized = normalizeDishName(name);
+  if (!normalized) return true;
+  if (EXCLUDE_DISHES_EXACT.map(normalizeDishName).includes(normalized)) return true;
+  return EXCLUDE_DISH_PATTERNS.some((k) => normalized.includes(normalizeDishName(k)));
+}
+
+function wow(curr, prev) {
+  if (!Number.isFinite(curr) || !Number.isFinite(prev) || prev === 0) return null;
+  return ((curr - prev) / Math.abs(prev)) * 100;
+}
+
+function buildAnalysisSummary(report) {
+  const m = report?.sections?.theoreticalMargins || {};
+  const totals = m.totals || {};
+  const wowSec = report?.sections?.wow || {};
+  const dinein = report?.sections?.ranking_dinein || {};
+  const takeaway = report?.sections?.ranking_takeaway || {};
+  const takeTop = takeaway?.top10?.[0];
+  const dineTop = dinein?.top10?.[0];
+  const insights = [];
+
+  const netMargin = Number(m.totalNetMarginPct);
+  if (Number.isFinite(netMargin)) {
+    if (netMargin >= 60) insights.push('整体实收毛利率维持高位，成本控制表现稳定。');
+    else if (netMargin >= 45) insights.push('整体实收毛利率处于健康区间，可继续优化高折扣品类。');
+    else insights.push('整体实收毛利率偏低，建议排查高成本/低毛利菜品与异常折扣。');
+  }
+
+  const discountRatio = pct(toNum(totals.total?.discount), toNum(totals.total?.sales));
+  if (discountRatio !== null) {
+    if (discountRatio >= 20) insights.push(`折扣率约 ${discountRatio.toFixed(1)}%，偏高，建议复核促销策略与核销口径。`);
+    else insights.push(`折扣率约 ${discountRatio.toFixed(1)}%，整体在可控范围。`);
+  }
+
+  const revWow = wowSec.revenueWowPct;
+  if (revWow !== null && revWow !== undefined) {
+    if (revWow >= 5) insights.push(`实收营收环比增长 ${Math.abs(revWow).toFixed(1)}%，增长动能良好。`);
+    else if (revWow <= -5) insights.push(`实收营收环比下降 ${Math.abs(revWow).toFixed(1)}%，建议重点复盘低峰时段与低销菜品。`);
+    else insights.push('实收营收环比基本持平，建议通过菜品结构优化提升增长弹性。');
+  }
+
+  if (takeTop?.dish_name) {
+    insights.push(`外卖主力单品为「${takeTop.dish_name}」，可考虑作为线上流量锚点持续运营。`);
+  }
+  if (dineTop?.dish_name) {
+    insights.push(`堂食主力单品为「${dineTop.dish_name}」，建议联动套餐或加价购提升客单。`);
+  }
+
+  return insights.slice(0, 6);
+}
+
+async function queryMarginByBiz(store, startDate, endDate) {
+  const rows = await pool().query(`
+    WITH sales AS (
+      SELECT
+        s.store,
+        ${BIZ_NORMALIZE_SQL} AS biz_type,
+        s.dish_name,
+        SUM(COALESCE(s.qty, 0)) AS qty,
+        SUM(COALESCE(s.sales_amount, 0)) AS sales_amount,
+        SUM(COALESCE(s.revenue, 0)) AS revenue,
+        SUM(COALESCE(s.discount, 0)) AS recorded_discount,
+        SUM(GREATEST(COALESCE(s.sales_amount, 0) - COALESCE(s.revenue, 0), 0)) AS derived_discount
+      FROM sales_raw s
+      WHERE s.store = $1
+        AND s.date BETWEEN $2 AND $3
+      GROUP BY s.store, s.biz_type, s.dish_name
+    ), priced AS (
+      SELECT
+        x.biz_type,
+        x.sales_amount,
+        x.revenue,
+        x.recorded_discount,
+        x.derived_discount,
+        x.qty,
+        COALESCE(c.unit_cost, 0) AS unit_cost
+      FROM sales x
+      LEFT JOIN LATERAL (
+        SELECT dlc.unit_cost
+        FROM dish_library_costs dlc
+        WHERE dlc.enabled = TRUE
+          AND lower(regexp_replace(COALESCE(dlc.dish_name, ''), '\\s+', '', 'g')) = lower(regexp_replace(COALESCE(x.dish_name, ''), '\\s+', '', 'g'))
+          AND (
+            lower(regexp_replace(COALESCE(dlc.store, '*'), '\\s+', '', 'g')) = lower(regexp_replace(COALESCE(x.store, ''), '\\s+', '', 'g'))
+            OR COALESCE(NULLIF(trim(dlc.store), ''), '*') = '*'
+          )
+        ORDER BY
+          CASE
+            WHEN lower(regexp_replace(COALESCE(dlc.biz_type, ''), '\\s+', '', 'g')) IN ('takeaway','delivery','外卖','外送') AND x.biz_type = 'takeaway' THEN 0
+            WHEN lower(regexp_replace(COALESCE(dlc.biz_type, ''), '\\s+', '', 'g')) IN ('dinein','堂食','店内','堂食点餐') AND x.biz_type = 'dinein' THEN 0
+            WHEN COALESCE(NULLIF(trim(dlc.biz_type), ''), '*') IN ('*', 'all', 'ALL', '全部', '通用') THEN 1
+            ELSE 2
+          END,
+          CASE WHEN COALESCE(NULLIF(trim(dlc.store), ''), '*') = '*' THEN 2 ELSE 1 END,
+          dlc.updated_at DESC
+        LIMIT 1
+      ) c ON TRUE
+    )
+    SELECT
+      biz_type,
+      ROUND(SUM(sales_amount)::numeric, 2) AS total_sales_amount,
+      ROUND(SUM(revenue)::numeric, 2) AS total_revenue,
+      ROUND(SUM(recorded_discount)::numeric, 2) AS total_discount_recorded,
+      ROUND(SUM(derived_discount)::numeric, 2) AS total_discount_derived,
+      ROUND(SUM(qty * unit_cost)::numeric, 2) AS total_cost
+    FROM priced
+    GROUP BY biz_type
+  `, [store, startDate, endDate]);
+
+  const byBiz = {
+    dinein: { sales: 0, revenue: 0, cost: 0, discount: 0, discountRecorded: 0 },
+    takeaway: { sales: 0, revenue: 0, cost: 0, discount: 0, discountRecorded: 0 }
+  };
+  for (const row of rows.rows || []) {
+    const biz = String(row.biz_type || '').trim();
+    if (!byBiz[biz]) continue;
+    const sales = toNum(row.total_sales_amount);
+    const revenue = toNum(row.total_revenue);
+    const derivedDiscount = toNum(row.total_discount_derived);
+    const recordedDiscount = toNum(row.total_discount_recorded);
+    byBiz[biz] = {
+      sales,
+      revenue,
+      cost: toNum(row.total_cost),
+      discount: Math.max(derivedDiscount, recordedDiscount, Math.max(0, sales - revenue)),
+      discountRecorded: recordedDiscount
+    };
+  }
+
+  const total = {
+    sales: byBiz.dinein.sales + byBiz.takeaway.sales,
+    revenue: byBiz.dinein.revenue + byBiz.takeaway.revenue,
+    cost: byBiz.dinein.cost + byBiz.takeaway.cost,
+    discount: byBiz.dinein.discount + byBiz.takeaway.discount,
+    discountRecorded: byBiz.dinein.discountRecorded + byBiz.takeaway.discountRecorded
+  };
+
+  return {
+    byBiz,
+    total,
+    margins: {
+      totalPreDiscountMarginPct: pct(total.sales - total.cost, total.sales),
+      totalNetMarginPct: pct(total.revenue - total.cost, total.revenue),
+      dineinPreDiscountMarginPct: pct(byBiz.dinein.sales - byBiz.dinein.cost, byBiz.dinein.sales),
+      dineinNetMarginPct: pct(byBiz.dinein.revenue - byBiz.dinein.cost, byBiz.dinein.revenue),
+      takeawayPreDiscountMarginPct: pct(byBiz.takeaway.sales - byBiz.takeaway.cost, byBiz.takeaway.sales),
+      takeawayNetMarginPct: pct(byBiz.takeaway.revenue - byBiz.takeaway.cost, byBiz.takeaway.revenue)
+    }
+  };
+}
+
+async function queryMarginBySlot(store, startDate, endDate) {
+  const rows = await pool().query(`
+    WITH sales AS (
+      SELECT
+        s.store,
+        ${SLOT_NORMALIZE_SQL} AS slot,
+        ${BIZ_NORMALIZE_SQL} AS biz_type,
+        s.dish_name,
+        SUM(COALESCE(s.qty, 0)) AS qty,
+        SUM(COALESCE(s.sales_amount, 0)) AS sales_amount,
+        SUM(COALESCE(s.revenue, 0)) AS revenue,
+        SUM(COALESCE(s.discount, 0)) AS recorded_discount,
+        SUM(GREATEST(COALESCE(s.sales_amount, 0) - COALESCE(s.revenue, 0), 0)) AS derived_discount
+      FROM sales_raw s
+      WHERE s.store = $1
+        AND s.date BETWEEN $2 AND $3
+      GROUP BY s.store, slot, biz_type, s.dish_name
+    ), priced AS (
+      SELECT
+        x.slot,
+        x.biz_type,
+        x.sales_amount,
+        x.revenue,
+        x.recorded_discount,
+        x.derived_discount,
+        x.qty,
+        COALESCE(c.unit_cost, 0) AS unit_cost
+      FROM sales x
+      LEFT JOIN LATERAL (
+        SELECT dlc.unit_cost
+        FROM dish_library_costs dlc
+        WHERE dlc.enabled = TRUE
+          AND lower(regexp_replace(COALESCE(dlc.dish_name, ''), '\\s+', '', 'g')) = lower(regexp_replace(COALESCE(x.dish_name, ''), '\\s+', '', 'g'))
+          AND (
+            lower(regexp_replace(COALESCE(dlc.store, '*'), '\\s+', '', 'g')) = lower(regexp_replace(COALESCE(x.store, ''), '\\s+', '', 'g'))
+            OR COALESCE(NULLIF(trim(dlc.store), ''), '*') = '*'
+          )
+        ORDER BY
+          CASE
+            WHEN lower(regexp_replace(COALESCE(dlc.biz_type, ''), '\\s+', '', 'g')) IN ('takeaway','delivery','外卖','外送') AND x.biz_type = 'takeaway' THEN 0
+            WHEN lower(regexp_replace(COALESCE(dlc.biz_type, ''), '\\s+', '', 'g')) IN ('dinein','堂食','店内','堂食点餐') AND x.biz_type = 'dinein' THEN 0
+            WHEN COALESCE(NULLIF(trim(dlc.biz_type), ''), '*') IN ('*', 'all', 'ALL', '全部', '通用') THEN 1
+            ELSE 2
+          END,
+          CASE WHEN COALESCE(NULLIF(trim(dlc.store), ''), '*') = '*' THEN 2 ELSE 1 END,
+          dlc.updated_at DESC
+        LIMIT 1
+      ) c ON TRUE
+    )
+    SELECT
+      slot,
+      biz_type,
+      ROUND(SUM(sales_amount)::numeric, 2) AS total_sales_amount,
+      ROUND(SUM(revenue)::numeric, 2) AS total_revenue,
+      ROUND(SUM(recorded_discount)::numeric, 2) AS total_discount_recorded,
+      ROUND(SUM(derived_discount)::numeric, 2) AS total_discount_derived,
+      ROUND(SUM(qty * unit_cost)::numeric, 2) AS total_cost
+    FROM priced
+    GROUP BY slot, biz_type
+  `, [store, startDate, endDate]);
+
+  const bySlot = {};
+  for (const slot of SLOT_TYPES) {
+    bySlot[slot] = {
+      total: { sales: 0, revenue: 0, cost: 0, discount: 0 },
+      byBiz: {
+        dinein: { sales: 0, revenue: 0, cost: 0, discount: 0 },
+        takeaway: { sales: 0, revenue: 0, cost: 0, discount: 0 }
+      },
+      margins: { preDiscountMarginPct: null, netMarginPct: null }
+    };
+  }
+
+  for (const row of rows.rows || []) {
+    const slot = String(row.slot || '').trim();
+    const biz = String(row.biz_type || '').trim();
+    if (!bySlot[slot] || !bySlot[slot].byBiz[biz]) continue;
+    const sales = toNum(row.total_sales_amount);
+    const revenue = toNum(row.total_revenue);
+    const derivedDiscount = toNum(row.total_discount_derived);
+    const recordedDiscount = toNum(row.total_discount_recorded);
+    const cost = toNum(row.total_cost);
+    const discount = Math.max(derivedDiscount, recordedDiscount, Math.max(0, sales - revenue));
+
+    bySlot[slot].byBiz[biz] = { sales, revenue, cost, discount };
+    bySlot[slot].total.sales += sales;
+    bySlot[slot].total.revenue += revenue;
+    bySlot[slot].total.cost += cost;
+    bySlot[slot].total.discount += discount;
+  }
+
+  for (const slot of SLOT_TYPES) {
+    const t = bySlot[slot].total;
+    bySlot[slot].margins = {
+      preDiscountMarginPct: pct(t.sales - t.cost, t.sales),
+      netMarginPct: pct(t.revenue - t.cost, t.revenue)
+    };
+  }
+
+  return bySlot;
+}
+
+async function generatePeriodReport(store, startDate, endDate, reportType = 'weekly') {
+  const p = [store, startDate, endDate];
+  const report = { store, weekStart: startDate, weekEnd: endDate, reportType, sections: {} };
+  const hasTakeaway = !STORE_NO_TAKEAWAY.has(store);
+  report.hasTakeaway = hasTakeaway;
+
+  // 0) 检测实际数据日期范围 + 数据质量
+  const rangeQ = await pool().query(`
+    SELECT MIN(date)::text AS actual_start, MAX(date)::text AS actual_end,
+      COUNT(DISTINCT date) AS data_days,
+      COUNT(*) AS total_rows,
+      COUNT(CASE WHEN COALESCE(revenue,0)=0 AND COALESCE(sales_amount,0)>0 THEN 1 END) AS missing_revenue_rows,
+      COUNT(CASE WHEN COALESCE(sales_amount,0)>0 THEN 1 END) AS valid_sales_rows
+    FROM sales_raw WHERE store=$1 AND date BETWEEN $2 AND $3`, p);
+  const rng = rangeQ.rows[0] || {};
+  report.actualDateRange = { start: rng.actual_start || startDate, end: rng.actual_end || endDate, dataDays: Number(rng.data_days || 0) };
+  const missingRevRows = Number(rng.missing_revenue_rows || 0);
+  const validSalesRows = Number(rng.valid_sales_rows || 0);
+  const missingRevPct = validSalesRows > 0 ? (missingRevRows / validSalesRows * 100) : 0;
+  report.dataQualityWarnings = [];
+  if (missingRevPct > 10) {
+    report.dataQualityWarnings.push(`${missingRevRows}/${validSalesRows} 行(${missingRevPct.toFixed(0)}%)的实收(revenue)为0，可能影响实收营业额和实收毛利率的准确性。请检查数据导入是否完整。`);
+  }
+
+  // a) 用餐时长 (堂食only, has checkout_time)
+  const dur = await pool().query(`
+    SELECT slot,
+      ROUND(AVG(EXTRACT(EPOCH FROM (checkout_time - order_time))/60)::numeric, 1) as avg_min,
+      COUNT(*) as cnt
+    FROM sales_raw
+    WHERE store=$1 AND date BETWEEN $2 AND $3
+      AND biz_type='dinein' AND order_time IS NOT NULL AND checkout_time IS NOT NULL
+      AND checkout_time > order_time
+    GROUP BY slot ORDER BY slot`, p);
+  report.sections.diningDuration = dur.rows;
+
+  // b) TOP10 / Bottom10 per biz (过滤赠品/饮品/指定菜品 + 过滤0金额)
+  const rankingRaw = await pool().query(`
+    SELECT biz_type, dish_name, SUM(qty) as total_qty, SUM(sales_amount) as total_sales
+    FROM sales_raw
+    WHERE store=$1 AND date BETWEEN $2 AND $3
+      AND biz_type IN ('dinein','takeaway')
+      AND dish_name IS NOT NULL
+    GROUP BY biz_type, dish_name
+    HAVING SUM(qty) > 0 AND SUM(sales_amount) > 0
+  `, p);
+  const rankingByBiz = { dinein: [], takeaway: [] };
+  for (const row of rankingRaw.rows || []) {
+    const biz = String(row.biz_type || '').trim();
+    if (!rankingByBiz[biz]) continue;
+    if (shouldExcludeDish(row.dish_name)) continue;
+    rankingByBiz[biz].push({
+      dish_name: row.dish_name,
+      total_qty: toNum(row.total_qty),
+      total_sales: toNum(row.total_sales)
+    });
+  }
+  for (const biz of BIZ_TYPES) {
+    const list = (rankingByBiz[biz] || []).sort((a, b) => Number(b.total_sales || 0) - Number(a.total_sales || 0));
+    report.sections[`ranking_${biz}`] = {
+      top10: list.slice(0, 10),
+      bottom10: [...list].sort((a, b) => Number(a.total_sales || 0) - Number(b.total_sales || 0)).slice(0, 10)
+    };
+  }
+
+  // c) 周一到周日 堂食/外卖 占比
+  const wk = await pool().query(`
+    SELECT weekday, biz_type,
+      COUNT(DISTINCT order_time) as order_cnt,
+      SUM(sales_amount) as total_sales
+    FROM sales_raw
+    WHERE store=$1 AND date BETWEEN $2 AND $3
+    GROUP BY weekday, biz_type ORDER BY weekday`, p);
+  report.sections.weekdayRatios = wk.rows;
+
+  // d) 每小时订单量 per weekday
+  const hr = await pool().query(`
+    SELECT weekday, EXTRACT(HOUR FROM order_time)::int as hour, biz_type, COUNT(*) as cnt
+    FROM sales_raw
+    WHERE store=$1 AND date BETWEEN $2 AND $3 AND order_time IS NOT NULL
+    GROUP BY weekday, hour, biz_type ORDER BY weekday, hour`, p);
+  report.sections.hourlyOrders = hr.rows;
+
+  // e) 理论毛利率 + 折扣诊断
+  const currentMargin = await queryMarginByBiz(store, startDate, endDate);
+  report.sections.theoreticalMargins = {
+    ...currentMargin.margins,
+    totals: {
+      total: currentMargin.total,
+      dinein: currentMargin.byBiz.dinein,
+      takeaway: currentMargin.byBiz.takeaway
+    }
+  };
+  report.sections.slotMargins = await queryMarginBySlot(store, startDate, endDate);
+
+  // f) 环比（上一周期）
+  const periodDays = daysBetweenInclusive(startDate, endDate);
+  const prev = shiftRangeBackward(startDate, endDate, periodDays);
+  const previousMargin = await queryMarginByBiz(store, prev.start, prev.end);
+  report.sections.wow = {
+    currentRange: { start: startDate, end: endDate },
+    previousRange: prev,
+    salesWowPct: wow(currentMargin.total.sales, previousMargin.total.sales),
+    revenueWowPct: wow(currentMargin.total.revenue, previousMargin.total.revenue),
+    discountWowPct: wow(currentMargin.total.discount, previousMargin.total.discount),
+    netMarginWowPct: wow(
+      currentMargin.margins.totalNetMarginPct ?? NaN,
+      previousMargin.margins.totalNetMarginPct ?? NaN
+    )
+  };
+
+  // g) 数据分析总结（自动）
+  report.sections.analysisSummary = buildAnalysisSummary(report);
+
+  return report;
+}
+
+export async function generateWeeklyReport(store, weekStart, weekEnd) {
+  return generatePeriodReport(store, weekStart, weekEnd, 'weekly');
+}
+
+export async function generateMonthlyReport(store, monthStart, monthEnd) {
+  return generatePeriodReport(store, monthStart, monthEnd, 'monthly');
+}
+
+export function formatReportMarkdown(r) {
+  const isMonthly = r.reportType === 'monthly';
+  const hasTakeaway = r.hasTakeaway !== false;
+  const periodLabel = isMonthly ? '月度' : '周度';
+  const adr = r.actualDateRange || {};
+  const actualStart = adr.start || r.weekStart;
+  const actualEnd = adr.end || r.weekEnd;
+  const dataDays = adr.dataDays || 0;
+
+  const fmtPct = (v) => (v === null || v === undefined || !Number.isFinite(v) ? '-' : `${v.toFixed(1)}%`);
+  const fmtSignedPct = (v) => {
+    if (v === null || v === undefined || !Number.isFinite(v)) return '-';
+    const sign = v > 0 ? '↑' : v < 0 ? '↓' : '→';
+    return `${sign}${Math.abs(v).toFixed(1)}%`;
+  };
+  const fmtMoney = (v) => {
+    const n = toNum(v);
+    if (n >= 10000) return `¥${(n / 10000).toFixed(2)}万`;
+    return `¥${n.toFixed(0)}`;
+  };
+  const fmtMoneyPlain = (v) => `¥${toNum(v).toFixed(0)}`;
+  const sep = '─'.repeat(18);
+
+  const m = r.sections.theoreticalMargins || {};
+  const totals = m.totals || {};
+  const wowSec = r.sections.wow || {};
+
+  let md = '';
+
+  // ── 标题 ──
+  md += `**${r.store}**\n`;
+  md += `**${periodLabel}经营分析报告**\n`;
+  md += `${actualStart} ~ ${actualEnd}（共${dataDays}天）\n`;
+  if (actualStart !== r.weekStart || actualEnd !== r.weekEnd) {
+    md += `> 注：统计周期 ${r.weekStart}~${r.weekEnd}，实际有数据 ${dataDays} 天\n`;
+  }
+
+  // ── 数据质量警告 ──
+  const warns = r.dataQualityWarnings || [];
+  if (warns.length) {
+    md += `\n**⚠ 数据质量提醒**\n`;
+    warns.forEach(w => { md += `- ${w}\n`; });
+  }
+
+  // ── 一、执行摘要 ──
+  md += `\n${sep}\n`;
+  md += `**一、执行摘要**\n\n`;
+  md += `| 指标 | 本期 | 环比 |\n|:--|--:|--:|\n`;
+  md += `| 折前营业额 | **${fmtMoney(totals.total?.sales)}** | ${fmtSignedPct(wowSec.salesWowPct)} |\n`;
+  md += `| 实收营业额 | **${fmtMoney(totals.total?.revenue)}** | ${fmtSignedPct(wowSec.revenueWowPct)} |\n`;
+  md += `| 折扣总额 | ${fmtMoney(totals.total?.discount)} | ${fmtSignedPct(wowSec.discountWowPct)} |\n`;
+  md += `| 实收毛利率 | **${fmtPct(m.totalNetMarginPct)}** | ${fmtSignedPct(wowSec.netMarginWowPct)} |\n`;
+
+  // ── 二、毛利分析 ──
+  md += `\n${sep}\n`;
+  md += `**二、理论毛利率**\n`;
+  md += `> 基于菜品库成本计算\n\n`;
+
+  const marginRows = [
+    { label: '📊 总计', data: totals.total, pre: m.totalPreDiscountMarginPct, net: m.totalNetMarginPct }
+  ];
+  marginRows.push({ label: '🍽 堂食', data: totals.dinein, pre: m.dineinPreDiscountMarginPct, net: m.dineinNetMarginPct });
+  if (hasTakeaway) {
+    marginRows.push({ label: '🛵 外卖', data: totals.takeaway, pre: m.takeawayPreDiscountMarginPct, net: m.takeawayNetMarginPct });
+  }
+
+  md += `| 类型 | 折前营收 | 实收营收 | 成本 | 折前毛利 | 实收毛利 |\n`;
+  md += `|:--|--:|--:|--:|--:|--:|\n`;
+  for (const row of marginRows) {
+    md += `| ${row.label} | ${fmtMoneyPlain(row.data?.sales)} | ${fmtMoneyPlain(row.data?.revenue)} | ${fmtMoneyPlain(row.data?.cost)} | ${fmtPct(row.pre)} | **${fmtPct(row.net)}** |\n`;
+  }
+
+  // ── 三、时段经营维度 ──
+  md += `\n${sep}\n`;
+  md += `**三、时段经营**（午市/下午茶/晚市）\n\n`;
+  const slotMargins = r.sections.slotMargins || {};
+  for (const slot of SLOT_TYPES) {
+    const sec = slotMargins[slot];
+    if (!sec || toNum(sec.total?.sales) === 0) continue;
+    md += `**${SLOT_CN[slot]}**\n`;
+    md += `折前 ${fmtMoneyPlain(sec.total?.sales)} ｜ 实收 ${fmtMoneyPlain(sec.total?.revenue)} ｜ 成本 ${fmtMoneyPlain(sec.total?.cost)}\n`;
+    md += `折前毛利 **${fmtPct(sec.margins?.preDiscountMarginPct)}** ｜ 实收毛利 **${fmtPct(sec.margins?.netMarginPct)}**\n`;
+    const bizList = hasTakeaway ? BIZ_TYPES : ['dinein'];
+    for (const biz of bizList) {
+      const b = sec.byBiz?.[biz] || {};
+      if (toNum(b.sales) === 0) continue;
+      const pre = pct(toNum(b.sales) - toNum(b.cost), toNum(b.sales));
+      const net = pct(toNum(b.revenue) - toNum(b.cost), toNum(b.revenue));
+      md += `- ${BIZ_CN[biz]}: 折前${fmtMoneyPlain(b.sales)} / 实收${fmtMoneyPlain(b.revenue)} / 毛利${fmtPct(net)}\n`;
+    }
+    md += `\n`;
+  }
+
+  // ── 四、用餐时长 ──
+  md += `${sep}\n`;
+  md += `**四、用餐时长**（堂食）\n\n`;
+  const durationRows = r.sections.diningDuration || [];
+  if (!durationRows.length) {
+    md += `暂无可用堂食结账时长数据\n`;
+  } else {
+    for (const d of durationRows) {
+      md += `- **${SLOT_CN[d.slot]||d.slot}** ${d.avg_min}分钟（${d.cnt}单）\n`;
+    }
+  }
+
+  // ── 五、菜品销售表现 ──
+  md += `\n${sep}\n`;
+  md += `**五、菜品销售TOP/末位**\n`;
+  md += `> 已剔除赠品/饮品/指定非排名菜品\n\n`;
+  const bizForRanking = hasTakeaway ? BIZ_TYPES : ['dinein'];
+  for (const biz of bizForRanking) {
+    const bizCN = BIZ_CN[biz];
+    const sec = r.sections[`ranking_${biz}`] || {};
+    md += `**${bizCN}**\n`;
+    if (!sec.top10?.length) {
+      md += `暂无有效菜品数据\n\n`;
+      continue;
+    }
+    md += `🔥 TOP10\n`;
+    sec.top10.forEach((d,i) => {
+      md += `${String(i+1).padStart(2,' ')}. ${d.dish_name}  ${fmtMoneyPlain(d.total_sales)}（${toNum(d.total_qty).toFixed(0)}份）\n`;
+    });
+    if (sec.bottom10?.length) {
+      md += `📉 末位10\n`;
+      sec.bottom10.forEach((d,i) => {
+        md += `${String(i+1).padStart(2,' ')}. ${d.dish_name}  ${fmtMoneyPlain(d.total_sales)}（${toNum(d.total_qty).toFixed(0)}份）\n`;
+      });
+    }
+    md += `\n`;
+  }
+
+  // ── 六、营业占比（仅有外卖的门店显示）──
+  if (hasTakeaway) {
+    md += `${sep}\n`;
+    md += `**六、每日营业占比**（堂食/外卖）\n\n`;
+    const byDay = {};
+    for (const w of (r.sections.weekdayRatios||[])) {
+      if (!byDay[w.weekday]) byDay[w.weekday] = {};
+      byDay[w.weekday][w.biz_type] = { orders: Number(w.order_cnt), sales: Number(w.total_sales) };
+    }
+    for (let d=1; d<=7; d++) {
+      const day = byDay[d]; if (!day) continue;
+      const di = day.dinein||{orders:0,sales:0}, tk = day.takeaway||{orders:0,sales:0};
+      const to = di.orders+tk.orders, ts = di.sales+tk.sales;
+      if (!to) continue;
+      md += `**${WEEKDAY_CN[d]}** 堂食${di.orders}单(${(di.orders/to*100).toFixed(0)}%) ${fmtMoneyPlain(di.sales)}`;
+      if (tk.orders) md += ` ｜ 外卖${tk.orders}单(${(tk.orders/to*100).toFixed(0)}%) ${fmtMoneyPlain(tk.sales)}`;
+      md += `\n`;
+    }
+  }
+
+  // ── 七、高峰/低峰 ──
+  md += `\n${sep}\n`;
+  md += `**${hasTakeaway ? '七' : '六'}、高峰/低峰时段**\n\n`;
+  const byDayHour = {};
+  for (const h of (r.sections.hourlyOrders||[])) {
+    const k = `${h.weekday}`;
+    if (!byDayHour[k]) byDayHour[k] = {};
+    const hh = h.hour;
+    byDayHour[k][hh] = (byDayHour[k][hh]||0) + Number(h.cnt);
+  }
+  for (let d=1; d<=7; d++) {
+    const hrs = byDayHour[d]; if (!hrs) continue;
+    const sorted = Object.entries(hrs).sort((a,b)=>b[1]-a[1]);
+    const peak = sorted.slice(0,3).map(([h,c])=>`${h}:00(${c})`).join(' ');
+    const low = sorted.slice(-3).reverse().map(([h,c])=>`${h}:00(${c})`).join(' ');
+    md += `**${WEEKDAY_CN[d]}** 高峰 ${peak} ｜ 低峰 ${low}\n`;
+  }
+
+  // ── 八、数据分析总结 ──
+  const sectionNum = hasTakeaway ? '八' : '七';
+  md += `\n${sep}\n`;
+  md += `**${sectionNum}、数据分析总结**\n\n`;
+  const summary = Array.isArray(r.sections.analysisSummary) ? r.sections.analysisSummary : [];
+  if (!summary.length) {
+    md += `暂无足够数据生成自动总结\n`;
+  } else {
+    summary.forEach((line, idx) => {
+      md += `${idx + 1}. ${line}\n`;
+    });
+  }
+
+  md += `\n> 折扣 = 折前营收 - 实收营收（取推导值与源表较大者）\n`;
+
+  return md;
+}
