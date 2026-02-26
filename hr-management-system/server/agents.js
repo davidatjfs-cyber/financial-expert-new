@@ -4908,8 +4908,27 @@ export async function getLarkImageUrl(messageId, imageKey) {
 async function recognizeLarkAudio(messageId, fileKey) {
   const token = await getLarkTenantToken();
   if (!token) return null;
+
+  // 方案1: 通过 IM 消息 API 获取内置语音识别文本 (部分飞书版本自动转写)
   try {
-    // 1. 下载语音文件
+    const msgResp = await axios.get(
+      `https://open.feishu.cn/open-apis/im/v1/messages/${messageId}`,
+      { headers: { 'Authorization': `Bearer ${token}` }, timeout: 10000 }
+    );
+    const msgBody = msgResp.data?.data?.items?.[0]?.body || msgResp.data?.data?.body || {};
+    const recognition = msgBody?.content ? (() => {
+      try { return JSON.parse(msgBody.content)?.recognition || ''; } catch { return ''; }
+    })() : '';
+    if (recognition.trim()) {
+      console.log(`[feishu-asr] IM API recognition: "${recognition.trim().slice(0, 80)}"`);
+      return recognition.trim();
+    }
+  } catch (e) {
+    console.log(`[feishu-asr] IM API fallback skipped: ${e?.response?.status || e?.message}`);
+  }
+
+  // 方案2: 下载语音文件 → 调用飞书 Speech API
+  try {
     const audioResp = await axios.get(
       `https://open.feishu.cn/open-apis/im/v1/messages/${messageId}/resources/${fileKey}`,
       { headers: { 'Authorization': `Bearer ${token}` }, params: { type: 'file' }, responseType: 'arraybuffer', timeout: 30000 }
@@ -4917,7 +4936,6 @@ async function recognizeLarkAudio(messageId, fileKey) {
     const audioBase64 = Buffer.from(audioResp.data).toString('base64');
     console.log(`[feishu-asr] audio downloaded: ${audioResp.data.byteLength} bytes`);
 
-    // 2. 调用飞书语音识别 API
     const asrResp = await axios.post(
       'https://open.feishu.cn/open-apis/speech/v1/speech/file_recognize',
       {
@@ -4927,12 +4945,20 @@ async function recognizeLarkAudio(messageId, fileKey) {
       { headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 30000 }
     );
     const recognized = asrResp.data?.data?.recognition_text || '';
-    console.log(`[feishu-asr] recognized: "${recognized.slice(0, 80)}"`);
-    return recognized.trim() || null;
+    if (recognized.trim()) {
+      console.log(`[feishu-asr] Speech API recognized: "${recognized.slice(0, 80)}"`);
+      return recognized.trim();
+    }
   } catch (e) {
-    console.error('[feishu-asr] failed:', e?.response?.data?.msg || e?.message);
-    return null;
+    const status = e?.response?.status;
+    if (status === 404 || status === 403) {
+      console.warn(`[feishu-asr] Speech API ${status} — 需在飞书开放平台开通"语音识别"权限 (speech:speech)`);
+    } else {
+      console.error('[feishu-asr] Speech API error:', e?.response?.data?.msg || e?.message);
+    }
   }
+
+  return null;
 }
 
 // Reply to a specific message
@@ -6318,14 +6344,16 @@ async function handleAgentMessage(senderUsername, senderName, senderStore, sende
 
   // ── HQ Brain 路由: 总部角色优先走决策大脑 ──
   try {
+    console.log(`[agents] HQ Brain check: role=${senderRole}, text="${text?.slice(0, 40)}"`);
     const hqResult = await handleHqBrainMessage({
       text, role: senderRole, username: senderUsername, store
     });
     if (hqResult?.handled) {
+      console.log(`[agents] HQ Brain handled: ${hqResult.response?.slice(0, 60)}`);
       return prefixWithAgentName('master', hqResult.response || '');
     }
   } catch (e) {
-    console.error('[agents] HQ Brain routing error:', e?.message);
+    console.error('[agents] HQ Brain routing error:', e?.message, e?.stack?.split('\n')[1]);
   }
 
   // 检查是否为培训任务审批（管理员审核下发）
@@ -7329,6 +7357,18 @@ export async function onFeishuEvent(body) {
         await sendLarkMessage(openId, `⚠️ ${permCheck.reason}`);
         return { ok: true, denied: true, route: preRoute.route, role: userRole };
       }
+    }
+
+    // ── 耗时请求: 先回复 "正在查询..." 再处理 ──
+    const _t = String(text || '').trim();
+    const _isSlowRequest = _t.includes('行动计划') || _t.includes('健康度') || _t.includes('改善方案')
+      || _t.includes('因果') || _t.includes('对比') || _t.includes('预估')
+      || _t.includes('营业额') || _t.includes('毛利') || _t.includes('损耗')
+      || _t.includes('差评') || _t.includes('绩效') || _t.includes('考核')
+      || (imageUrls.length > 0);
+    if (_isSlowRequest) {
+      const loadingHint = imageUrls.length > 0 ? '📸 收到照片，正在审核中...' : '🔍 正在为您查询，请稍候...';
+      sendLarkMessage(openId, loadingHint).catch(() => {});
     }
 
     const result = await handleAgentMessage(

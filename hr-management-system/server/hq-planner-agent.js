@@ -387,6 +387,36 @@ export async function listPlans(options = {}) {
 // 4. HQ Brain 对话入口 (Feishu 消息路由)
 // ─────────────────────────────────────────────
 
+// 门店名模糊匹配: 用户输入 "洪潮久光店" → 匹配 DB 中的 "洪潮大宁久光店"
+async function fuzzyMatchStoreName(input) {
+  if (!input) return input;
+  try {
+    const r = await pool().query(`SELECT DISTINCT store FROM feishu_users WHERE store IS NOT NULL AND store != '' AND store != '总部'`);
+    const stores = (r.rows || []).map(row => row.store);
+    // 精确匹配
+    const exact = stores.find(s => s === input);
+    if (exact) return exact;
+    // 包含匹配: DB中的店名包含用户输入 或 用户输入包含DB中的店名
+    const contains = stores.find(s => s.includes(input) || input.includes(s));
+    if (contains) return contains;
+    // 关键字匹配: 去掉品牌前缀后的核心部分
+    const core = input.replace(/^(洪潮|马己仙)/, '');
+    if (core.length >= 2) {
+      const fuzzy = stores.find(s => s.includes(core));
+      if (fuzzy) return fuzzy;
+    }
+    return input; // 兜底返回原始输入
+  } catch (e) {
+    return input;
+  }
+}
+
+// 从用户消息中提取门店名 (止于 "店" 字, 排除关键词干扰)
+function extractStoreName(text) {
+  const m = text.match(/(洪潮[^\s,，。的生为请]+?店|马己仙[^\s,，。的生为请]+?店)/);
+  return m ? m[1] : null;
+}
+
 export async function handleHqBrainMessage({ text, role, username, store }) {
   if (!isHqRole(role)) {
     return null; // 非 HQ 角色不处理
@@ -398,8 +428,8 @@ export async function handleHqBrainMessage({ text, role, username, store }) {
   if (t.includes('行动计划') || t.includes('改善方案') || t.includes('策略') || t.includes('整改方案')) {
     // 提取目标门店
     let targetStore = store;
-    const storeMatch = t.match(/(洪潮[^\s,，。]+|马己仙[^\s,，。]+)/);
-    if (storeMatch) targetStore = storeMatch[1];
+    const extracted = extractStoreName(t);
+    if (extracted) targetStore = await fuzzyMatchStoreName(extracted);
 
     // 提取目标
     const goalMatch = t.match(/目标[：:]\s*(.+?)(?=[，。\n]|$)/);
@@ -449,8 +479,8 @@ export async function handleHqBrainMessage({ text, role, username, store }) {
   // 意图识别: 门店健康度查询
   if (t.includes('健康度') || t.includes('健康分') || t.includes('门店诊断')) {
     let targetStore = store;
-    const storeMatch = t.match(/(洪潮[^\s,，。]+|马己仙[^\s,，。]+)/);
-    if (storeMatch) targetStore = storeMatch[1];
+    const extracted = extractStoreName(t);
+    if (extracted) targetStore = await fuzzyMatchStoreName(extracted);
 
     if (!targetStore) {
       return { handled: true, response: '请指定门店名称（如：洪潮大宁久光店健康度）' };
@@ -478,8 +508,8 @@ export async function handleHqBrainMessage({ text, role, username, store }) {
   // 意图识别: 因果链分析
   if (t.includes('因果') || t.includes('原因') || t.includes('为什么') || t.includes('根因')) {
     let targetStore = store;
-    const storeMatch = t.match(/(洪潮[^\s,，。]+|马己仙[^\s,，。]+)/);
-    if (storeMatch) targetStore = storeMatch[1];
+    const extracted = extractStoreName(t);
+    if (extracted) targetStore = await fuzzyMatchStoreName(extracted);
 
     if (targetStore) {
       const chain = await traceCausalChain('store', targetStore, 3, 30);
@@ -503,7 +533,8 @@ export async function handleHqBrainMessage({ text, role, username, store }) {
 
   // 意图识别: 跨门店对比
   if (t.includes('对比') || t.includes('比较')) {
-    const storeMatches = t.match(/(洪潮[^\s,，。]+|马己仙[^\s,，。]+)/g);
+    const rawMatches = t.match(/(洪潮[^\s,，。的生为请]+?店|马己仙[^\s,，。的生为请]+?店)/g);
+    const storeMatches = rawMatches ? await Promise.all(rawMatches.map(s => fuzzyMatchStoreName(s))) : null;
     if (storeMatches?.length >= 2) {
       const comparison = await crossStoreComparison(storeMatches, 30);
       let resp = `📊 门店对比分析:\n\n`;
