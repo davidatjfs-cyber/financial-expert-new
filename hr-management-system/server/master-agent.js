@@ -49,6 +49,11 @@ import { AgentCommunicationSystem } from './agent-communication-system.js';
 import { pool as masterPool, setPool as setUnifiedMasterPool } from './utils/database.js';
 import { extractAnomalyRelations, refreshEntityHealthSnapshots, ensureKnowledgeGraphTables, setKGPool } from './knowledge-graph.js';
 import { registerHqPlannerRoutes, setHqPlannerPool, setHqPlannerLLM } from './hq-planner-agent.js';
+import {
+  setAutoOpsPool, setAutoOpsDeps,
+  inspectionClosedLoopTick, biProactivePushTick,
+  laborEfficiencyTick, trainingClosedLoopTick
+} from './auto-ops-engine.js';
 import { safeExecute, safeErrorLog } from './utils/error-handler.js';
 
 function normalizeStoreKey(v) {
@@ -66,6 +71,8 @@ export function setMasterPool(p) {
   setKGPool(p);            // 知识图谱
   setHqPlannerPool(p);     // HQ决策大脑
   setHqPlannerLLM(callLLM); // 注入LLM调用能力
+  setAutoOpsPool(p);       // 自动化营运引擎
+  setAutoOpsDeps({ sendLarkMessage, sendLarkCard, lookupFeishuUserByUsername, findStoreManager, callLLM, prefixWithAgentName, inferBrandFromStoreName });
 }
 export function pool() { 
   if (!_pool) throw new Error('master-agent: pool not set'); 
@@ -1279,6 +1286,46 @@ export function startMasterAgent() {
     }
   };
 
+  // ── Tick 13: 巡检闭环自动化 (每15分钟: 催办 + 升级) ──
+  const inspectionLoopTick = async () => {
+    try {
+      const a = await inspectionClosedLoopTick();
+      if (a > 0) console.log(`[master:tick] Inspection closed loop: ${a} actions`);
+    } catch (e) {
+      console.error('[master:tick] inspection loop error:', e?.message);
+    }
+  };
+
+  // ── Tick 14: BI主动推送 (每15分钟检查, 仅CST 10:00执行) ──
+  const biPushTick = async () => {
+    try {
+      const p = await biProactivePushTick();
+      if (p > 0) console.log(`[master:tick] BI proactive push: ${p} alerts`);
+    } catch (e) {
+      console.error('[master:tick] BI push error:', e?.message);
+    }
+  };
+
+  // ── Tick 15: 排班人效建议 (每15分钟检查, 仅周一CST 09:00执行) ──
+  const laborTick = async () => {
+    try {
+      const p = await laborEfficiencyTick();
+      if (p > 0) console.log(`[master:tick] Labor efficiency: ${p} suggestions`);
+    } catch (e) {
+      console.error('[master:tick] labor efficiency error:', e?.message);
+    }
+  };
+
+  // ── Tick 16: 培训闭环 (每15分钟检查, 仅CST 11:00执行) ──
+  const trainingLoopTick = async () => {
+    try {
+      const c = await trainingClosedLoopTick();
+      if (c > 0) console.log(`[master:tick] Training closed loop: ${c} tasks created`);
+    } catch (e) {
+      console.error('[master:tick] training loop error:', e?.message);
+    }
+  };
+
   // 启动定时器
   setInterval(auditTick, 30 * 60 * 1000);   // 30min
   setInterval(dispatchTick, 15 * 1000);     // 15s
@@ -1292,6 +1339,10 @@ export function startMasterAgent() {
   setInterval(optimizationTick, 60 * 1000);   // 60s
   setInterval(taskResponseTick, 60 * 1000);  // 60s
   setInterval(kgHealthTick, 6 * 60 * 60 * 1000); // 6h
+  setInterval(inspectionLoopTick, 15 * 60 * 1000); // 15min
+  setInterval(biPushTick, 15 * 60 * 1000);         // 15min (内部仅CST 10:00执行)
+  setInterval(laborTick, 15 * 60 * 1000);           // 15min (内部仅周一CST 09:00执行)
+  setInterval(trainingLoopTick, 15 * 60 * 1000);    // 15min (内部仅CST 11:00执行)
 
   // 首次启动延迟执行
   setTimeout(auditTick, 10 * 1000);
@@ -1306,8 +1357,12 @@ export function startMasterAgent() {
   setTimeout(optimizationTick, 55 * 1000);
   setTimeout(taskResponseTick, 60 * 1000);
   setTimeout(kgHealthTick, 90 * 1000);      // 启动后90秒首次刷新
+  setTimeout(inspectionLoopTick, 120 * 1000); // 启动后2分钟首次巡检闭环
+  setTimeout(biPushTick, 150 * 1000);         // 启动后2.5分钟检查BI推送
+  setTimeout(laborTick, 180 * 1000);          // 启动后3分钟检查排班建议
+  setTimeout(trainingLoopTick, 210 * 1000);   // 启动后3.5分钟检查培训闭环
 
-  console.log('[master] All agent listeners started (including KG health tick)');
+  console.log('[master] All agent listeners started (including KG health tick + auto-ops engine)');
 }
 
 // ─────────────────────────────────────────────
