@@ -37,7 +37,16 @@ import { buildSalesReport } from './bi-sales-detail.js';
 import { generateWeeklyReport, generateMonthlyReport, formatReportMarkdown } from './bi-weekly-report.js';
 import { extractRelationsFromBitableRecord, extractAnomalyRelations } from './knowledge-graph.js';
 import { handleHqBrainMessage } from './hq-planner-agent.js';
-import { getModelForRole, getTemperatureForRole, getMaxTokensForRole, trackLLMCall, getModelTier } from './hq-brain-config.js';
+import {
+  getModelForRole,
+  getTemperatureForRole,
+  getMaxTokensForRole,
+  trackLLMCall,
+  getModelTier,
+  getAvailableTools,
+  isToolAllowed,
+  isTierBudgetExceeded
+} from './hq-brain-config.js';
 
 // ─────────────────────────────────────────────
 // 0. Config
@@ -45,7 +54,7 @@ import { getModelForRole, getTemperatureForRole, getMaxTokensForRole, trackLLMCa
 
 const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || '';
 const DEEPSEEK_BASE_URL = process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com';
-const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL || 'deepseek-v3.2';
+const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL || 'deepseek-chat';
 const DEEPSEEK_VISION_MODEL = process.env.DEEPSEEK_VISION_MODEL || 'doubao-seed-2-0-pro-260215';
 const QWEN_API_KEY = process.env.QWEN_API_KEY || process.env.DASHSCOPE_API_KEY || '';
 const QWEN_BASE_URL = process.env.QWEN_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1';
@@ -55,6 +64,65 @@ const DOUBAO_BASE_URL = process.env.DOUBAO_BASE_URL || 'https://ark.cn-beijing.v
 
 const FACTUAL_DATA_UNAVAILABLE_MESSAGE = '抱歉，我当前无法从数据库中获取相关凭证/数据，请您登录系统手动核查。';
 
+// ── Provider 健康状态追踪 & 自动降级 ──
+const _providerHealth = {
+  deepseek: { healthy: true, failCount: 0, lastFailTime: 0, cooldownMs: 3 * 60 * 1000 },
+  qwen:     { healthy: true, failCount: 0, lastFailTime: 0, cooldownMs: 3 * 60 * 1000 },
+  doubao:   { healthy: true, failCount: 0, lastFailTime: 0, cooldownMs: 3 * 60 * 1000 }
+};
+const PROVIDER_FAIL_THRESHOLD = 2;
+const PROVIDER_RECOVERY_CHECK_MS = 3 * 60 * 1000;
+
+function markProviderFail(provider) {
+  const h = _providerHealth[provider];
+  if (!h) return;
+  h.failCount += 1;
+  h.lastFailTime = Date.now();
+  if (h.failCount >= PROVIDER_FAIL_THRESHOLD) {
+    h.healthy = false;
+    console.error(`[LLM-FALLBACK] Provider ${provider} marked UNHEALTHY after ${h.failCount} consecutive failures`);
+  }
+}
+
+function markProviderOk(provider) {
+  const h = _providerHealth[provider];
+  if (!h) return;
+  const wasDown = !h.healthy;
+  h.healthy = true;
+  h.failCount = 0;
+  if (wasDown) console.log(`[LLM-FALLBACK] Provider ${provider} recovered to HEALTHY`);
+}
+
+function isProviderHealthy(provider) {
+  const h = _providerHealth[provider];
+  if (!h) return true;
+  if (h.healthy) return true;
+  if (Date.now() - h.lastFailTime > PROVIDER_RECOVERY_CHECK_MS) return true;
+  return false;
+}
+
+function getTextFallbackChain(primaryModel) {
+  const primary = resolveModelProvider(primaryModel);
+  const chain = [{ provider: primary, model: primaryModel }];
+  if (primary !== 'qwen' && QWEN_API_KEY) chain.push({ provider: 'qwen', model: QWEN_MODEL });
+  if (primary !== 'deepseek' && DEEPSEEK_API_KEY) chain.push({ provider: 'deepseek', model: DEEPSEEK_MODEL });
+  return chain;
+}
+
+export function getProviderHealthStatus() {
+  const now = Date.now();
+  const result = {};
+  for (const [k, v] of Object.entries(_providerHealth)) {
+    result[k] = {
+      healthy: v.healthy,
+      failCount: v.failCount,
+      lastFailAgo: v.lastFailTime ? `${Math.round((now - v.lastFailTime) / 1000)}s ago` : 'never',
+      effectivelyAvailable: isProviderHealthy(k)
+    };
+  }
+  return result;
+}
+
 function formatDate(d) {
   const dt = d instanceof Date ? d : new Date(d);
   if (isNaN(dt.getTime())) return '';
@@ -62,8 +130,132 @@ function formatDate(d) {
 }
 
 const _biConversationCtx = new Map();
+const _biLastToolCtx = new Map();
 const BI_CONV_CTX_TTL = 10 * 60 * 1000;
 const BI_CONV_CTX_MAX = 4;
+
+const HARD_FACT_QUERY_PATTERNS = /(多少|几次|几天|几条|总数|占比|同比|环比|排名|top|倒数|趋势|营业额|营收|毛利|客诉|差评|桌访|达成率|人效|预测)/i;
+const FACT_TOPIC_PATTERNS = /(营业额|营收|毛利|桌访|差评|收档|开档|原料|报损|投诉|考核|绩效|评分|门店|菜品|产品|订单|充值)/i;
+const FOLLOWUP_HINT_PATTERNS = /(继续|还有|上面|那个|再说|再查|补充|详细|展开)/i;
+
+const _agentQualityMetrics = {
+  audits: 0,
+  rewrites: 0,
+  failedAudits: 0,
+  numericViolations: 0,
+  factualBlocks: 0,
+  autonomousTasks: 0,
+  lastUpdatedAt: ''
+};
+
+const AGENT_EVAL_CASES = [
+  { text: '近7天门店营业额达成率怎么样', route: 'data_auditor', demand: 'hard' },
+  { text: '帮我看下差评最多的菜品', route: 'data_auditor', demand: 'hard' },
+  { text: '我要开市检查表', route: 'ops_supervisor', demand: 'soft' },
+  { text: '这条绩效扣分我想申诉', route: 'appeal', demand: 'soft' },
+  { text: '我想咨询离职流程', route: 'chief_evaluator', demand: 'soft' },
+  { text: '这个SOP退款标准怎么执行', route: 'train_advisor', demand: 'soft' },
+  { text: '你好', route: 'general', demand: 'none' }
+];
+
+function safeJsonParse(text, fallback = null) {
+  const raw = String(text || '').trim();
+  if (!raw) return fallback;
+  try { return JSON.parse(raw); } catch (e) {}
+  const cleaned = raw.replace(/^```json\s*/i, '').replace(/```$/i, '').trim();
+  try { return JSON.parse(cleaned); } catch (e) {}
+  const m = cleaned.match(/\{[\s\S]*\}/);
+  if (!m) return fallback;
+  try { return JSON.parse(m[0]); } catch (e) { return fallback; }
+}
+
+function normalizePlainText(text, maxLen = 1200) {
+  return String(text || '').replace(/\s+/g, ' ').trim().slice(0, maxLen);
+}
+
+function detectFactDemand(text) {
+  const q = String(text || '').trim();
+  if (!q) return 'none';
+  if (FACT_TOPIC_PATTERNS.test(q) && HARD_FACT_QUERY_PATTERNS.test(q)) return 'hard';
+  if (FACT_TOPIC_PATTERNS.test(q)) return 'soft';
+  return 'none';
+}
+
+function inferRouteByRules(text, hasImage = false) {
+  if (hasImage) return { route: 'ops_supervisor', confidence: 1, reason: 'image_input' };
+  const t = String(text || '').trim();
+  if (!t) return null;
+
+  const keywordMap = [
+    { route: 'appeal', score: 2, rx: /(申诉|投诉|不公平|误判|恢复扣分|举报)/i },
+    { route: 'ops_supervisor', score: 2, rx: /(开市|开档|收档|闭市|巡检|卫生|拍照|上传照片|检查表)/i },
+    { route: 'data_auditor', score: 2, rx: /(营业额|营收|毛利|差评|桌访|达成率|排名|趋势|预测|分析|人效|报损|原料)/i },
+    { route: 'chief_evaluator', score: 2, rx: /(绩效|评分|考核|奖金|离职|入职|转正|调岗|请假|社保|档案|薪资|工资)/i },
+    { route: 'train_advisor', score: 2, rx: /(sop|标准|流程|培训|课件|带教|退款|赔付)/i }
+  ];
+
+  let best = { route: 'general', score: 0, reason: '' };
+  for (const item of keywordMap) {
+    if (item.rx.test(t)) {
+      best = { route: item.route, score: item.score, reason: item.rx.source };
+      break;
+    }
+  }
+  if (best.score > 0) return { route: best.route, confidence: 0.92, reason: `rule:${best.reason}` };
+  return null;
+}
+
+function extractNumericLiterals(text) {
+  const vals = String(text || '').match(/-?\d+(?:\.\d+)?%?/g) || [];
+  return vals.slice(0, 24);
+}
+
+function computeSourceCoverage(agentData = {}) {
+  const rows = Array.isArray(agentData?.sourceAuditRows) ? agentData.sourceAuditRows : [];
+  if (rows.length > 0) {
+    const ok = rows.filter((x) => x?.status === 'ok').length;
+    return Number((ok / rows.length).toFixed(2));
+  }
+  if (agentData?.deterministic || agentData?.grounded || agentData?.source) return 1;
+  return 0;
+}
+
+function computeResponseConfidence(route, response, agentData = {}) {
+  let score = 0.45;
+  if (String(response || '').trim().length >= 18) score += 0.1;
+  if (agentData?.deterministic) score += 0.25;
+  if (agentData?.grounded) score += 0.2;
+  if (agentData?.source) score += 0.1;
+  if (agentData?.factualGuardrailBlocked) score -= 0.2;
+  if (route === 'general') score -= 0.05;
+  const coverage = computeSourceCoverage(agentData);
+  score = score * 0.75 + coverage * 0.25;
+  return Number(Math.max(0.05, Math.min(0.99, score)).toFixed(2));
+}
+
+function buildEvidencePackage(agentData = {}, context = {}) {
+  const sourceAuditRows = Array.isArray(agentData?.sourceAuditRows) ? agentData.sourceAuditRows : [];
+  return {
+    route: String(agentData?.route || context?.route || '').trim(),
+    store: String(context?.store || agentData?.store || '').trim(),
+    brand: String(context?.brand || agentData?.brand || '').trim(),
+    source: String(agentData?.source || '').trim(),
+    deterministic: !!agentData?.deterministic,
+    grounded: !!agentData?.grounded,
+    sourceCoverage: computeSourceCoverage(agentData),
+    sourceAudit: sourceAuditRows.slice(0, 8).map((x) => ({ key: x?.key, status: x?.status, count: x?.count, latest: x?.latest })),
+    generatedAt: new Date().toISOString()
+  };
+}
+
+function verifyNumericGrounding(responseText, evidenceText) {
+  const answerNums = extractNumericLiterals(responseText);
+  if (!answerNums.length) return { ok: true, missing: [] };
+  const evidenceNums = new Set(extractNumericLiterals(evidenceText));
+  if (!evidenceNums.size) return { ok: false, missing: answerNums.slice(0, 6) };
+  const missing = answerNums.filter((x) => !evidenceNums.has(x));
+  return { ok: missing.length <= Math.max(1, Math.floor(answerNums.length * 0.3)), missing: missing.slice(0, 6) };
+}
 
 function getBiConversationHistory(userId) {
   const entry = _biConversationCtx.get(userId);
@@ -161,25 +353,63 @@ function clampInt(v, min, max, fallback) {
   return n;
 }
 
-function resolveToolPeriod(args = {}, fallbackDays = 30) {
-  const days = clampInt(args.period_days, 1, 90, fallbackDays);
-  const end = new Date();
-  const start = new Date(end);
-  start.setDate(start.getDate() - (days - 1));
+function resolveToolPeriod(args = {}, fallbackDays = 30, originalQuery = '') {
   const fmt = (d) => {
     const y = d.getFullYear();
     const m = String(d.getMonth() + 1).padStart(2, '0');
     const dd = String(d.getDate()).padStart(2, '0');
     return `${y}-${m}-${dd}`;
   };
+  const semanticPeriod = String(args.period || '').trim();
+  const q = String(originalQuery || '').trim();
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const ms = 86400000;
+  if (semanticPeriod === 'today' || /今[天日]/.test(q)) {
+    return { days: 1, start: fmt(today), end: fmt(today), label: '今日' };
+  }
+  if (semanticPeriod === 'yesterday' || /昨[天日]/.test(q)) {
+    const y = new Date(today - ms);
+    return { days: 1, start: fmt(y), end: fmt(y), label: '昨日' };
+  }
+  if (semanticPeriod === 'last_week' || /上周/.test(q)) {
+    const dow = today.getDay() || 7;
+    const mon = new Date(today - (dow + 6) * ms);
+    return { days: 7, start: fmt(mon), end: fmt(new Date(+mon + 6 * ms)), label: '上周' };
+  }
+  if (semanticPeriod === 'this_week' || /本周/.test(q)) {
+    const dow = today.getDay() || 7;
+    const mon = new Date(today - (dow - 1) * ms);
+    return { days: dow, start: fmt(mon), end: fmt(today), label: '本周' };
+  }
+  if (semanticPeriod === 'last_month' || /上[个]?月/.test(q)) {
+    const firstThisMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const lastOfPrev = new Date(firstThisMonth - ms);
+    const firstOfPrev = new Date(lastOfPrev.getFullYear(), lastOfPrev.getMonth(), 1);
+    return { days: Math.round((lastOfPrev - firstOfPrev) / ms) + 1, start: fmt(firstOfPrev), end: fmt(lastOfPrev), label: '上月' };
+  }
+  if (semanticPeriod === 'this_month' || /本月/.test(q)) {
+    const firstOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const d = Math.round((today - firstOfMonth) / ms) + 1;
+    return { days: d, start: fmt(firstOfMonth), end: fmt(today), label: '本月' };
+  }
+  const nm = q.match(/近\s*(\d+)\s*天/);
+  if (nm) {
+    const n = parseInt(nm[1], 10) || fallbackDays;
+    return { days: n, start: fmt(new Date(today - (n - 1) * ms)), end: fmt(today), label: `近${n}天` };
+  }
+  const days = clampInt(args.period_days, 1, 90, fallbackDays);
+  const end = new Date();
+  const start = new Date(end);
+  start.setDate(start.getDate() - (days - 1));
   return { days, start: fmt(start), end: fmt(end), label: `近${days}天` };
 }
 
-async function execBiToolSalesRanking(store, args = {}) {
+async function execBiToolSalesRanking(store, args = {}, originalQuery = '') {
   const targetStore = String(store || '').trim();
   if (!targetStore) return { ok: false, text: '当前账号未绑定门店，无法查询销售排行。', source: 'sales_raw' };
 
-  const period = resolveToolPeriod(args, 30);
+  const period = resolveToolPeriod(args, 30, originalQuery);
   const limit = clampInt(args.limit, 1, 20, 10);
   const metric = ['sales_amount', 'revenue', 'qty'].includes(String(args.metric || '')) ? String(args.metric) : 'sales_amount';
   const sortOrder = String(args.sort_order || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
@@ -236,11 +466,11 @@ async function execBiToolSalesRanking(store, args = {}) {
   }
 }
 
-async function execBiToolComplaintRanking(store, args = {}) {
+async function execBiToolComplaintRanking(store, args = {}, originalQuery = '') {
   const targetStore = String(store || '').trim();
   if (!targetStore) return { ok: false, text: '当前账号未绑定门店，无法查询投诉排行。', source: 'bad_reviews' };
 
-  const period = resolveToolPeriod(args, 30);
+  const period = resolveToolPeriod(args, 30, originalQuery);
   const limit = clampInt(args.limit, 1, 20, 10);
   const asc = String(args.sort_order || 'desc').toLowerCase() === 'asc';
   const badReviewTableId = String(BITABLE_CONFIGS?.bad_reviews?.tableId || '').trim();
@@ -298,11 +528,11 @@ async function execBiToolComplaintRanking(store, args = {}) {
   }
 }
 
-async function execBiToolRevenueSummary(store, args = {}) {
+async function execBiToolRevenueSummary(store, args = {}, originalQuery = '') {
   const targetStore = String(store || '').trim();
   if (!targetStore) return { ok: false, text: '当前账号未绑定门店，无法查询营业汇总。', source: 'daily_reports' };
 
-  const period = resolveToolPeriod(args, 7);
+  const period = resolveToolPeriod(args, 7, originalQuery);
   try {
     const r = await pool().query(
       `SELECT date, actual_revenue, target_revenue, actual_margin, dianping_rating
@@ -402,7 +632,30 @@ async function execBiToolRevenueForecastNextDay(store, args = {}) {
     );
     const salesRows = salesR.rows || [];
     if (salesRows.length < 3) {
-      return { ok: true, source: 'daily_reports', text: `📈 明日营业额预测（${targetStore}）：样本不足（近${lookbackDays}天有效样本少于3天），暂无法给出可信预测。` };
+      // 兜底：扩大窗口到近60天，给出低置信预测，避免“等于没回答”
+      const longR = await pool().query(
+        `SELECT s.date, ROUND(SUM(COALESCE(s.revenue,0))::numeric, 2) AS day_revenue
+         FROM sales_raw s
+         WHERE lower(regexp_replace(coalesce(s.store,''), '\\s+', '', 'g')) = $1
+           AND s.date BETWEEN $2 AND $3
+         GROUP BY s.date
+         ORDER BY s.date DESC
+         LIMIT 60`,
+        [normalizeStoreKey(targetStore), formatDate(new Date(Date.now() - 59 * 86400000)), endText]
+      );
+      const longRows = longR.rows || [];
+      if (longRows.length < 3) {
+        return { ok: true, source: 'daily_reports', text: `📈 明日营业额预测（${targetStore}）：样本不足（近${lookbackDays}天有效样本少于3天，近60天也不足3天），暂无法给出可信预测。` };
+      }
+      const longValues = longRows.map((x) => Number(x.day_revenue) || 0).filter((x) => x >= 0);
+      const longPred = weightedMean(longValues);
+      const longMin = Math.min(...longValues);
+      const longMax = Math.max(...longValues);
+      return {
+        ok: true,
+        source: 'sales_raw',
+        text: `📈 明日营业额预测（${targetStore}）\n- 预测日期：${tomorrowText}\n- 预测值：¥${longPred.toFixed(0)}\n- 参考区间：¥${longMin.toFixed(0)} ~ ¥${longMax.toFixed(0)}\n- 依据样本：近60天销售明细按日汇总（${longRows.length}天有效样本）\n- 置信度：较低（近期样本不足，已启用长窗口兜底）\n> 数据源：sales_raw（门店销售明细）`
+      };
     }
     const values = salesRows.map((x) => Number(x.day_revenue) || 0).filter((x) => x >= 0);
     const pred = weightedMean(values);
@@ -418,10 +671,10 @@ async function execBiToolRevenueForecastNextDay(store, args = {}) {
   }
 }
 
-async function runBiFunctionTool(toolName, store, args = {}) {
-  if (toolName === 'query_sales_ranking') return execBiToolSalesRanking(store, args);
-  if (toolName === 'query_complaint_product_ranking') return execBiToolComplaintRanking(store, args);
-  if (toolName === 'query_revenue_summary') return execBiToolRevenueSummary(store, args);
+async function runBiFunctionTool(toolName, store, args = {}, originalQuery = '') {
+  if (toolName === 'query_sales_ranking') return execBiToolSalesRanking(store, args, originalQuery);
+  if (toolName === 'query_complaint_product_ranking') return execBiToolComplaintRanking(store, args, originalQuery);
+  if (toolName === 'query_revenue_summary') return execBiToolRevenueSummary(store, args, originalQuery);
   if (toolName === 'query_revenue_forecast_next_day') return execBiToolRevenueForecastNextDay(store, args);
   return { ok: false, source: 'unknown', text: `不支持的工具：${toolName}` };
 }
@@ -444,7 +697,7 @@ function normalizeIntentPlan(rawPlan = {}) {
   return { intent, confidence, params };
 }
 
-async function buildBiIntentPlan(text, safeStore, conversationHistory = []) {
+async function buildBiIntentPlan(text, safeStore, conversationHistory = [], senderRole = '') {
   const historyHint = conversationHistory.length
     ? `\n\n最近对话记录（用于理解追问/上下文）：\n${conversationHistory.map(h => h.role === 'user' ? `用户: ${h.q} [工具:${h.tool||'无'}]` : `助手: ${h.a}`).join('\n')}`
     : '';
@@ -460,7 +713,9 @@ async function buildBiIntentPlan(text, safeStore, conversationHistory = []) {
       model: getBiReasoningModel(),
       temperature: 0,
       max_tokens: 220,
-      skipCache: true
+      skipCache: true,
+      role: senderRole,
+      purpose: 'analysis'
     }
   );
   const parsed = tryParseJsonObjectFromText(planner?.content || '');
@@ -468,7 +723,7 @@ async function buildBiIntentPlan(text, safeStore, conversationHistory = []) {
   return normalizeIntentPlan(parsed);
 }
 
-async function narrateBiToolResult(userText, toolText, store) {
+async function narrateBiToolResult(userText, toolText, store, senderRole = '') {
   const narr = await callLLM(
     [
       {
@@ -484,7 +739,9 @@ async function narrateBiToolResult(userText, toolText, store) {
       model: getBiReasoningModel(),
       temperature: 0.1,
       max_tokens: 260,
-      skipCache: true
+      skipCache: true,
+      role: senderRole,
+      purpose: 'reasoning'
     }
   );
   const content = String(narr?.content || '').trim();
@@ -492,13 +749,76 @@ async function narrateBiToolResult(userText, toolText, store) {
 }
 
 async function tryHandleBiByFunctionCalling({ text, store, brand, senderRole, senderUsername }) {
-  const safeStore = String(store || '').trim();
-  if (!safeStore) { console.log('[bi-fc] skip: no store'); return null; }
-
   const userId = String(senderUsername || 'anon').trim();
+  let safeStore = String(store || '').trim();
+  const lastCtx = _biLastToolCtx.get(userId);
+  const roleTier = getModelTier(senderRole);
+  const allowedTools = new Set(getAvailableTools(senderRole));
+
+  // HQ用户常见场景：store=总部，优先继承上一轮工具上下文门店
+  if ((!safeStore || safeStore === '总部') && lastCtx?.store) {
+    safeStore = String(lastCtx.store || '').trim();
+  }
+  // 品牌关键词补全门店
+  if (!safeStore || safeStore === '总部') {
+    try {
+      if (/马己仙/.test(String(text || ''))) {
+        const r = await pool().query(`SELECT store FROM sales_raw WHERE store LIKE '%马己仙%' GROUP BY store ORDER BY COUNT(*) DESC LIMIT 1`);
+        safeStore = String(r.rows?.[0]?.store || '').trim() || safeStore;
+      } else if (/洪潮/.test(String(text || ''))) {
+        const r = await pool().query(`SELECT store FROM sales_raw WHERE store LIKE '%洪潮%' GROUP BY store ORDER BY COUNT(*) DESC LIMIT 1`);
+        safeStore = String(r.rows?.[0]?.store || '').trim() || safeStore;
+      }
+    } catch (e) {}
+  }
+  if (!safeStore || safeStore === '总部') { console.log('[bi-fc] skip: no valid store'); return null; }
+
+  // 多轮追问强化：复用上一轮工具和参数，解决“其他呢/最差的”错判
+  const q = String(text || '').trim();
+  const isFollowup = /(其他呢|还有呢|再来|继续|更多|再给我|我要最差|最差的|倒数|垫底|最好|前十|前10|top10|top 10)/i.test(q);
+  if (isFollowup && lastCtx?.tool) {
+    if (!allowedTools.has(lastCtx.tool) || !isToolAllowed(senderRole, lastCtx.tool)) {
+      return {
+        response: '当前角色暂不支持该数据分析工具，请联系管理员开通对应权限。',
+        meta: { permissionDenied: true, tool: lastCtx.tool, role: senderRole, store: safeStore }
+      };
+    }
+    const args = { ...(lastCtx.args || {}) };
+    if (/(最差|倒数|垫底)/.test(q)) args.sort_order = 'asc';
+    if (/(最好|前十|前10|top10|top 10)/i.test(q)) args.sort_order = 'desc';
+    if (/(其他呢|还有呢|再来|继续|更多|再给我)/.test(q)) args.limit = clampInt(Number(args.limit || 10) + 5, 1, 20, 20);
+
+    const executed = await runBiFunctionTool(lastCtx.tool, safeStore, args, text);
+    if (executed?.text && !/暂无.*数据|无法查询|未绑定门店/.test(String(executed.text || ''))) {
+      const narrated = await narrateBiToolResult(text, executed.text, safeStore, senderRole);
+      pushBiConversationTurn(userId, text, narrated, lastCtx.tool);
+      _biLastToolCtx.set(userId, { tool: lastCtx.tool, args, store: safeStore, ts: Date.now() });
+      return {
+        response: narrated,
+        meta: {
+          source: executed.source,
+          tool: lastCtx.tool,
+          args,
+          intentPlan: { intent: lastCtx.tool, confidence: 1, params: args },
+          grounded: !!executed.ok,
+          followup: true,
+          store: safeStore,
+          brand,
+          role: senderRole
+        }
+      };
+    }
+  }
+
   const convHistory = getBiConversationHistory(userId);
   console.log('[bi-fc] start intent planning for:', JSON.stringify(text).slice(0, 80), 'store:', safeStore, 'historyTurns:', convHistory.length / 2);
-  const intentPlan = await buildBiIntentPlan(text, safeStore, convHistory);
+  const intentPlan = await buildBiIntentPlan(text, safeStore, convHistory, senderRole);
+  // 文本启发式兜底：避免“最差/倒数”被LLM误判成TOP查询
+  if (intentPlan?.params && /(最差|倒数|垫底|最低)/.test(q)) intentPlan.params.sort_order = 'asc';
+  if (intentPlan?.params && /(最好|最高|top|前十|前10)/i.test(q)) intentPlan.params.sort_order = 'desc';
+  if (intentPlan?.params && /(其他呢|还有呢|再来|继续|更多|再给我)/.test(q) && !intentPlan.params.limit) {
+    intentPlan.params.limit = 15;
+  }
   console.log('[bi-fc] intentPlan:', JSON.stringify(intentPlan));
   if (!intentPlan?.intent || intentPlan.intent === 'other' || intentPlan.confidence < 0.55) {
     console.log('[bi-fc] skip: intent not actionable');
@@ -514,41 +834,66 @@ async function tryHandleBiByFunctionCalling({ text, store, brand, senderRole, se
   const preferredTool = intentToolMap[intentPlan.intent] || '';
   if (!preferredTool) { console.log('[bi-fc] skip: no tool for intent', intentPlan.intent); return null; }
 
-  const toolPlanner = await callLLM(
-    [
+  if (!allowedTools.has(preferredTool) || !isToolAllowed(senderRole, preferredTool)) {
+    return {
+      response: '当前角色暂无权限调用该分析工具，建议联系管理员开通后重试。',
+      meta: {
+        permissionDenied: true,
+        requestedTool: preferredTool,
+        role: senderRole,
+        store: safeStore,
+        intentPlan
+      }
+    };
+  }
+
+  const budgetExceeded = isTierBudgetExceeded(roleTier);
+  let name = preferredTool;
+  let args = { ...(intentPlan.params || {}) };
+  if (!budgetExceeded) {
+    const toolPlanner = await callLLM(
+      [
+        {
+          role: 'system',
+          content: `你是BI工具参数器。必须调用工具且只返回工具调用。\n当前用户门店：${safeStore}（该门店是硬约束，不得跨店）。\n已识别意图：${intentPlan.intent}（置信度${intentPlan.confidence.toFixed(2)}）。\n请为指定工具补齐最合理参数。`
+        },
+        { role: 'user', content: String(text || '') }
+      ],
       {
-        role: 'system',
-        content: `你是BI工具参数器。必须调用工具且只返回工具调用。\n当前用户门店：${safeStore}（该门店是硬约束，不得跨店）。\n已识别意图：${intentPlan.intent}（置信度${intentPlan.confidence.toFixed(2)}）。\n请为指定工具补齐最合理参数。`
-      },
-      { role: 'user', content: String(text || '') }
-    ],
-    {
-      model: getBiReasoningModel(),
-      temperature: 0,
-      max_tokens: 300,
-      tools: BI_FUNCTION_TOOLS,
-      tool_choice: { type: 'function', function: { name: preferredTool } },
-      skipCache: true
-    }
-  );
+        model: getBiReasoningModel(),
+        temperature: 0,
+        max_tokens: 300,
+        tools: BI_FUNCTION_TOOLS,
+        tool_choice: { type: 'function', function: { name: preferredTool } },
+        skipCache: true,
+        role: senderRole,
+        purpose: 'analysis'
+      }
+    );
 
-  const toolCalls = Array.isArray(toolPlanner?.message?.tool_calls) ? toolPlanner.message.tool_calls : [];
-  console.log('[bi-fc] toolPlanner ok:', toolPlanner?.ok, 'toolCalls:', toolCalls.length, 'content:', String(toolPlanner?.content || '').slice(0, 80));
-  const call = toolCalls[0] || null;
-  const name = String(call?.function?.name || preferredTool).trim();
+    const toolCalls = Array.isArray(toolPlanner?.message?.tool_calls) ? toolPlanner.message.tool_calls : [];
+    console.log('[bi-fc] toolPlanner ok:', toolPlanner?.ok, 'toolCalls:', toolCalls.length, 'content:', String(toolPlanner?.content || '').slice(0, 80));
+    const call = toolCalls[0] || null;
+    name = String(call?.function?.name || preferredTool).trim() || preferredTool;
+    const llmArgs = parseToolArgs(call?.function?.arguments);
+    args = { ...(intentPlan.params || {}), ...(llmArgs || {}) };
+  }
+
   if (!name) { console.log('[bi-fc] skip: no tool name resolved'); return null; }
-
-  const llmArgs = parseToolArgs(call?.function?.arguments);
-  const args = { ...(intentPlan.params || {}), ...(llmArgs || {}) };
   console.log('[bi-fc] executing tool:', name, 'args:', JSON.stringify(args));
-  const executed = await runBiFunctionTool(name, safeStore, args);
+  const executed = await runBiFunctionTool(name, safeStore, args, text);
   console.log('[bi-fc] executed ok:', executed?.ok, 'source:', executed?.source, 'textLen:', String(executed?.text || '').length);
   if (!executed?.text) { console.log('[bi-fc] skip: empty tool result'); return null; }
+  if (/暂无.*数据|无法查询|未绑定门店/.test(String(executed.text || ''))) {
+    console.log('[bi-fc] skip: tool returned no-data, fallthrough to deterministic path');
+    return null;
+  }
 
-  const narrated = await narrateBiToolResult(text, executed.text, safeStore);
+  const narrated = await narrateBiToolResult(text, executed.text, safeStore, senderRole);
   console.log('[bi-fc] narrated len:', narrated?.length);
 
   pushBiConversationTurn(userId, text, narrated, name);
+  _biLastToolCtx.set(userId, { tool: name, args, store: safeStore, ts: Date.now() });
 
   return {
     response: narrated,
@@ -558,6 +903,7 @@ async function tryHandleBiByFunctionCalling({ text, store, brand, senderRole, se
       args,
       intentPlan,
       grounded: !!executed.ok,
+      budgetExceeded,
       store: safeStore,
       brand,
       role: senderRole
@@ -580,7 +926,15 @@ function resolveDateRangeFromQuestion(text, dd = 7) {
   return {label:`近${dd}天`,start:formatDate(new Date(today-(dd-1)*ms)),end:formatDate(today)};
 }
 
-function isDataBackedReply(d) { return d && (d.deterministic===true || d.grounded===true || !!d.source); }
+function isDataBackedReply(d) {
+  return !!(d && (
+    d.dataBacked === true ||
+    d.deterministic === true ||
+    d.grounded === true ||
+    d.functionCalling === true ||
+    !!d.source
+  ));
+}
 
 function isFactLikeQuestion(text) {
   const q = String(text || '').trim();
@@ -2063,178 +2417,15 @@ let _taskResponseHook = null;
 export function setTaskResponseHook(fn) { _taskResponseHook = fn; }
 
 export async function ensureAgentTables() {
-  const client = await pool().connect();
+  const migrationFile = path.join(path.dirname(new URL(import.meta.url).pathname), 'migrations', '005_agent_p0p2_tables.sql');
   try {
-    await client.query('BEGIN');
-
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS agent_issues (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        agent VARCHAR(60) NOT NULL,
-        brand VARCHAR(120),
-        store VARCHAR(200),
-        category VARCHAR(120),
-        severity VARCHAR(20) NOT NULL DEFAULT 'medium',
-        title VARCHAR(500) NOT NULL,
-        detail TEXT,
-        data JSONB NOT NULL DEFAULT '{}'::jsonb,
-        status VARCHAR(30) NOT NULL DEFAULT 'open',
-        assignee_username VARCHAR(100),
-        resolved_at TIMESTAMP,
-        resolution TEXT,
-        feishu_notified BOOLEAN DEFAULT FALSE,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS agent_messages (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        direction VARCHAR(10) NOT NULL DEFAULT 'in',
-        channel VARCHAR(30) NOT NULL DEFAULT 'feishu',
-        feishu_open_id VARCHAR(200),
-        sender_username VARCHAR(200),
-        sender_name VARCHAR(200),
-        sender_role VARCHAR(60),
-        routed_to VARCHAR(60),
-        content_type VARCHAR(30) NOT NULL DEFAULT 'text',
-        content TEXT,
-        image_urls JSONB DEFAULT '[]'::jsonb,
-        agent_response TEXT,
-        agent_data JSONB DEFAULT '{}'::jsonb,
-        feishu_message_id VARCHAR(200),
-        record_id VARCHAR(200),
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS agent_scores (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        brand VARCHAR(120) NOT NULL,
-        store VARCHAR(200) NOT NULL,
-        username VARCHAR(100) NOT NULL,
-        role VARCHAR(60),
-        period VARCHAR(20) NOT NULL,
-        score_model VARCHAR(60),
-        base_score NUMERIC(5,1) NOT NULL DEFAULT 100,
-        total_score NUMERIC(5,1) NOT NULL DEFAULT 100,
-        additions JSONB NOT NULL DEFAULT '[]'::jsonb,
-        deductions JSONB NOT NULL DEFAULT '[]'::jsonb,
-        breakdown JSONB NOT NULL DEFAULT '{}'::jsonb,
-        summary TEXT,
-        feishu_notified BOOLEAN DEFAULT FALSE,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        CONSTRAINT uq_agent_scores_period UNIQUE (brand, store, username, period)
-      )
-    `);
-
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS agent_appeals (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        issue_id UUID,
-        score_id UUID,
-        username VARCHAR(100) NOT NULL,
-        reason TEXT NOT NULL,
-        status VARCHAR(30) NOT NULL DEFAULT 'pending',
-        agent_verdict TEXT,
-        agent_data JSONB DEFAULT '{}'::jsonb,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        resolved_at TIMESTAMP
-      )
-    `);
-
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS agent_visual_audits (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        store VARCHAR(200),
-        brand VARCHAR(120),
-        username VARCHAR(100) NOT NULL,
-        image_url TEXT NOT NULL,
-        audit_type VARCHAR(60),
-        result VARCHAR(30) NOT NULL DEFAULT 'pending',
-        confidence NUMERIC(4,2),
-        findings TEXT,
-        exif_time TIMESTAMP,
-        exif_gps TEXT,
-        image_hash VARCHAR(64),
-        duplicate_of UUID,
-        agent_raw JSONB DEFAULT '{}'::jsonb,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    // 差评报告DB - 手动上传的差评数据
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS bad_reviews (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        date DATE NOT NULL,
-        store VARCHAR(200) NOT NULL,
-        brand VARCHAR(120),
-        review_type VARCHAR(30) NOT NULL,  -- 'product' 或 'service'
-        content TEXT NOT NULL,
-        product_name VARCHAR(200),          -- 产品名称（产品差评时）
-        service_item VARCHAR(200),          -- 服务项目（服务差评时）
-        rating INT,                         -- 评分（如有）
-        platform VARCHAR(60),               -- 来源平台：大众点评/美团/饿了么等
-        order_id VARCHAR(100),              -- 订单ID（如有）
-        customer_name VARCHAR(100),         -- 顾客名称（如有）
-        has_detailed_event BOOLEAN DEFAULT FALSE,  -- 是否有详细事件过程
-        event_detail TEXT,                  -- 详细事件过程描述
-        sop_case_id UUID,                   -- 关联的SOP案例分析ID
-        status VARCHAR(30) DEFAULT 'open',  -- open/processing/resolved
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_bad_reviews_store_date ON bad_reviews (store, date)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_bad_reviews_type ON bad_reviews (review_type, product_name, service_item)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_bad_reviews_detailed ON bad_reviews (has_detailed_event) WHERE has_detailed_event = TRUE`);
-
-    // Feishu ↔ HRMS user mapping
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS feishu_users (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        open_id VARCHAR(200) NOT NULL UNIQUE,
-        username VARCHAR(100),
-        name VARCHAR(200),
-        mobile VARCHAR(30),
-        store VARCHAR(200),
-        role VARCHAR(60),
-        registered BOOLEAN DEFAULT FALSE,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_agent_issues_store ON agent_issues (store, status)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_agent_issues_assignee ON agent_issues (assignee_username, status)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_agent_messages_sender ON agent_messages (feishu_open_id, created_at DESC)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_agent_scores_user ON agent_scores (username, period)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_agent_visual_store ON agent_visual_audits (store, created_at DESC)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_feishu_users_openid ON feishu_users (open_id)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_feishu_users_username ON feishu_users (username)`);
-
-    // Add feishu_notified column if missing (migration for existing tables)
-    try { await client.query(`ALTER TABLE agent_issues ADD COLUMN IF NOT EXISTS feishu_notified BOOLEAN DEFAULT FALSE`); } catch (e) {}
-    try { await client.query(`ALTER TABLE agent_scores ADD COLUMN IF NOT EXISTS feishu_notified BOOLEAN DEFAULT FALSE`); } catch (e) {}
-    // Add name column to agent_scores (migration)
-    try { await client.query(`ALTER TABLE agent_scores ADD COLUMN IF NOT EXISTS name VARCHAR(200)`); } catch (e) {}
-    try { await client.query(`ALTER TABLE agent_messages ADD COLUMN IF NOT EXISTS record_id VARCHAR(200)`); } catch (e) {}
-    try { await client.query(`ALTER TABLE agent_messages ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`); } catch (e) {}
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_agent_messages_record_id ON agent_messages (record_id) WHERE record_id IS NOT NULL`);
-
-    await client.query('COMMIT');
+    const sql = fs.readFileSync(migrationFile, 'utf-8');
+    await pool().query(sql);
+    console.log('[agents] Migration 005_agent_p0p2_tables.sql applied successfully');
   } catch (e) {
-    await client.query('ROLLBACK').catch(() => {});
     const code = String(e?.code || '');
     if (code === '23505') return;
-    console.error('[agents] ensureAgentTables failed:', e?.message || e);
-  } finally {
-    client.release();
+    console.error('[agents] ensureAgentTables migration failed:', e?.message || e);
   }
 }
 
@@ -2319,14 +2510,194 @@ function getContext(userId) {
   return _conversationContext.get(userId) || [];
 }
 
+function markQualityMetric(field, delta = 1) {
+  if (!Object.prototype.hasOwnProperty.call(_agentQualityMetrics, field)) return;
+  _agentQualityMetrics[field] = Number(_agentQualityMetrics[field] || 0) + Number(delta || 0);
+  _agentQualityMetrics.lastUpdatedAt = new Date().toISOString();
+}
+
+async function getAgentLongMemory(userKey, memoryKey) {
+  const u = String(userKey || '').trim().toLowerCase();
+  const k = String(memoryKey || '').trim();
+  if (!u || !k) return null;
+  try {
+    const r = await pool().query(
+      `SELECT memory_value FROM agent_long_memory WHERE user_key = $1 AND memory_key = $2 LIMIT 1`,
+      [u, k]
+    );
+    const row = r.rows?.[0];
+    return row?.memory_value && typeof row.memory_value === 'object' ? row.memory_value : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function setAgentLongMemory(userKey, memoryKey, value) {
+  const u = String(userKey || '').trim().toLowerCase();
+  const k = String(memoryKey || '').trim();
+  if (!u || !k) return;
+  const payload = value && typeof value === 'object' ? value : { value: String(value || '') };
+  try {
+    await pool().query(
+      `INSERT INTO agent_long_memory (user_key, memory_key, memory_value, created_at, updated_at)
+       VALUES ($1, $2, $3::jsonb, NOW(), NOW())
+       ON CONFLICT (user_key, memory_key)
+       DO UPDATE SET memory_value = EXCLUDED.memory_value, updated_at = NOW()`,
+      [u, k, JSON.stringify(payload)]
+    );
+  } catch (e) {
+    console.error('[agents] setAgentLongMemory failed:', e?.message || e);
+  }
+}
+
+async function recordAgentQualityAudit({ route, username, queryText, responseText, auditResult, passed, rewriteCount = 0 }) {
+  try {
+    await pool().query(
+      `INSERT INTO agent_quality_audits (route, username, query_text, response_text, audit_result, passed, rewrite_count)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)`,
+      [
+        String(route || '').trim(),
+        String(username || '').trim(),
+        String(queryText || '').slice(0, 1000),
+        String(responseText || '').slice(0, 4000),
+        JSON.stringify(auditResult || {}),
+        passed === true,
+        Math.max(0, Number(rewriteCount) || 0)
+      ]
+    );
+  } catch (e) {}
+}
+
+function buildAutonomousTaskFingerprint({ taskType, store, route, queryText }) {
+  const raw = `${String(taskType || '').trim()}|${normalizeStoreKey(store)}|${String(route || '').trim()}|${normalizePlainText(queryText || '', 300)}`;
+  return crypto.createHash('sha1').update(raw).digest('hex');
+}
+
+async function createOrUpdateAutonomousDataTask({
+  taskType,
+  store,
+  brand,
+  requesterUsername,
+  route,
+  queryText,
+  reason,
+  evidence,
+  ownerUsername,
+  dueHours = 8
+}) {
+  const fingerprint = buildAutonomousTaskFingerprint({ taskType, store, route, queryText });
+  try {
+    const r = await pool().query(
+      `INSERT INTO agent_autonomous_tasks (
+         fingerprint, task_type, status, store, brand, requester_username, route,
+         query_text, reason, evidence, action_plan, owner_username, notify_count, due_at, created_at, updated_at
+       )
+       VALUES (
+         $1, $2, 'open', $3, $4, $5, $6,
+         $7, $8, $9::jsonb, $10::jsonb, $11, 0, NOW() + make_interval(hours => $12), NOW(), NOW()
+       )
+       ON CONFLICT (fingerprint)
+       DO UPDATE SET
+         reason = EXCLUDED.reason,
+         evidence = EXCLUDED.evidence,
+         owner_username = COALESCE(agent_autonomous_tasks.owner_username, EXCLUDED.owner_username),
+         updated_at = NOW()
+       RETURNING *`,
+      [
+        fingerprint,
+        String(taskType || 'data_gap').trim() || 'data_gap',
+        String(store || '').trim(),
+        String(brand || '').trim(),
+        String(requesterUsername || '').trim(),
+        String(route || '').trim(),
+        String(queryText || '').slice(0, 2000),
+        String(reason || '').slice(0, 500),
+        JSON.stringify(evidence || {}),
+        JSON.stringify({ suggestedAction: '同步/补齐数据源后自动回访用户', createdBy: 'agent_autonomy' }),
+        String(ownerUsername || '').trim(),
+        Math.max(1, Math.min(72, Number(dueHours) || 8))
+      ]
+    );
+    markQualityMetric('autonomousTasks', 1);
+    return r.rows?.[0] || null;
+  } catch (e) {
+    console.error('[agents] createOrUpdateAutonomousDataTask failed:', e?.message || e);
+    return null;
+  }
+}
+
+async function notifyAutonomousDataTaskOwner(task) {
+  const t = task && typeof task === 'object' ? task : null;
+  if (!t) return;
+  const owner = String(t.owner_username || '').trim();
+  if (!owner) return;
+  try {
+    const fu = await lookupFeishuUserByUsername(owner);
+    if (!fu?.open_id) return;
+    const msg = [
+      `📌 自治任务提醒 [${t.task_type}]`,
+      `门店：${t.store || '-'}`,
+      `原因：${t.reason || '数据不足'}`,
+      `用户问题：${String(t.query_text || '').slice(0, 120)}`,
+      `请补齐数据源后在系统内关闭任务。`
+    ].join('\n');
+    await sendLarkMessage(fu.open_id, prefixWithAgentName('master', msg));
+    await pool().query(
+      `UPDATE agent_autonomous_tasks
+       SET notify_count = COALESCE(notify_count, 0) + 1, updated_at = NOW()
+       WHERE id = $1`,
+      [t.id]
+    );
+  } catch (e) {
+    console.error('[agents] notifyAutonomousDataTaskOwner failed:', e?.message || e);
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableLLMError(err) {
+  const status = Number(err?.response?.status || 0);
+  if ([408, 409, 425, 429, 500, 502, 503, 504, 520, 522, 524].includes(status)) return true;
+  const code = String(err?.code || '').toLowerCase();
+  if (['econnreset', 'etimedout', 'eai_again', 'enotfound', 'ecanceled'].includes(code)) return true;
+  const msg = String(err?.message || '').toLowerCase();
+  return (
+    msg.includes('timeout') ||
+    msg.includes('socket hang up') ||
+    msg.includes('network error') ||
+    msg.includes('bad record mac') ||
+    msg.includes('incomplete envelope') ||
+    msg.includes('tls')
+  );
+}
+
 export async function callLLM(messages, options = {}) {
-  const cfg = getLLMClientConfig(options.model || DEEPSEEK_MODEL);
+  const role = String(options.role || '').trim();
+  const purpose = String(options.purpose || 'reasoning').trim();
+  const tier = role ? getModelTier(role) : '';
+  const tierModel = role ? getModelForRole(role, purpose) : '';
+  const selectedModel = String(options.model || tierModel || DEEPSEEK_MODEL).trim() || DEEPSEEK_MODEL;
+  const cfg = getLLMClientConfig(selectedModel);
   const model = cfg.model;
   const apiKey = cfg.apiKey;
   if (!apiKey) return { ok: false, error: 'no_api_key', content: '' };
+
+  const budgetExceeded = !!(tier && isTierBudgetExceeded(tier));
+  const defaultTemp = role ? getTemperatureForRole(role) : 0.1;
+  const requestedTemp = Number(options.temperature ?? defaultTemp);
+  const temperature = Number.isFinite(requestedTemp)
+    ? (budgetExceeded ? Math.min(0.05, requestedTemp) : requestedTemp)
+    : (budgetExceeded ? 0 : 0.1);
+  const roleMaxTokens = role ? getMaxTokensForRole(role) : 1500;
+  const requestedMax = Number(options.max_tokens ?? roleMaxTokens);
+  const maxTokens = Number.isFinite(requestedMax)
+    ? (budgetExceeded ? Math.max(256, Math.min(600, requestedMax)) : requestedMax)
+    : (budgetExceeded ? 512 : 1500);
   
   // 生成缓存键
-  const cacheKey = `${model}:${JSON.stringify(messages.slice(-2))}:${options.temperature || 0.1}`;
+  const cacheKey = `${model}:${JSON.stringify(messages.slice(-2))}:${temperature}:${purpose}:${role}`;
   
   // 检查缓存
   const cachedResponse = getCachedResponse(cacheKey);
@@ -2337,49 +2708,90 @@ export async function callLLM(messages, options = {}) {
   const startTime = Date.now();
   _performanceMetrics.totalCalls++;
   
-  try {
+  // ── Provider 级别自动降级：primary → fallback ──
+  const hasTools = !!(options.tools && options.tools.length > 0);
+  const fallbackChain = hasTools ? [{ provider: resolveModelProvider(model), model }] : getTextFallbackChain(model);
+  let usedModel = model;
+  let usedProvider = resolveModelProvider(model);
+
+  for (const candidate of fallbackChain) {
+    if (!isProviderHealthy(candidate.provider)) {
+      console.log(`[LLM-FALLBACK] Skipping unhealthy provider: ${candidate.provider}`);
+      continue;
+    }
+    const fbCfg = getLLMClientConfig(candidate.model);
+    if (!fbCfg.apiKey) continue;
+
     const payload = {
-      model,
+      model: fbCfg.model,
       messages,
-      temperature: options.temperature ?? 0.1,  // 降低温度提高一致性
-      max_tokens: options.max_tokens ?? 1500,  // 控制输出长度
-      top_p: 0.9,  // 增加top_p控制
-      frequency_penalty: 0.1,  // 减少重复
+      temperature,
+      max_tokens: maxTokens,
+      top_p: budgetExceeded ? 0.7 : 0.9,
+      frequency_penalty: 0.1,
       presence_penalty: 0.1
     };
-    if (options.tools && options.tools.length > 0) {
+    if (hasTools) {
       payload.tools = options.tools;
       if (options.tool_choice) payload.tool_choice = options.tool_choice;
     }
 
-    const resp = await axios.post(
-      `${cfg.baseUrl}/chat/completions`,
-      payload,
-      { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 60000 }
-    );
-    
-    const messageObj = resp.data?.choices?.[0]?.message || {};
-    const content = messageObj.content || '';
-    const responseTime = Date.now() - startTime;
-    
-    // 更新性能指标
-    _performanceMetrics.avgResponseTime = 
-      (_performanceMetrics.avgResponseTime * (_performanceMetrics.totalCalls - 1) + responseTime) / 
-      _performanceMetrics.totalCalls;
-    
-    // 缓存响应
-    if (!options.skipCache && content && !messageObj.tool_calls) {
-      setCachedResponse(cacheKey, content);
+    const maxAttempts = candidate.provider === usedProvider ? 2 : 1;
+    let resp = null;
+    let lastErr = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        resp = await axios.post(
+          `${fbCfg.baseUrl}/chat/completions`,
+          payload,
+          { headers: { 'Authorization': `Bearer ${fbCfg.apiKey}`, 'Content-Type': 'application/json' }, timeout: 60000 }
+        );
+        break;
+      } catch (e) {
+        lastErr = e;
+        if (attempt < maxAttempts && isRetryableLLMError(e)) {
+          const waitMs = 600 * attempt;
+          console.warn(`[LLM-FALLBACK] ${candidate.provider} transient error (attempt ${attempt}/${maxAttempts}), retry in ${waitMs}ms:`, e?.message || e);
+          await sleep(waitMs);
+          continue;
+        }
+      }
     }
-    
-    trackLLMResult(true);
-    return { ok: true, content, message: messageObj, raw: resp.data, responseTime };
-  } catch (e) {
-    _performanceMetrics.errorCount++;
-    trackLLMResult(false);
-    console.error('[agents] callLLM error:', e?.message || e);
-    return { ok: false, error: String(e?.message || e), content: '' };
+
+    if (resp) {
+      markProviderOk(candidate.provider);
+      usedModel = fbCfg.model;
+      usedProvider = candidate.provider;
+
+      const messageObj = resp.data?.choices?.[0]?.message || {};
+      const content = messageObj.content || '';
+      const responseTime = Date.now() - startTime;
+
+      _performanceMetrics.avgResponseTime =
+        (_performanceMetrics.avgResponseTime * (_performanceMetrics.totalCalls - 1) + responseTime) /
+        _performanceMetrics.totalCalls;
+
+      if (!options.skipCache && content && !messageObj.tool_calls) {
+        setCachedResponse(cacheKey, content);
+      }
+      if (tier && options.trackTier === true) {
+        try { trackLLMCall(tier, Number(resp.data?.usage?.total_tokens || 0)); } catch (e) {}
+      }
+
+      trackLLMResult(true);
+      const isFallback = candidate.provider !== resolveModelProvider(model);
+      if (isFallback) console.log(`[LLM-FALLBACK] ✅ Succeeded via fallback: ${candidate.provider}/${fbCfg.model} (primary was ${resolveModelProvider(model)}/${model})`);
+      return { ok: true, content, message: messageObj, raw: resp.data, responseTime, budgetExceeded, fallbackUsed: isFallback ? candidate.provider : undefined, actualModel: usedModel };
+    }
+
+    markProviderFail(candidate.provider);
+    console.warn(`[LLM-FALLBACK] ❌ Provider ${candidate.provider}/${fbCfg.model} failed: ${lastErr?.message || 'unknown'}`);
   }
+
+  _performanceMetrics.errorCount++;
+  trackLLMResult(false);
+  console.error('[agents] callLLM ALL providers failed for model chain:', fallbackChain.map(c => c.provider).join(' → '));
+  return { ok: false, error: 'all_providers_failed', content: '', providerHealth: getProviderHealthStatus() };
 }
 
 export async function callVisionLLM(imageUrl, prompt) {
@@ -2419,15 +2831,32 @@ export async function callVisionLLM(imageUrl, prompt) {
     if (!content.length && prompt) content.push({ type: 'text', text: String(prompt) });
     if (!content.length) return { ok: false, error: 'invalid_vision_input', content: '' };
 
-    const resp = await axios.post(
-      `${cfg.baseUrl}/chat/completions`,
-      {
-        model: cfg.model,
-        messages: [{ role: 'user', content }],
-        temperature: 0.2, max_tokens: 1500
-      },
-      { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 90000 }
-    );
+    let resp = null;
+    let lastErr = null;
+    const maxAttempts = 2;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        resp = await axios.post(
+          `${cfg.baseUrl}/chat/completions`,
+          {
+            model: cfg.model,
+            messages: [{ role: 'user', content }],
+            temperature: 0.2, max_tokens: 1500
+          },
+          { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 90000 }
+        );
+        break;
+      } catch (e) {
+        lastErr = e;
+        if (attempt < maxAttempts && isRetryableLLMError(e)) {
+          const waitMs = 800 * attempt;
+          console.warn(`[agents] callVisionLLM transient error (attempt ${attempt}/${maxAttempts}), retry in ${waitMs}ms:`, e?.message || e);
+          await sleep(waitMs);
+          continue;
+        }
+      }
+    }
+    if (!resp) throw lastErr || new Error('vision_request_failed');
     trackLLMResult(true);
     return { ok: true, content: resp.data?.choices?.[0]?.message?.content || '', raw: resp.data };
   } catch (e) {
@@ -3676,6 +4105,8 @@ async function seedBitableDedup() {
 }
 
 export async function pollBitableSubmissions(configKey = 'ops_checklist') {
+  const cfg = BITABLE_CONFIGS[configKey];
+  if (!cfg?.tableId) { return; } // skip configs without a valid tableId
   await seedBitableDedup();
   console.log(`[bitable][${configKey}] polling submissions...`);
   
@@ -3919,7 +4350,7 @@ export async function pollAllBitableSubmissions() {
   const known = new Set(preferredOrder);
   const finalKeys = [
     ...preferredOrder.filter((k) => BITABLE_CONFIGS[k]),
-    ...Object.keys(BITABLE_CONFIGS).filter((k) => !known.has(k))
+    ...Object.keys(BITABLE_CONFIGS).filter((k) => !known.has(k) && BITABLE_CONFIGS[k]?.type !== 'task_response')
   ];
   for (const configKey of finalKeys) {
     try {
@@ -3933,7 +4364,7 @@ export async function pollAllBitableSubmissions() {
 // ─────────────────────────────────────────────
 // Task Response via Bitable Collection Form
 // ─────────────────────────────────────────────
-const _taskResponseBitableState = { tableId: '', formViewId: '', formUrl: '', initialized: false };
+const _taskResponseBitableState = { tableId: '', formViewId: '', formUrl: '', initialized: false, failCount: 0, disabled: false };
 const _processedTaskResponseIds = new Set();
 
 const TASK_RESPONSE_TABLE_NAME = '异常任务回复';
@@ -3951,6 +4382,7 @@ const TASK_RESPONSE_FIELDS = [
 
 export async function ensureTaskResponseBitable() {
   if (_taskResponseBitableState.initialized && _taskResponseBitableState.tableId) return true;
+  if (_taskResponseBitableState.disabled) return false; // permanently failed, stop retrying
 
   const configKey = 'task_responses';
   const config = BITABLE_CONFIGS[configKey];
@@ -3968,37 +4400,38 @@ export async function ensureTaskResponseBitable() {
   if (!token) { console.error('[task_response] No tenant token'); return false; }
 
   try {
-    // List tables to find existing one
-    const listResp = await axios.get(
+    // Skip list-tables (requires permissions we may not have) — go straight to create
+    const createResp = await axios.post(
       `https://open.feishu.cn/open-apis/bitable/v1/apps/${config.appToken}/tables`,
-      { headers: { 'Authorization': `Bearer ${token}` }, timeout: 10000 }
+      { table: { name: TASK_RESPONSE_TABLE_NAME, default_view_name: '默认视图', fields: TASK_RESPONSE_FIELDS } },
+      { headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 15000 }
     );
-    const tables = listResp.data?.data?.items || [];
-    const existing = tables.find(t => t.name === TASK_RESPONSE_TABLE_NAME);
-
-    if (existing) {
-      _taskResponseBitableState.tableId = existing.table_id;
-      config.tableId = existing.table_id;
-      console.log('[task_response] Found existing table:', existing.table_id);
-    } else {
-      // Create table
-      const createResp = await axios.post(
-        `https://open.feishu.cn/open-apis/bitable/v1/apps/${config.appToken}/tables`,
-        { table: { name: TASK_RESPONSE_TABLE_NAME, default_view_name: '默认视图', fields: TASK_RESPONSE_FIELDS } },
-        { headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 15000 }
-      );
-      const newId = createResp.data?.data?.table_id;
-      if (!newId) { console.error('[task_response] Table creation failed:', createResp.data); return false; }
-      _taskResponseBitableState.tableId = newId;
-      config.tableId = newId;
-      console.log('[task_response] Created new table:', newId);
-    }
+    const newId = createResp.data?.data?.table_id;
+    if (!newId) { console.error('[task_response] Table creation returned no ID:', createResp.data); return false; }
+    _taskResponseBitableState.tableId = newId;
+    config.tableId = newId;
+    _taskResponseBitableState.failCount = 0;
+    console.log('[task_response] Created new table:', newId);
 
     await _ensureTaskResponseFormView(configKey);
     _taskResponseBitableState.initialized = true;
     return true;
   } catch (e) {
-    console.error('[task_response] ensureTaskResponseBitable failed:', e?.response?.data || e?.message);
+    _taskResponseBitableState.failCount++;
+    const errCode = e?.response?.data?.code;
+    const errMsg = e?.response?.data?.msg || e?.message;
+    if (_taskResponseBitableState.failCount <= 2) {
+      console.error(`[task_response] ensureTaskResponseBitable failed (${_taskResponseBitableState.failCount}/3): code=${errCode} msg=${errMsg}`);
+    }
+    // After 3 failures, disable permanently to stop log spam
+    if (_taskResponseBitableState.failCount >= 3) {
+      if (errCode === 1254302) {
+        console.error('[task_response] ⚠️ Feishu app lacks bitable:app permission — Bitable task response DISABLED. Tasks will still be sent via Feishu messages. To enable: grant permission in Feishu Developer Console or set BITABLE_TASK_RESP_TABLE_ID env var.');
+      } else {
+        console.error(`[task_response] Bitable task response DISABLED after 3 failures. Last error: code=${errCode} msg=${errMsg}`);
+      }
+      _taskResponseBitableState.disabled = true;
+    }
     return false;
   }
 }
@@ -4008,7 +4441,7 @@ async function _ensureTaskResponseFormView(configKey) {
   const tableId = _taskResponseBitableState.tableId;
   if (!tableId) return;
 
-  const envFormUrl = process.env.BITABLE_TASK_RESP_FORM_URL || '';
+  const envFormUrl = process.env.BITABLE_TASK_RESP_FORM_URL || 'https://qcniocx2wuu8.feishu.cn/base/BTAjbflrlaMRHesADUfc8usznqh?table=tblT86H1uuTJydne&view=vewOvsJql9';
   if (envFormUrl) {
     _taskResponseBitableState.formUrl = envFormUrl;
     console.log('[task_response] Using form URL from env:', envFormUrl);
@@ -4076,7 +4509,11 @@ export async function createBitableRecord(configKey, fields) {
       { headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 10000 }
     );
     const record = resp.data?.data?.record;
-    console.log(`[bitable][${configKey}] created record:`, record?.record_id);
+    if (!record?.record_id) {
+      console.warn(`[bitable][${configKey}] createBitableRecord: no record_id in response. code=${resp.data?.code} msg=${resp.data?.msg} keys=${Object.keys(resp.data?.data || {}).join(',')}`);
+    } else {
+      console.log(`[bitable][${configKey}] created record: ${record.record_id}`);
+    }
     return record;
   } catch (e) {
     console.error(`[bitable][${configKey}] createBitableRecord failed:`, e?.response?.data || e?.message);
@@ -4498,12 +4935,12 @@ function scheduleRandomTask(taskKey, config) {
 function isWithinWorkingHours() {
   const now = new Date();
   const hour = Number(now.toLocaleString('en-US', { timeZone: 'Asia/Shanghai', hour: 'numeric', hour12: false }));
-  return hour >= 9 && hour <= 22;
+  return hour >= 10 && hour <= 20;
 }
 
 async function executeScheduledTask(taskKey, config) {
   if (!isWithinWorkingHours()) {
-    console.log(`[ops] skipping task ${taskKey}: outside working hours (09:00-22:59 CST)`);
+    console.log(`[ops] skipping task ${taskKey}: outside working hours (10:00-21:00 CST)`);
     return;
   }
   console.log(`[ops] executing scheduled task: ${taskKey}`);
@@ -4917,7 +5354,12 @@ async function recognizeLarkAudio(messageId, fileKey) {
     );
     const msgBody = msgResp.data?.data?.items?.[0]?.body || msgResp.data?.data?.body || {};
     const recognition = msgBody?.content ? (() => {
-      try { return JSON.parse(msgBody.content)?.recognition || ''; } catch { return ''; }
+      try {
+        const parsed = JSON.parse(msgBody.content) || {};
+        return parsed?.recognition || parsed?.text || parsed?.transcript || '';
+      } catch {
+        return '';
+      }
     })() : '';
     if (recognition.trim()) {
       console.log(`[feishu-asr] IM API recognition: "${recognition.trim().slice(0, 80)}"`);
@@ -4936,18 +5378,30 @@ async function recognizeLarkAudio(messageId, fileKey) {
     const audioBase64 = Buffer.from(audioResp.data).toString('base64');
     console.log(`[feishu-asr] audio downloaded: ${audioResp.data.byteLength} bytes`);
 
-    const asrResp = await axios.post(
+    const asrPayload = {
+      speech: { speech: audioBase64 },
+      config: { engine_type: '16k_auto', file_id: messageId, format: 'opus' }
+    };
+    const asrEndpoints = [
       'https://open.feishu.cn/open-apis/speech/v1/speech/file_recognize',
-      {
-        speech: { speech: audioBase64 },
-        config: { engine_type: '16k_auto', file_id: messageId, format: 'opus' }
-      },
-      { headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 30000 }
-    );
-    const recognized = asrResp.data?.data?.recognition_text || '';
-    if (recognized.trim()) {
-      console.log(`[feishu-asr] Speech API recognized: "${recognized.slice(0, 80)}"`);
-      return recognized.trim();
+      'https://open.feishu.cn/open-apis/speech_to_text/v1/speech/file_recognize'
+    ];
+    for (const endpoint of asrEndpoints) {
+      try {
+        const asrResp = await axios.post(
+          endpoint,
+          asrPayload,
+          { headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 30000 }
+        );
+        const recognized = asrResp.data?.data?.recognition_text || asrResp.data?.data?.text || '';
+        if (recognized.trim()) {
+          console.log(`[feishu-asr] Speech API recognized via ${endpoint}: "${recognized.slice(0, 80)}"`);
+          return recognized.trim();
+        }
+      } catch (ee) {
+        const status = ee?.response?.status;
+        if (status !== 404) throw ee;
+      }
     }
   } catch (e) {
     const status = e?.response?.status;
@@ -6187,6 +6641,7 @@ function checkAgentPermission(role, route) {
     ops_supervisor: ['store_manager', 'store_production_manager'],
     chief_evaluator: ['store_manager', 'store_production_manager'],
     sop_advisor: ['store_manager', 'store_production_manager', 'cashier', 'staff'],
+    appeal: ['store_manager', 'store_production_manager', 'cashier', 'staff'],
     appeal_agent: ['store_manager', 'store_production_manager', 'cashier', 'staff'],
     train_advisor: ['store_manager', 'store_production_manager', 'cashier', 'staff'],
     general: true
@@ -6199,7 +6654,10 @@ function checkAgentPermission(role, route) {
 
 async function routeMessage(text, hasImage, senderUsername) {
   const t = String(text || '').trim();
-  if (hasImage) return { route: 'ops_supervisor' };
+  const ruleRoute = inferRouteByRules(t, hasImage);
+  if (ruleRoute?.route && ruleRoute.route !== 'general') {
+    return { route: ruleRoute.route, confidence: ruleRoute.confidence || 0.9, reason: ruleRoute.reason || 'rule_match' };
+  }
 
   const explicitOpsKeywords = /(拍照|上传照片|巡检|检查表|开市检查|收档检查|开档检查|闭市检查)/;
   const explicitDataKeywords = /(桌访|差评|点评|大众点评|评价.*(怎么样|结果|情况|差|多少)|营业额|营收|生意|经营情况|经营|毛利|日报|业绩|达成率|目标.*营|客诉|kpi|人效|收档.*(得分|平均|合格|多少|几次|报告|数据)|开档.*(得分|平均|合格|多少|几次|报告|数据)|原料.*(异常|收货|多少|几次|报告|日报)|食材|进货|例会|早会|班会|报损|订单.*数|客单价|会员.*数|充值)/i;
@@ -6208,7 +6666,16 @@ async function routeMessage(text, hasImage, senderUsername) {
   }
   
   // 快速通行：如果是单数字选项回复，直接返回general供后续继承历史路由
-  if (/^\d+$/.test(t) || /^[一二三四五六七八九十]$/.test(t)) return { route: 'general' };
+  if (/^\d+$/.test(t) || /^[一二三四五六七八九十]$/.test(t) || FOLLOWUP_HINT_PATTERNS.test(t)) {
+    if (senderUsername) {
+      const memory = await getAgentLongMemory(senderUsername, 'last_route');
+      const memoryRoute = String(memory?.route || '').trim();
+      if (memoryRoute && memoryRoute !== 'general') {
+        return { route: memoryRoute, confidence: 0.86, reason: 'memory_followup' };
+      }
+    }
+    return { route: 'general' };
+  }
 
   // 获取最近的对话历史作为上下文（近30分钟内的最后3条非系统消息）
   let contextStr = '';
@@ -6267,16 +6734,14 @@ ${contextStr}
   try {
     const llm = await callLLM([
       { role: 'system', content: systemPrompt }
-    ], { temperature: 0.1, max_tokens: 150 }); // 增加token以容纳JSON
+    ], { temperature: 0.1, max_tokens: 150, purpose: 'analysis' }); // 增加token以容纳JSON
     
     let resultText = String(llm.content || '').trim();
     // 移除可能包裹的 markdown JSON 标记
     resultText = resultText.replace(/^```json\s*/i, '').replace(/```$/i, '').trim();
-    
-    let result;
-    try {
-      result = JSON.parse(resultText);
-    } catch (parseError) {
+
+    const result = safeJsonParse(resultText, null);
+    if (!result || typeof result !== 'object') {
       console.error('[route] JSON parse failed, text:', resultText);
       return { route: 'general' };
     }
@@ -6285,6 +6750,9 @@ ${contextStr}
     
     // 置信度过滤
     if (result.confidence < 0.7 && result.reason) {
+      if (ruleRoute?.route && ruleRoute.route !== 'general') {
+        return { route: ruleRoute.route, confidence: ruleRoute.confidence || 0.9, reason: 'rule_override_low_confidence' };
+      }
       return { route: 'clarify', message: result.reason };
     }
     
@@ -6311,7 +6779,26 @@ async function handleAgentMessage(senderUsername, senderName, senderStore, sende
     return prefixWithAgentName('master', routeRes.message || '请问您具体想咨询哪个方面的问题？');
   }
 
-  const store = senderStore;
+  let store = senderStore;
+
+  // 【Q6】HQ/admin 用户的 store 通常为"总部"或空，从消息文本中提取门店名
+  if (!store || store === '总部') {
+    try {
+      const storeR = await pool().query(`SELECT DISTINCT store FROM feishu_users WHERE store IS NOT NULL AND store != '' AND store != '总部'`);
+      const knownStores = (storeR.rows || []).map(r => r.store).filter(Boolean);
+      const txt = String(text || '');
+      for (const s of knownStores) {
+        if (txt.includes(s)) { store = s; break; }
+      }
+      // 模糊匹配品牌前缀（如"洪潮" → "洪潮大宁久光店"）
+      if (!store || store === '总部') {
+        for (const s of knownStores) {
+          const prefix = txt.match(/(洪潮|马己仙|年年有喜)/)?.[0];
+          if (prefix && s.includes(prefix)) { store = s; break; }
+        }
+      }
+    } catch (e) {}
+  }
 
   // 【Q5】查询用户近期活跃任务，注入上下文提升交互质量
   let activeTaskContext = '';
@@ -6605,11 +7092,11 @@ ${groundingFacts ? '可用事实：'+groundingFacts : ''}
 严格基于事实回复，不超300字。` },
           ...getContext(senderUsername).slice(-4),
           { role: 'user', content: text }
-        ]);
+        ], { role: senderRole, purpose: 'analysis', temperature: 0.05, max_tokens: 420 });
         response = biLlm.content || '收到，我会查看门店数据并尽快回复。';
         updateContext(senderUsername, 'user', text);
         updateContext(senderUsername, 'assistant', response);
-        agentData = { route, store, brand, brandId, brandConfig, sourceAuditRows, grounded: !!groundingFacts };
+        agentData = { route, store, brand, brandId, brandConfig, sourceAuditRows, grounded: !!groundingFacts, groundingFacts };
         break;
       }
 
@@ -6672,7 +7159,7 @@ ${groundingFacts ? '可用事实：'+groundingFacts : ''}
               const llm = await callLLM([
                 { role: 'system', content: `你是"小年"，年年有喜餐饮集团AI助理，当前协助营运检查。当前时间：${new Date().toLocaleString('zh-CN',{timeZone:'Asia/Shanghai'})}。门店：${store}（${brand}）。简洁专业，注重实操。严格约束：禁止编造任何数据（员工人数、日期等），无数据时说明"暂无数据"。${activeTaskContext}` },
                 { role: 'user', content: text }
-              ], { model: getOpsReasoningModel() });
+              ], { model: getOpsReasoningModel(), role: senderRole, purpose: 'reasoning', temperature: 0.05, max_tokens: 360 });
               response = llm.content || '收到，我会跟进处理。';
             }
           }
@@ -6726,7 +7213,7 @@ ${groundingFacts ? '可用事实：'+groundingFacts : ''}
               { role: 'system', content: hrSystemPrompt + extraNote },
               ...hrContext,
               { role: 'user', content: text }
-            ]);
+            ], { role: senderRole, purpose: 'reasoning', temperature: 0.05, max_tokens: 420 });
             return hrLlm.content || '收到，我会为您查询相关信息并尽快回复。';
           });
           updateContext(senderUsername, 'user', text);
@@ -6749,7 +7236,7 @@ ${groundingFacts ? '可用事实：'+groundingFacts : ''}
             { role: 'system', content: appealSystemPrompt + extraNote },
             ...appealContext,
             { role: 'user', content: appealUserMsg }
-          ]);
+          ], { role: senderRole, purpose: 'reasoning', temperature: 0.05, max_tokens: 360 });
           return llm.content || '已记录，我们将在24小时内核实并回复。';
         });
         try {
@@ -6828,7 +7315,7 @@ ${kbContext}${trainingTasksContext}${activeTaskContext}
           { role: 'user', content: text }
         ];
 
-        const llm = await callLLM(messages, { temperature: 0.05, max_tokens: 800 });
+        const llm = await callLLM(messages, { role: senderRole, purpose: 'reasoning', temperature: 0.05, max_tokens: 800 });
         response = llm.content || '这个问题我需要查阅最新的SOP手册或培训资料，稍后回复你。';
         
         // 更新上下文
@@ -6854,7 +7341,7 @@ ${kbContext}${trainingTasksContext}${activeTaskContext}
 回复极其简短。${activeTaskContext}` },
           ...getContext(senderUsername),
           { role: 'user', content: text }
-        ]);
+        ], { role: senderRole, purpose: 'reasoning', temperature: 0.05, max_tokens: 260 });
         response = llm.content || '收到你的消息。你可以问我数据审计、营运检查、绩效考核等问题，也可以直接发照片给我审核。';
         agentData = { route: 'general', contextUsed: getContext(senderUsername).length, brandId };
         break;
@@ -6866,9 +7353,82 @@ ${kbContext}${trainingTasksContext}${activeTaskContext}
     agentData = { route, error: String(e?.message || e) };
   }
 
-  if (isFactLikeQuestion(text) && !isDataBackedReply(agentData)) {
+  const factDemand = detectFactDemand(text);
+  if (factDemand === 'hard' && !isDataBackedReply(agentData)) {
     response = FACTUAL_DATA_UNAVAILABLE_MESSAGE;
-    agentData = { ...agentData, factualGuardrailBlocked: true };
+    agentData = { ...agentData, factualGuardrailBlocked: true, factDemand };
+    markQualityMetric('factualBlocks', 1);
+  } else {
+    agentData = { ...agentData, factDemand };
+  }
+
+  try {
+    const qg = await enforceUnifiedQualityGate({
+      userQuery: text,
+      route,
+      response,
+      agentData,
+      senderUsername,
+      senderRole,
+      store,
+      brand
+    });
+    response = qg.response;
+    agentData = qg.agentData;
+  } catch (e) {
+    console.error('[agents] enforceUnifiedQualityGate error:', e?.message || e);
+  }
+
+  const evidence = buildEvidencePackage(agentData, { route, store, brand });
+  agentData = {
+    ...agentData,
+    route,
+    store,
+    brand,
+    evidence,
+    sourceCoverage: computeSourceCoverage(agentData),
+    confidence: computeResponseConfidence(route, response, agentData)
+  };
+
+  try {
+    await setAgentLongMemory(senderUsername, 'last_route', {
+      route,
+      store,
+      brand,
+      confidence: agentData.confidence,
+      updatedAt: new Date().toISOString()
+    });
+  } catch (e) {}
+
+  const needsAutonomousTask = !!(
+    agentData?.factualGuardrailBlocked ||
+    agentData?.reason === 'insufficient_sources' ||
+    agentData?.reason === 'insufficient_facts' ||
+    agentData?.numericGroundingBlocked
+  );
+  if (needsAutonomousTask && store && store !== '总部') {
+    try {
+      const state = await getSharedState();
+      const owner = await findStoreManager(state, store);
+      const task = await createOrUpdateAutonomousDataTask({
+        taskType: 'data_gap',
+        store,
+        brand,
+        requesterUsername: senderUsername,
+        route,
+        queryText: text,
+        reason: String(agentData?.reason || (agentData?.factualGuardrailBlocked ? 'factual_guardrail_blocked' : 'insufficient_evidence')).slice(0, 120),
+        evidence,
+        ownerUsername: owner || '',
+        dueHours: 8
+      });
+      if (task) {
+        agentData.autonomousTaskId = task.id;
+        notifyAutonomousDataTaskOwner(task).catch(() => {});
+      }
+    } catch (e) {
+      console.error('[agents] autonomous data-gap task failed:', e?.message || e);
+    }
   }
 
   return { route, response, agentData };
@@ -6878,7 +7438,43 @@ ${kbContext}${trainingTasksContext}${activeTaskContext}
 // 11. Check Agent - Self-Reflection Quality Gate
 // ─────────────────────────────────────────────
 
-async function checkAgentAudit(userQuery, agentResponse, route) {
+function fallbackQualityAudit(userQuery, agentResponse) {
+  const q = normalizePlainText(userQuery || '', 300);
+  const a = normalizePlainText(agentResponse || '', 1200);
+  let accuracy = 6;
+  let relevance = 6;
+  let tone = 7;
+
+  if (!a) {
+    return {
+      accuracy: 2,
+      relevance: 2,
+      tone: 5,
+      total: 3,
+      pass: false,
+      feedback: '回答为空，请直接回答用户问题并给出可执行下一步。'
+    };
+  }
+
+  if (a.length < 20) relevance -= 2;
+  if (/抱歉|稍后|无法|不清楚/.test(a) && /(多少|排名|趋势|分析|绩效|SOP)/.test(q)) relevance -= 2;
+  if (/不知道|随便|你看着办/.test(a)) tone -= 3;
+  if (/\d/.test(q) && !/\d/.test(a) && detectFactDemand(q) === 'hard') accuracy -= 2;
+
+  const total = Number(((accuracy + relevance + tone) / 3).toFixed(1));
+  return {
+    accuracy,
+    relevance,
+    tone,
+    total,
+    pass: total >= 7,
+    feedback: total >= 7 ? '' : '请更贴合问题、补充关键事实或明确说明缺失数据来源。'
+  };
+}
+
+async function checkAgentAudit(userQuery, agentResponse, route, options = {}) {
+  const evidenceText = String(options?.evidenceText || '').trim();
+  const role = String(options?.role || '').trim();
   const auditPrompt = `你是HRMS系统的质检Agent（Check Agent）。你的任务是审核子Agent的回答质量。
 
 【用户问题】
@@ -6900,20 +7496,63 @@ ${agentResponse}
   "total": 综合分数(三项平均),
   "pass": true或false（total>=7为pass）,
   "feedback": "如果不通过，给出具体的修改建议，指出哪里有问题以及如何改进"
-}`;
+}
+
+补充要求：
+- 如果回答中出现数字/比例/排名，请检查是否与可用事实一致
+- 若“可用事实”为空，不得鼓励编造，请要求明确说明数据缺失
+
+【可用事实】
+${evidenceText || '暂无'}
+
+仅返回JSON。`;
 
   try {
     const llm = await callLLM([
       { role: 'system', content: auditPrompt }
-    ], { temperature: 0.1, max_tokens: 300 });
+    ], { temperature: 0.05, max_tokens: 420, role, purpose: 'analysis', skipCache: true });
 
-    let text = String(llm.content || '').trim()
-      .replace(/^```json\s*/i, '').replace(/```$/i, '').trim();
-    return JSON.parse(text);
+    const parsed = safeJsonParse(llm.content || '', null);
+    if (parsed && typeof parsed === 'object') {
+      const total = Number(parsed.total);
+      return {
+        accuracy: Number(parsed.accuracy) || 0,
+        relevance: Number(parsed.relevance) || 0,
+        tone: Number(parsed.tone) || 0,
+        total: Number.isFinite(total) ? total : Number((((Number(parsed.accuracy) || 0) + (Number(parsed.relevance) || 0) + (Number(parsed.tone) || 0)) / 3).toFixed(1)),
+        pass: parsed.pass !== false,
+        feedback: String(parsed.feedback || '').trim()
+      };
+    }
+    return fallbackQualityAudit(userQuery, agentResponse);
   } catch (e) {
     console.error('[check_agent] audit error:', e?.message);
-    return { pass: true }; // 审核失败时放行，避免阻塞
+    return fallbackQualityAudit(userQuery, agentResponse);
   }
+}
+
+async function rewriteResponseByAudit({ userQuery, response, route, feedback, evidenceText, role }) {
+  const llm = await callLLM([
+    {
+      role: 'system',
+      content: `你是HRMS回复重写器。请在不编造事实的前提下重写回答。
+要求：
+1) 优先回应用户核心问题
+2) 仅使用可用事实，不得新增数据
+3) 不超过280字，语言专业直接
+4) 若事实不足，明确写“当前系统无此数据”，并给下一步建议
+可用事实：${evidenceText || '暂无'}
+质检反馈：${feedback || '无'}`
+    },
+    { role: 'user', content: `用户问题：${String(userQuery || '')}\n原回答：${String(response || '')}` }
+  ], {
+    temperature: 0.05,
+    max_tokens: 420,
+    role,
+    purpose: 'reasoning',
+    skipCache: true
+  });
+  return normalizePlainText(llm?.content || response || '', 1500) || String(response || '');
 }
 
 async function runWithCheckAgent(userQuery, route, generateFn, maxRetries = 2) {
@@ -6923,18 +7562,107 @@ async function runWithCheckAgent(userQuery, route, generateFn, maxRetries = 2) {
   const checkEnabledRoutes = ['chief_evaluator', 'data_auditor', 'appeal', 'train_advisor'];
   if (!checkEnabledRoutes.includes(route)) return response;
 
+  let lastAudit = null;
+  let rewriteCount = 0;
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     const audit = await checkAgentAudit(userQuery, response, route);
+    lastAudit = audit;
     console.log(`[check_agent] route=${route} attempt=${attempt + 1} pass=${audit.pass} total=${audit.total}`);
+    markQualityMetric('audits', 1);
     
     if (audit.pass !== false) break; // 通过则直接返回
+    markQualityMetric('failedAudits', 1);
 
     // 不通过：带着 Check Agent 的反馈让子 Agent 重写
     console.log(`[check_agent] rewriting: ${audit.feedback}`);
     response = await generateFn(audit.feedback);
+    rewriteCount += 1;
+    markQualityMetric('rewrites', 1);
   }
 
+  try {
+    await recordAgentQualityAudit({
+      route,
+      username: '',
+      queryText: userQuery,
+      responseText: response,
+      auditResult: lastAudit || {},
+      passed: lastAudit?.pass !== false,
+      rewriteCount
+    });
+  } catch (e) {}
+
   return response;
+}
+
+async function enforceUnifiedQualityGate({
+  userQuery,
+  route,
+  response,
+  agentData,
+  senderUsername,
+  senderRole,
+  store,
+  brand
+}) {
+  const checkEnabledRoutes = ['chief_evaluator', 'data_auditor', 'ops_supervisor', 'appeal', 'train_advisor'];
+  if (!checkEnabledRoutes.includes(route)) return { response, agentData };
+  if (agentData?.deterministic === true) {
+    return { response, agentData: { ...(agentData || {}), qualityAudit: { pass: true, total: 0, rewriteCount: 0, skipped: 'deterministic' } } };
+  }
+
+  let nextResponse = String(response || '');
+  const nextAgentData = { ...(agentData || {}) };
+  const evidence = buildEvidencePackage(nextAgentData, { route, store, brand });
+  const evidenceText = JSON.stringify(evidence);
+
+  let audit = await checkAgentAudit(userQuery, nextResponse, route, { evidenceText, role: senderRole });
+  let rewriteCount = 0;
+  markQualityMetric('audits', 1);
+
+  if (audit.pass === false) {
+    markQualityMetric('failedAudits', 1);
+    nextResponse = await rewriteResponseByAudit({
+      userQuery,
+      response: nextResponse,
+      route,
+      feedback: audit.feedback,
+      evidenceText,
+      role: senderRole
+    });
+    rewriteCount += 1;
+    markQualityMetric('rewrites', 1);
+    audit = await checkAgentAudit(userQuery, nextResponse, route, { evidenceText, role: senderRole });
+    markQualityMetric('audits', 1);
+  }
+
+  if (route === 'data_auditor' && detectFactDemand(userQuery) === 'hard') {
+    const numericCheck = verifyNumericGrounding(nextResponse, evidenceText + '\n' + String(nextAgentData?.groundingFacts || ''));
+    if (!numericCheck.ok) {
+      markQualityMetric('numericViolations', 1);
+      nextResponse = `当前问题需要精确数字支撑，我暂时无法在现有证据中完成可靠计算。建议先补齐数据后重试。`;
+      nextAgentData.numericGroundingBlocked = true;
+      nextAgentData.numericMissing = numericCheck.missing;
+      audit = { ...(audit || {}), pass: false, feedback: 'numeric_grounding_failed' };
+    }
+  }
+
+  await recordAgentQualityAudit({
+    route,
+    username: senderUsername,
+    queryText: userQuery,
+    responseText: nextResponse,
+    auditResult: { ...(audit || {}), evidence },
+    passed: audit?.pass !== false,
+    rewriteCount
+  });
+
+  nextAgentData.qualityAudit = {
+    pass: audit?.pass !== false,
+    total: Number(audit?.total || 0),
+    rewriteCount
+  };
+  return { response: nextResponse, agentData: nextAgentData };
 }
 
 let _bitablePollingInterval = null;
@@ -7135,6 +7863,8 @@ export async function onFeishuEvent(body) {
     const sender = event?.sender || {};
     const msgType = String(msg?.message_type || '').trim();
     const messageId = String(msg?.message_id || '').trim();
+    const parentMessageId = String(msg?.parent_message_id || '').trim();
+    const rootMessageId = String(msg?.root_message_id || '').trim();
     const chatType = String(msg?.chat_type || '').trim();
     const openId = String(sender?.sender_id?.open_id || '').trim();
 
@@ -7213,16 +7943,16 @@ export async function onFeishuEvent(body) {
             text = recognized;
             console.log(`[feishu] voice → text: "${text.slice(0, 60)}"`);
           } else {
-            await sendLarkMessage(openId, '🎙️ 语音识别未成功，请再试一次或用文字描述。');
+            await sendLarkMessage(openId, '🎙️ 语音识别未成功，请再试一次或用文字描述。', { skipDedup: true });
             return { ok: true, skipped: 'asr_empty' };
           }
         } else {
-          await sendLarkMessage(openId, '🎙️ 语音消息格式异常，请用文字描述你的问题。');
+          await sendLarkMessage(openId, '🎙️ 语音消息格式异常，请用文字描述你的问题。', { skipDedup: true });
           return { ok: true, skipped: 'audio_no_filekey' };
         }
       } catch (e) {
         console.error('[feishu] audio parse failed:', e?.message);
-        await sendLarkMessage(openId, '🎙️ 语音识别服务暂时不可用，请用文字描述。');
+        await sendLarkMessage(openId, '🎙️ 语音识别服务暂时不可用，请用文字描述。', { skipDedup: true });
         return { ok: true, skipped: 'asr_error' };
       }
     } else {
@@ -7324,7 +8054,7 @@ export async function onFeishuEvent(body) {
       /^(已处理|已完成|已整改|已解决|收到|好的|处理完|整改完毕|情况说明|原因如下)/.test(String(text || '').trim());
     if (_taskResponseHook && _isLikelyTaskResponse) {
       try {
-        const taskResult = await _taskResponseHook(feishuUser.username, text, imageUrls);
+        const taskResult = await _taskResponseHook(feishuUser.username, text, imageUrls, parentMessageId);
         if (taskResult?.handled) {
           const reply = prefixWithAgentName('master', taskResult.response);
           await sendLarkMessage(openId, reply);
@@ -7371,26 +8101,18 @@ export async function onFeishuEvent(body) {
       sendLarkMessage(openId, loadingHint, { skipDedup: true }).catch(() => {});
     }
 
-    const result = await handleAgentMessage(
+    const rawResult = await handleAgentMessage(
       feishuUser.username, feishuUser.name || feishuUser.username,
       feishuUser.store || '', feishuUser.role || '', brandContext,
       text, imageUrls
     );
+    const result = (rawResult && typeof rawResult === 'object' && !Array.isArray(rawResult))
+      ? rawResult
+      : { route: 'general', response: String(rawResult || ''), agentData: {} };
 
-    // Reply via Feishu — 优先发送结构化卡片，降级到文本
+    // Reply via Feishu — 直接发送文本消息 (卡片在部分飞书版本不显示，统一用文本保证送达)
     if (result.response) {
-      const isDeterministic = result.agentData?.deterministic === true;
-      const card = buildFeishuCardFromAgentReply(result.route, result.response, result.agentData);
-      let sent = false;
-      if (card) {
-        try {
-          const cardRes = await sendLarkCard(openId, card);
-          sent = cardRes.ok;
-        } catch (e) { console.error('[feishu] card send failed, fallback to text:', e?.message); }
-      }
-      if (!sent) {
-        await sendLarkMessage(openId, prefixWithAgentName(result.route, result.response), { skipDedup: isDeterministic });
-      }
+      await sendLarkMessage(openId, prefixWithAgentName(result.route, result.response), { skipDedup: true });
     }
 
     // Log response
@@ -7510,8 +8232,62 @@ async function pushScoresToFeishu() {
 
 let _schedulerStarted = false;
 
-// ── 防护措施：启动断言 + 连续错误告警 ──
+// ── 防护措施：启动断言 + LLM健康检查 + 连续错误告警 ──
 const _errorTracker = { consecutiveLLMErrors: 0, lastAlertTime: 0, alertCooldownMs: 10 * 60 * 1000 };
+const _llmHealthState = { lastAllOk: null, lastSummary: '' };
+
+export async function verifyLLMHealth(options = {}) {
+  const notifyOnFailure = options.notifyOnFailure !== false;
+  const notifyOnRecovery = options.notifyOnRecovery !== false;
+  const forceNotify = !!options.forceNotify;
+  const results = [];
+  const providers = [
+    { name: 'DeepSeek', model: DEEPSEEK_MODEL, apiKey: DEEPSEEK_API_KEY, baseUrl: DEEPSEEK_BASE_URL },
+    { name: 'Qwen', model: QWEN_MODEL, apiKey: QWEN_API_KEY, baseUrl: QWEN_BASE_URL },
+    { name: 'Doubao(Vision)', model: DEEPSEEK_VISION_MODEL, apiKey: DOUBAO_API_KEY, baseUrl: DOUBAO_BASE_URL }
+  ];
+  const providerKeyMap = { DeepSeek: 'deepseek', Qwen: 'qwen', 'Doubao(Vision)': 'doubao' };
+  for (const p of providers) {
+    if (!p.apiKey) { results.push({ name: p.name, ok: false, error: 'API_KEY未配置' }); continue; }
+    try {
+      const resp = await axios.post(`${p.baseUrl}/chat/completions`, {
+        model: p.model, messages: [{ role: 'user', content: '回复OK' }], max_tokens: 5, temperature: 0
+      }, { headers: { Authorization: `Bearer ${p.apiKey}`, 'Content-Type': 'application/json' }, timeout: 15000 });
+      const content = resp.data?.choices?.[0]?.message?.content || '';
+      results.push({ name: p.name, model: p.model, ok: true, reply: content.slice(0, 20) });
+      markProviderOk(providerKeyMap[p.name] || '');
+    } catch (e) {
+      const status = e?.response?.status || 'timeout';
+      const msg = e?.response?.data?.error?.message || e?.message || '未知错误';
+      results.push({ name: p.name, model: p.model, ok: false, error: `HTTP ${status}: ${msg.slice(0, 100)}` });
+      markProviderFail(providerKeyMap[p.name] || '');
+      markProviderFail(providerKeyMap[p.name] || '');
+    }
+  }
+  const allOk = results.every(r => r.ok);
+  const summary = results.map(r => `${r.ok ? '✅' : '❌'} ${r.name}(${r.model || '?'}): ${r.ok ? r.reply : r.error}`).join('\n');
+  const prevAllOk = _llmHealthState.lastAllOk;
+  _llmHealthState.lastAllOk = allOk;
+  _llmHealthState.lastSummary = summary;
+  console.log(`[LLM-HEALTH] Startup check:\n${summary}`);
+  const healthyProviders = results.filter(r => r.ok).map(r => r.name);
+  const downProviders = results.filter(r => !r.ok).map(r => r.name);
+  if (!allOk && notifyOnFailure && (forceNotify || prevAllOk !== false)) {
+    const fallbackNote = healthyProviders.length > 0
+      ? `\n\n🔄 自动降级已激活：${downProviders.join('、')} 不可用时，Agent 将自动切换到 ${healthyProviders.join('、')} 继续工作。`
+      : '\n\n⚠️ 所有 Provider 均不可用，Agent 将完全无法响应！';
+    console.error('[LLM-HEALTH] ⚠️ 部分LLM不可用，自动降级已激活');
+    try {
+      await sendErrorAlertToAdmin(`⚠️ 【系统告警】LLM健康检查未通过:\n${summary}${fallbackNote}\n\n请检查 API Key / 模型配置 / 网络连通性。`);
+    } catch (_) {}
+  }
+  if (allOk && notifyOnRecovery && prevAllOk === false) {
+    try {
+      await sendErrorAlertToAdmin(`✅ 【系统恢复】LLM健康检查已恢复正常:\n${summary}`);
+    } catch (_) {}
+  }
+  return { allOk, results };
+}
 
 export function assertCriticalFunctions() {
   const critical = [
@@ -7545,11 +8321,19 @@ async function sendErrorAlertToAdmin(errorMsg) {
   _errorTracker.lastAlertTime = now;
   try {
     const state = await getSharedState();
-    const admins = (state?.employees || state?.users || []).filter(u => u.role === 'admin');
-    for (const admin of admins) {
-      const fu = await lookupFeishuUserByUsername(admin.username);
+    const allUsers = [
+      ...(Array.isArray(state?.employees) ? state.employees : []),
+      ...(Array.isArray(state?.users) ? state.users : [])
+    ];
+    const recipients = allUsers.filter(u => ['admin', 'hq_manager'].includes(String(u?.role || '').trim()));
+    for (const admin of recipients) {
+      const fu = await lookupFeishuUserByUsername(String(admin.username || '').trim());
       if (fu?.open_id) {
-        await sendLarkMessage(fu.open_id, `🚨 系统告警\n\n${errorMsg}\n\n时间：${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}\n请尽快检查服务状态。`);
+        await sendLarkMessage(
+          fu.open_id,
+          `🚨 系统告警\n\n${errorMsg}\n\n时间：${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}\n请尽快检查服务状态。`,
+          { skipDedup: true }
+        );
       }
     }
   } catch (e) {
@@ -7580,6 +8364,18 @@ export function getAgentHealthStatus() {
 export function startAgentScheduler() {
   if (_schedulerStarted) return;
   _schedulerStarted = true;
+
+  // 启动后做一次延迟健康检查 + 周期检查（防止DeepSeek挂了无告警）
+  setTimeout(() => {
+    verifyLLMHealth({ notifyOnFailure: true, notifyOnRecovery: true }).catch((e) => {
+      console.error('[LLM-HEALTH] periodic check error:', e?.message);
+    });
+  }, 30000);
+  setInterval(() => {
+    verifyLLMHealth({ notifyOnFailure: true, notifyOnRecovery: true }).catch((e) => {
+      console.error('[LLM-HEALTH] periodic check error:', e?.message);
+    });
+  }, 10 * 60 * 1000);
 
   // Data audit + push issues every 30 minutes
   const auditTick = async () => {
@@ -7759,6 +8555,8 @@ export function getAgentPerformanceMetrics() {
       (_performanceMetrics.cacheHits / _performanceMetrics.totalCalls * 100).toFixed(2) + '%' : '0%',
     contextSize: _conversationContext.size,
     cacheSize: _responseCache.size,
+    quality: { ..._agentQualityMetrics },
+    providerHealth: getProviderHealthStatus(),
     uptime: process.uptime()
   };
 }
@@ -7767,6 +8565,58 @@ export function clearAgentCache() {
   _responseCache.clear();
   _conversationContext.clear();
   console.log('[agents] Cache cleared');
+}
+
+async function runAgentEvalSuite({ createdBy = '', suiteName = 'default' } = {}) {
+  const rows = [];
+  for (const c of AGENT_EVAL_CASES) {
+    let routed = 'general';
+    let err = '';
+    try {
+      const r = await routeMessage(c.text, false, '');
+      routed = String(r?.route || 'general');
+    } catch (e) {
+      err = String(e?.message || e);
+    }
+    const demand = detectFactDemand(c.text);
+    const routePass = routed === c.route;
+    const demandPass = demand === c.demand;
+    rows.push({
+      text: c.text,
+      expectedRoute: c.route,
+      actualRoute: routed,
+      expectedDemand: c.demand,
+      actualDemand: demand,
+      routePass,
+      demandPass,
+      error: err
+    });
+  }
+
+  const total = rows.length;
+  const routeHit = rows.filter((x) => x.routePass).length;
+  const demandHit = rows.filter((x) => x.demandPass).length;
+  const summary = {
+    total,
+    routeHit,
+    routeAccuracy: total ? Number((routeHit / total).toFixed(3)) : 0,
+    demandHit,
+    demandAccuracy: total ? Number((demandHit / total).toFixed(3)) : 0,
+    createdAt: new Date().toISOString(),
+    cases: rows
+  };
+
+  try {
+    await pool().query(
+      `INSERT INTO agent_eval_runs (suite_name, summary, created_by)
+       VALUES ($1, $2::jsonb, $3)`,
+      [String(suiteName || 'default'), JSON.stringify(summary), String(createdBy || '')]
+    );
+  } catch (e) {
+    console.error('[agents] runAgentEvalSuite persist failed:', e?.message || e);
+  }
+
+  return summary;
 }
 
 // 定期清理过期缓存
@@ -7833,6 +8683,117 @@ export function registerAgentRoutes(app, authRequired) {
       res.json({ metrics });
     } catch (e) {
       res.status(500).json({ error: String(e?.message || e) });
+    }
+  });
+
+  app.post('/api/agents/eval-suite/run', authRequired, async (req, res) => {
+    const role = String(req.user?.role || '').trim();
+    if (!['admin', 'hq_manager'].includes(role)) return res.status(403).json({ error: 'forbidden' });
+    try {
+      const suiteName = String(req.body?.suiteName || 'default').trim() || 'default';
+      const result = await runAgentEvalSuite({ createdBy: String(req.user?.username || ''), suiteName });
+      return res.json({ ok: true, result });
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  });
+
+  app.get('/api/agents/eval-suite/runs', authRequired, async (req, res) => {
+    const role = String(req.user?.role || '').trim();
+    if (!['admin', 'hq_manager', 'hr_manager'].includes(role)) return res.status(403).json({ error: 'forbidden' });
+    const limit = Math.max(1, Math.min(50, Number(req.query?.limit) || 10));
+    try {
+      const r = await pool().query(
+        `SELECT id, suite_name, summary, created_by, created_at
+         FROM agent_eval_runs
+         ORDER BY created_at DESC
+         LIMIT $1`,
+        [limit]
+      );
+      return res.json({ items: r.rows || [] });
+    } catch (e) {
+      return res.status(500).json({ error: String(e?.message || e) });
+    }
+  });
+
+  app.get('/api/agents/autonomous-tasks', authRequired, async (req, res) => {
+    const role = String(req.user?.role || '').trim();
+    const username = String(req.user?.username || '').trim();
+    const status = String(req.query?.status || 'open').trim();
+    const limit = Math.max(1, Math.min(200, Number(req.query?.limit) || 50));
+    try {
+      const params = [];
+      const push = (v) => { params.push(v); return `$${params.length}`; };
+      const where = [];
+      if (status && status !== 'all') where.push(`status = ${push(status)}`);
+      if (!['admin', 'hq_manager', 'hr_manager'].includes(role)) {
+        where.push(`(owner_username = ${push(username)} OR requester_username = ${push(username)})`);
+      }
+      const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+      const r = await pool().query(
+        `SELECT id, task_type, status, store, brand, requester_username, route, reason, owner_username, notify_count, due_at, created_at, updated_at
+         FROM agent_autonomous_tasks
+         ${whereSql}
+         ORDER BY updated_at DESC
+         LIMIT ${push(limit)}`,
+        params
+      );
+      return res.json({ items: r.rows || [] });
+    } catch (e) {
+      return res.status(500).json({ error: String(e?.message || e) });
+    }
+  });
+
+  app.post('/api/agents/autonomous-tasks/:id/resolve', authRequired, async (req, res) => {
+    const id = String(req.params?.id || '').trim();
+    if (!id) return res.status(400).json({ error: 'missing_id' });
+    const role = String(req.user?.role || '').trim();
+    const username = String(req.user?.username || '').trim();
+    const note = String(req.body?.note || '').trim();
+    try {
+      const owned = await pool().query(`SELECT owner_username, requester_username FROM agent_autonomous_tasks WHERE id = $1 LIMIT 1`, [id]);
+      const row = owned.rows?.[0] || {};
+      const allowed = ['admin', 'hq_manager', 'hr_manager'].includes(role)
+        || String(row.owner_username || '') === username
+        || String(row.requester_username || '') === username;
+      if (!allowed) return res.status(403).json({ error: 'forbidden' });
+
+      await pool().query(
+        `UPDATE agent_autonomous_tasks
+         SET status = 'resolved',
+             action_plan = jsonb_set(COALESCE(action_plan, '{}'::jsonb), '{resolutionNote}', to_jsonb($1::text), true),
+             updated_at = NOW()
+         WHERE id = $2`,
+        [note || 'resolved', id]
+      );
+      return res.json({ ok: true });
+    } catch (e) {
+      return res.status(500).json({ error: String(e?.message || e) });
+    }
+  });
+
+  app.get('/api/agents/quality-audits', authRequired, async (req, res) => {
+    const role = String(req.user?.role || '').trim();
+    if (!['admin', 'hq_manager', 'hr_manager'].includes(role)) return res.status(403).json({ error: 'forbidden' });
+    const limit = Math.max(1, Math.min(200, Number(req.query?.limit) || 50));
+    const route = String(req.query?.route || '').trim();
+    try {
+      const params = [];
+      const push = (v) => { params.push(v); return `$${params.length}`; };
+      const where = [];
+      if (route) where.push(`route = ${push(route)}`);
+      const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+      const r = await pool().query(
+        `SELECT id, route, username, query_text, passed, rewrite_count, created_at
+         FROM agent_quality_audits
+         ${whereSql}
+         ORDER BY created_at DESC
+         LIMIT ${push(limit)}`,
+        params
+      );
+      return res.json({ items: r.rows || [] });
+    } catch (e) {
+      return res.status(500).json({ error: String(e?.message || e) });
     }
   });
 
@@ -8058,10 +9019,26 @@ export function registerAgentRoutes(app, authRequired) {
     const role = String(req.user?.role || '').trim();
     if (role !== 'admin') return res.status(403).json({ error: 'forbidden' });
     const prompt = String(req.body?.prompt || '请用一句话介绍潮汕菜的特点').trim();
+    const model = String(req.body?.model || DEEPSEEK_MODEL).trim() || DEEPSEEK_MODEL;
     try {
-      const result = await callLLM(prompt);
-      return res.json({ ok: result.ok, content: result.content, error: result.error || null });
+      const result = await callLLM(
+        [{ role: 'user', content: prompt }],
+        { model, temperature: 0, max_tokens: 120, skipCache: true }
+      );
+      return res.json({ ok: result.ok, model, content: result.content, error: result.error || null });
     } catch (e) { return res.status(500).json({ error: String(e?.message || e) }); }
+  });
+
+  // ── Run full LLM health check now (admin/hq_manager) ──
+  app.post('/api/agents/llm-health-check', authRequired, async (req, res) => {
+    const role = String(req.user?.role || '').trim();
+    if (!['admin', 'hq_manager'].includes(role)) return res.status(403).json({ error: 'forbidden' });
+    try {
+      const result = await verifyLLMHealth({ notifyOnFailure: true, notifyOnRecovery: true, forceNotify: true });
+      return res.json({ ok: true, ...result });
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
   });
 
   // ── Test endpoints (admin only) ──
@@ -8094,7 +9071,7 @@ export function registerAgentRoutes(app, authRequired) {
   app.post('/api/agents/route-test', authRequired, async (req, res) => {
     const text = String(req.body?.text || '').trim();
     const hasImage = !!req.body?.hasImage;
-    const route = routeMessage(text, hasImage);
+    const route = await routeMessage(text, hasImage, String(req.user?.username || '').trim());
     const AUDIT_KEYWORDS = ['损耗', '盘点', '毛利', '牛肉', '成本', '差评', '折扣', '营收', '对账', '异常'];
     const OPS_KEYWORDS = ['图片', '卫生', '检查', '拍照', '摆盘', '收货', '消毒', '开市', '闭市', '巡检'];
     const EVAL_KEYWORDS = ['分数', '绩效', '考核', '奖金', '得分', '扣分', '排名', '评价', '这周'];

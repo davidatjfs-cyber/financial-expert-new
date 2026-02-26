@@ -10076,6 +10076,7 @@
     </div>
 
     <script src="/assets/vendor/pdfjs/pdf.min.js"></script>
+    <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
 
     <script>
         console.log('=== 年年有喜管理系统启动 ===');
@@ -11870,7 +11871,7 @@
         async function loadPointsPageData() {
             const role = String(currentUser?.role || '').trim();
             const isEmployee = role === ROLES.EMPLOYEE || role === 'employee';
-            const isAdminView = role === ROLES.ADMIN || role === ROLES.HR_MANAGER;
+            const isAdminView = role === ROLES.ADMIN || role === ROLES.HR_MANAGER || role === ROLES.HQ_MANAGER;
             const isStoreManagerView = role === ROLES.STORE_MANAGER;
             const canViewPoints = isEmployee || isAdminView || isStoreManagerView;
             if (!canViewPoints) {
@@ -26524,9 +26525,29 @@ ${knowledgeContent.slice(0, 30000)}`;
             URL.revokeObjectURL(url);
         }
 
+        function hrmsDetectCsvDelimiter(text) {
+            const lines = String(text || '')
+                .split(/\r?\n/)
+                .map(x => String(x || '').trim())
+                .filter(Boolean)
+                .slice(0, 8);
+            const candidates = [',', '\t', ';', '，'];
+            let best = ',';
+            let bestScore = -1;
+            candidates.forEach(d => {
+                const score = lines.reduce((s, line) => s + ((line.match(new RegExp(d === '\\t' ? '\\\\t' : d.replace(/[.*+?^${}()|[\]\\]/g, '\\\\$&'), 'g')) || []).length), 0);
+                if (score > bestScore) {
+                    bestScore = score;
+                    best = d;
+                }
+            });
+            return bestScore > 0 ? best : ',';
+        }
+
         function hrmsParseCsv(text) {
             const rows = [];
-            const s = String(text || '');
+            const s = String(text || '').replace(/^\uFEFF/, '');
+            const delimiter = hrmsDetectCsvDelimiter(s);
             let row = [];
             let cell = '';
             let inQuotes = false;
@@ -26553,7 +26574,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                     inQuotes = true;
                     continue;
                 }
-                if (ch === ',') {
+                if (ch === delimiter) {
                     row.push(cell);
                     cell = '';
                     continue;
@@ -26576,20 +26597,53 @@ ${knowledgeContent.slice(0, 30000)}`;
             return rows;
         }
 
-        function hrmsReadCsvFile(file) {
+        function hrmsReadFileAsArrayBuffer(file) {
             return new Promise((resolve, reject) => {
                 const reader = new FileReader();
                 reader.onerror = () => reject(new Error('read_failed'));
-                reader.onload = () => resolve(String(reader.result || ''));
-                reader.readAsText(file, 'utf-8');
+                reader.onload = () => resolve(reader.result);
+                reader.readAsArrayBuffer(file);
             });
+        }
+
+        async function hrmsReadCsvFile(file) {
+            const buf = await hrmsReadFileAsArrayBuffer(file);
+            let text = new TextDecoder('utf-8').decode(buf);
+            const badCharCount = (text.match(/\uFFFD/g) || []).length;
+            if (badCharCount >= 3) {
+                try {
+                    const gb = new TextDecoder('gb18030').decode(buf);
+                    const zhUtf8 = (text.match(/[\u4e00-\u9fa5]/g) || []).length;
+                    const zhGb = (gb.match(/[\u4e00-\u9fa5]/g) || []).length;
+                    if (zhGb >= zhUtf8) text = gb;
+                } catch (e) {}
+            }
+            return String(text || '');
+        }
+
+        async function hrmsReadImportRows(file) {
+            const ext = String(file?.name || '').toLowerCase();
+            if (ext.endsWith('.xlsx') || ext.endsWith('.xls')) {
+                if (typeof XLSX === 'undefined' || !XLSX?.read || !XLSX?.utils?.sheet_to_json) {
+                    throw new Error('xlsx_library_missing');
+                }
+                const buf = await hrmsReadFileAsArrayBuffer(file);
+                const wb = XLSX.read(buf, { type: 'array' });
+                const firstSheet = wb?.SheetNames?.[0];
+                if (!firstSheet) return [];
+                const ws = wb.Sheets[firstSheet];
+                const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: false });
+                return (rows || []).map(r => (Array.isArray(r) ? r.map(v => String(v ?? '')) : [])).filter(r => r.some(v => String(v || '').trim() !== ''));
+            }
+            const text = await hrmsReadCsvFile(file);
+            return hrmsParseCsv(text);
         }
 
         function hrmsPickCsvFile() {
             return new Promise((resolve) => {
                 const input = document.createElement('input');
                 input.type = 'file';
-                input.accept = '.csv,text/csv';
+                input.accept = '.csv,.xlsx,.xls,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
                 input.style.display = 'none';
                 document.body.appendChild(input);
                 input.addEventListener('change', () => {
@@ -26645,10 +26699,30 @@ ${knowledgeContent.slice(0, 30000)}`;
                 '紧急联系人': 'emergencyContactName',
                 '联系人电话': 'emergencyContactPhone',
                 '联系人关系': 'emergencyContactRelation',
-                '状态': 'status'
+                '状态': 'status',
+                '年龄': '__age',
+                '年龄段': '__age',
+                '工号': 'username',
+                '账号/工号': 'username',
+                '工号/账号': 'username',
+                '账号／工号': 'username',
+                '工号／账号': 'username',
+                '账号_工号': 'username',
+                '编号': 'id',
+                '员工编号': 'id',
+                '名字': 'name',
+                '名称': 'name',
+                '手机': 'phone',
+                '联系电话': 'phone',
+                '所属品牌': '__brand',
+                '品牌': '__brand'
             };
             return (headers || []).map(h => {
-                const key = String(h || '').trim();
+                const key = String(h || '').trim().replace(/[\u200B-\u200D\uFEFF]/g, '').replace(/\(.*\)$/, '').replace(/（.*）$/, '').replace(/\s+/g, '').trim();
+                if (alias[key]) return alias[key];
+                // 尝试用/分割的第一部分匹配
+                const parts = key.split(/[\/\\|／]/);
+                for (const p of parts) { if (alias[p.trim()]) return alias[p.trim()]; }
                 return alias[key] || key;
             });
         }
@@ -26672,7 +26746,13 @@ ${knowledgeContent.slice(0, 30000)}`;
             let updated = 0;
 
             (objs || []).forEach(o => {
-                const username = String(o.username ?? '').trim();
+                let username = String(o.username ?? '').trim();
+                if (!username && o.id) username = String(o.id || '').trim();
+                if (!username && o.name) {
+                    const nm = String(o.name || '').trim();
+                    const ph = String(o.phone || '').trim();
+                    if (nm) username = ph ? (nm + '_' + ph.slice(-4)) : nm;
+                }
                 if (!username) return;
                 const next = {};
                 templateHeaders.forEach(k => {
@@ -26681,6 +26761,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                 next.username = username;
                 next.role = hrmsNormalizeRoleCode(next.role);
                 next.status = hrmsNormalizeStatusCode(next.status);
+                if (!next.joinDate) next.joinDate = new Date().toISOString().slice(0, 10);
 
                 if (next.salary !== '') {
                     const n = Number(next.salary);
@@ -26715,13 +26796,15 @@ ${knowledgeContent.slice(0, 30000)}`;
             let updated = 0;
 
             (objs || []).forEach(o => {
-                const username = String(o.username ?? '').trim();
+                let username = String(o.username ?? '').trim();
+                if (!username && o.id) username = String(o.id || '').trim();
                 if (!username) return;
                 const next = {};
                 templateHeaders.forEach(k => {
                     next[k] = Object.prototype.hasOwnProperty.call(o, k) ? String(o[k] ?? '') : '';
                 });
                 next.status = hrmsNormalizeStatusCode(next.status);
+                if (!next.joinDate) next.joinDate = new Date().toISOString().slice(0, 10);
 
                 if (next.salary !== '') {
                     const n = Number(next.salary);
@@ -26755,19 +26838,26 @@ ${knowledgeContent.slice(0, 30000)}`;
                 try {
                     const file = await hrmsPickCsvFile();
                     if (!file) return;
-                    const text = await hrmsReadCsvFile(file);
-                    const rows = hrmsParseCsv(text);
+                    const rows = await hrmsReadImportRows(file);
                     if (!rows.length) {
-                        showNotification('CSV 为空或格式不正确', 'warning');
+                        showNotification('导入文件为空或格式不正确（请检查表头与内容）', 'warning');
                         return;
                     }
                     const headers = rows[0];
                     const objs = hrmsCsvRowsToObjects(headers, rows.slice(1));
                     const { added, updated } = hrmsImportEmployeesFromCsvObjects(objs);
+                    const synced = await hrmsFlushStateSave();
                     showNotification(`导入完成：新增 ${added}，覆盖 ${updated}`, 'success');
+                    if (!synced) {
+                        showNotification('导入已写入本地，但同步到服务器失败（请稍后重试或刷新后检查）', 'warning');
+                    }
                 } catch (e) {
                     console.error(e);
-                    showNotification('导入失败：请检查 CSV 格式', 'error');
+                    if (String(e?.message || '').includes('xlsx_library_missing')) {
+                        showNotification('当前环境缺少 Excel 解析能力，请改为 CSV 导入', 'error');
+                        return;
+                    }
+                    showNotification('导入失败：请检查文件格式（支持 CSV/XLSX）和表头字段', 'error');
                 }
             })();
         }
@@ -26781,19 +26871,26 @@ ${knowledgeContent.slice(0, 30000)}`;
                 try {
                     const file = await hrmsPickCsvFile();
                     if (!file) return;
-                    const text = await hrmsReadCsvFile(file);
-                    const rows = hrmsParseCsv(text);
+                    const rows = await hrmsReadImportRows(file);
                     if (!rows.length) {
-                        showNotification('CSV 为空或格式不正确', 'warning');
+                        showNotification('导入文件为空或格式不正确（请检查表头与内容）', 'warning');
                         return;
                     }
                     const headers = rows[0];
                     const objs = hrmsCsvRowsToObjects(headers, rows.slice(1));
                     const { added, updated } = hrmsImportUsersFromCsvObjects(objs);
+                    const synced = await hrmsFlushStateSave();
                     showNotification(`导入完成：新增 ${added}，覆盖 ${updated}`, 'success');
+                    if (!synced) {
+                        showNotification('用户导入已写入本地，但同步到服务器失败（请稍后重试或刷新后检查）', 'warning');
+                    }
                 } catch (e) {
                     console.error(e);
-                    showNotification('导入失败：请检查 CSV 格式', 'error');
+                    if (String(e?.message || '').includes('xlsx_library_missing')) {
+                        showNotification('当前环境缺少 Excel 解析能力，请改为 CSV 导入', 'error');
+                        return;
+                    }
+                    showNotification('导入失败：请检查文件格式（支持 CSV/XLSX）和表头字段', 'error');
                 }
             })();
         }
