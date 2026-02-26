@@ -4143,16 +4143,17 @@ export function getTaskResponseFormUrl(task) {
   return `${baseUrl}${sep}${params.toString()}`;
 }
 
-export function buildTaskDispatchCard(task, formUrl) {
+export function buildTaskDispatchCard(task, formUrl, { isFirstDispatch = true } = {}) {
   const sev = task.severity === 'high' ? '🔴 高' : '🟡 中';
   const roleLabel = task.assignee_role === 'store_production_manager' ? '出品经理' : '店长';
   const timeNow = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+  const newBadge = isFirstDispatch ? '🆕 新任务 · ' : '🔄 追踪 · ';
 
   return {
     config: { wide_screen_mode: true },
     header: {
-      title: { tag: 'plain_text', content: `⚠️ 异常通知 [${task.task_id}]` },
-      template: task.severity === 'high' ? 'red' : 'orange'
+      title: { tag: 'plain_text', content: `${newBadge}⚠️ 异常通知 [${task.task_id}]` },
+      template: isFirstDispatch ? (task.severity === 'high' ? 'red' : 'orange') : 'blue'
     },
     elements: [
       {
@@ -4899,6 +4900,37 @@ export async function getLarkImageUrl(messageId, imageKey) {
     return `data:image/jpeg;base64,${b64}`;
   } catch (e) {
     console.error('[feishu] get image failed:', e?.message);
+    return null;
+  }
+}
+
+// ── 飞书语音识别 (Feishu ASR, 零LLM算力) ──
+async function recognizeLarkAudio(messageId, fileKey) {
+  const token = await getLarkTenantToken();
+  if (!token) return null;
+  try {
+    // 1. 下载语音文件
+    const audioResp = await axios.get(
+      `https://open.feishu.cn/open-apis/im/v1/messages/${messageId}/resources/${fileKey}`,
+      { headers: { 'Authorization': `Bearer ${token}` }, params: { type: 'file' }, responseType: 'arraybuffer', timeout: 30000 }
+    );
+    const audioBase64 = Buffer.from(audioResp.data).toString('base64');
+    console.log(`[feishu-asr] audio downloaded: ${audioResp.data.byteLength} bytes`);
+
+    // 2. 调用飞书语音识别 API
+    const asrResp = await axios.post(
+      'https://open.feishu.cn/open-apis/speech/v1/speech/file_recognize',
+      {
+        speech: { speech: audioBase64 },
+        config: { engine_type: '16k_auto', file_id: messageId, format: 'opus' }
+      },
+      { headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 30000 }
+    );
+    const recognized = asrResp.data?.data?.recognition_text || '';
+    console.log(`[feishu-asr] recognized: "${recognized.slice(0, 80)}"`);
+    return recognized.trim() || null;
+  } catch (e) {
+    console.error('[feishu-asr] failed:', e?.response?.data?.msg || e?.message);
     return null;
   }
 }
@@ -7143,9 +7175,28 @@ export async function onFeishuEvent(body) {
         }
       } catch (e) { console.error('[feishu] parse image failed:', e?.message); }
     } else if (msgType === 'audio') {
-      // Voice message — acknowledge and ask for text
-      await sendLarkMessage(openId, '收到语音消息。目前暂不支持语音识别，请用文字描述你的问题，我会尽快处理。');
-      return { ok: true, skipped: 'audio_not_supported' };
+      // 语音消息 → 飞书ASR识别 → 转为文字处理 (零LLM算力)
+      try {
+        const content = JSON.parse(msg?.content || '{}');
+        const fileKey = content?.file_key || '';
+        if (fileKey && messageId) {
+          const recognized = await recognizeLarkAudio(messageId, fileKey);
+          if (recognized) {
+            text = recognized;
+            console.log(`[feishu] voice → text: "${text.slice(0, 60)}"`);
+          } else {
+            await sendLarkMessage(openId, '🎙️ 语音识别未成功，请再试一次或用文字描述。');
+            return { ok: true, skipped: 'asr_empty' };
+          }
+        } else {
+          await sendLarkMessage(openId, '🎙️ 语音消息格式异常，请用文字描述你的问题。');
+          return { ok: true, skipped: 'audio_no_filekey' };
+        }
+      } catch (e) {
+        console.error('[feishu] audio parse failed:', e?.message);
+        await sendLarkMessage(openId, '🎙️ 语音识别服务暂时不可用，请用文字描述。');
+        return { ok: true, skipped: 'asr_error' };
+      }
     } else {
       await sendLarkMessage(openId, `收到${msgType}消息。目前支持文字和图片，请用文字描述或发送照片。`);
       return { ok: true, skipped: 'unsupported_type' };

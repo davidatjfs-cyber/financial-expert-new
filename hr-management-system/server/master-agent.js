@@ -540,16 +540,27 @@ async function opsAgentListener() {
       // Build form URL with pre-filled task details
       const formUrl = getTaskResponseFormUrl(task);
 
+      // 判断是否首次派发 (vs 驳回后重新派发)
+      let isFirstDispatch = true;
+      try {
+        const evR = await pool().query(
+          `SELECT COUNT(*) as cnt FROM master_events WHERE task_id = $1 AND event_type = 'status_change' AND status_after = 'dispatched'`,
+          [task.task_id]
+        );
+        isFirstDispatch = (parseInt(evR.rows[0]?.cnt || '0') === 0);
+      } catch (e) {}
+
       let sendResult;
       if (formUrl) {
         // Send interactive card with form link button
-        const card = buildTaskDispatchCard(task, formUrl);
+        const card = buildTaskDispatchCard(task, formUrl, { isFirstDispatch });
         sendResult = await sendLarkCard(fu.open_id, card);
       } else {
         // Fallback to plain text if form URL not available
         const sev = task.severity === 'high' ? '🔴' : '🟡';
+        const newBadge = isFirstDispatch ? '🆕 新任务 · ' : '🔄 追踪 · ';
         const roleLabel = task.assignee_role === 'store_production_manager' ? '出品经理' : '店长';
-        const msgText = `${sev} 异常通知 [${task.task_id}]\n\n${roleLabel}您好，系统检测到以下异常：\n\n📋 ${task.title}\n\n${task.detail || ''}\n\n⚠️ 请解释原因并上传整改措施\n（直接回复文字说明 + 整改照片）`;
+        const msgText = `${newBadge}${sev} 异常通知 [${task.task_id}]\n\n${roleLabel}您好，系统检测到以下异常：\n\n📋 ${task.title}\n\n${task.detail || ''}\n\n⚠️ 请解释原因并上传整改措施\n（直接回复文字说明 + 整改照片）`;
         sendResult = await sendLarkMessage(fu.open_id, prefixWithAgentName('ops_supervisor', msgText));
       }
 
