@@ -26,6 +26,51 @@ const BIZ_NORMALIZE_SQL = `
   END
 `;
 
+const COST_COVERAGE_WARN_THRESHOLD_PCT = 90;
+const COST_COVERAGE_GOOD_THRESHOLD_PCT = 95;
+
+const BIZ_PRIORITY_SQL = (bizExpr, targetBizExpr) => `
+  CASE
+    WHEN lower(regexp_replace(COALESCE(${bizExpr}, ''), '\\s+', '', 'g')) IN ('takeaway','delivery','外卖','外送') AND ${targetBizExpr} = 'takeaway' THEN 0
+    WHEN lower(regexp_replace(COALESCE(${bizExpr}, ''), '\\s+', '', 'g')) IN ('dinein','堂食','店内','堂食点餐') AND ${targetBizExpr} = 'dinein' THEN 0
+    WHEN COALESCE(NULLIF(trim(${bizExpr}), ''), '*') IN ('*', 'all', 'ALL', '全部', '通用') THEN 1
+    ELSE 2
+  END
+`;
+
+const BIZ_MATCH_WHERE_SQL = (bizExpr, targetBizExpr) => `
+  (
+    (lower(regexp_replace(COALESCE(${bizExpr}, ''), '\\s+', '', 'g')) IN ('takeaway','delivery','外卖','外送') AND ${targetBizExpr} = 'takeaway')
+    OR (lower(regexp_replace(COALESCE(${bizExpr}, ''), '\\s+', '', 'g')) IN ('dinein','堂食','店内','堂食点餐') AND ${targetBizExpr} = 'dinein')
+    OR COALESCE(NULLIF(trim(${bizExpr}), ''), '*') IN ('*', 'all', 'ALL', '全部', '通用')
+  )
+`;
+
+const DISH_NAME_NORMALIZE_SQL = (expr) => `
+  lower(
+    regexp_replace(
+      regexp_replace(
+        regexp_replace(
+          translate(
+            COALESCE(${expr}, ''),
+            '魚雞鴨鵝雜滷燒湯飯麵餅凍鮮廣銷順蔥薑蝦蠔鍋鑊龍條頭頸腩風號東0123456789',
+            '鱼鸡鸭鹅杂卤烧汤饭面饼冻鲜广销顺葱姜虾蚝锅镬龙条头颈腩风号东零一二三四五六七八九'
+          ),
+          '【[^】]*】|（[^）]*）|\\([^)]*\\)|\\[[^\\]]*\\]',
+          '',
+          'g'
+        ),
+        '[\\s_/+·,，。、“”‘’!！?？:：;；''"~～()（）\\[\\]【】-]',
+        '',
+        'g'
+      ),
+      '\\s+',
+      '',
+      'g'
+    )
+  )
+`;
+
 const SLOT_NORMALIZE_SQL = `
   CASE
     WHEN lower(regexp_replace(COALESCE(s.slot, ''), '\\s+', '', 'g')) IN ('lunch','午市','午餐') THEN 'lunch'
@@ -136,6 +181,27 @@ async function queryMarginByBiz(store, startDate, endDate) {
       WHERE s.store = $1
         AND s.date BETWEEN $2 AND $3
       GROUP BY s.store, s.biz_type, s.dish_name
+    ), resolved AS (
+      SELECT
+        x.*,
+        COALESCE(a.canonical_name, x.dish_name) AS resolved_dish_name
+      FROM sales x
+      LEFT JOIN LATERAL (
+        SELECT da.canonical_name
+        FROM dish_name_aliases da
+        WHERE da.enabled = TRUE
+          AND ${DISH_NAME_NORMALIZE_SQL('da.alias_name')} = ${DISH_NAME_NORMALIZE_SQL('x.dish_name')}
+          AND (
+            lower(regexp_replace(COALESCE(da.store, '*'), '\\s+', '', 'g')) = lower(regexp_replace(COALESCE(x.store, ''), '\\s+', '', 'g'))
+            OR COALESCE(NULLIF(trim(da.store), ''), '*') = '*'
+          )
+          AND ${BIZ_MATCH_WHERE_SQL('da.biz_type', 'x.biz_type')}
+        ORDER BY
+          ${BIZ_PRIORITY_SQL('da.biz_type', 'x.biz_type')},
+          CASE WHEN COALESCE(NULLIF(trim(da.store), ''), '*') = '*' THEN 2 ELSE 1 END,
+          da.updated_at DESC
+        LIMIT 1
+      ) a ON TRUE
     ), priced AS (
       SELECT
         x.biz_type,
@@ -144,24 +210,21 @@ async function queryMarginByBiz(store, startDate, endDate) {
         x.recorded_discount,
         x.derived_discount,
         x.qty,
+        c.unit_cost AS matched_unit_cost,
         COALESCE(c.unit_cost, 0) AS unit_cost
-      FROM sales x
+      FROM resolved x
       LEFT JOIN LATERAL (
         SELECT dlc.unit_cost
         FROM dish_library_costs dlc
         WHERE dlc.enabled = TRUE
-          AND lower(regexp_replace(COALESCE(dlc.dish_name, ''), '\\s+', '', 'g')) = lower(regexp_replace(COALESCE(x.dish_name, ''), '\\s+', '', 'g'))
+          AND ${DISH_NAME_NORMALIZE_SQL('dlc.dish_name')} = ${DISH_NAME_NORMALIZE_SQL('x.resolved_dish_name')}
           AND (
             lower(regexp_replace(COALESCE(dlc.store, '*'), '\\s+', '', 'g')) = lower(regexp_replace(COALESCE(x.store, ''), '\\s+', '', 'g'))
             OR COALESCE(NULLIF(trim(dlc.store), ''), '*') = '*'
           )
+          AND ${BIZ_MATCH_WHERE_SQL('dlc.biz_type', 'x.biz_type')}
         ORDER BY
-          CASE
-            WHEN lower(regexp_replace(COALESCE(dlc.biz_type, ''), '\\s+', '', 'g')) IN ('takeaway','delivery','外卖','外送') AND x.biz_type = 'takeaway' THEN 0
-            WHEN lower(regexp_replace(COALESCE(dlc.biz_type, ''), '\\s+', '', 'g')) IN ('dinein','堂食','店内','堂食点餐') AND x.biz_type = 'dinein' THEN 0
-            WHEN COALESCE(NULLIF(trim(dlc.biz_type), ''), '*') IN ('*', 'all', 'ALL', '全部', '通用') THEN 1
-            ELSE 2
-          END,
+          ${BIZ_PRIORITY_SQL('dlc.biz_type', 'x.biz_type')},
           CASE WHEN COALESCE(NULLIF(trim(dlc.store), ''), '*') = '*' THEN 2 ELSE 1 END,
           dlc.updated_at DESC
         LIMIT 1
@@ -169,11 +232,11 @@ async function queryMarginByBiz(store, startDate, endDate) {
     )
     SELECT
       biz_type,
-      ROUND(SUM(sales_amount)::numeric, 2) AS total_sales_amount,
-      ROUND(SUM(revenue)::numeric, 2) AS total_revenue,
-      ROUND(SUM(recorded_discount)::numeric, 2) AS total_discount_recorded,
-      ROUND(SUM(derived_discount)::numeric, 2) AS total_discount_derived,
-      ROUND(SUM(qty * unit_cost)::numeric, 2) AS total_cost
+      ROUND(SUM(CASE WHEN matched_unit_cost IS NOT NULL THEN sales_amount ELSE 0 END)::numeric, 2) AS total_sales_amount,
+      ROUND(SUM(CASE WHEN matched_unit_cost IS NOT NULL THEN revenue ELSE 0 END)::numeric, 2) AS total_revenue,
+      ROUND(SUM(CASE WHEN matched_unit_cost IS NOT NULL THEN recorded_discount ELSE 0 END)::numeric, 2) AS total_discount_recorded,
+      ROUND(SUM(CASE WHEN matched_unit_cost IS NOT NULL THEN derived_discount ELSE 0 END)::numeric, 2) AS total_discount_derived,
+      ROUND(SUM(CASE WHEN matched_unit_cost IS NOT NULL THEN qty * unit_cost ELSE 0 END)::numeric, 2) AS total_cost
     FROM priced
     GROUP BY biz_type
   `, [store, startDate, endDate]);
@@ -237,6 +300,27 @@ async function queryMarginBySlot(store, startDate, endDate) {
       WHERE s.store = $1
         AND s.date BETWEEN $2 AND $3
       GROUP BY s.store, slot, biz_type, s.dish_name
+    ), resolved AS (
+      SELECT
+        x.*,
+        COALESCE(a.canonical_name, x.dish_name) AS resolved_dish_name
+      FROM sales x
+      LEFT JOIN LATERAL (
+        SELECT da.canonical_name
+        FROM dish_name_aliases da
+        WHERE da.enabled = TRUE
+          AND ${DISH_NAME_NORMALIZE_SQL('da.alias_name')} = ${DISH_NAME_NORMALIZE_SQL('x.dish_name')}
+          AND (
+            lower(regexp_replace(COALESCE(da.store, '*'), '\\s+', '', 'g')) = lower(regexp_replace(COALESCE(x.store, ''), '\\s+', '', 'g'))
+            OR COALESCE(NULLIF(trim(da.store), ''), '*') = '*'
+          )
+          AND ${BIZ_MATCH_WHERE_SQL('da.biz_type', 'x.biz_type')}
+        ORDER BY
+          ${BIZ_PRIORITY_SQL('da.biz_type', 'x.biz_type')},
+          CASE WHEN COALESCE(NULLIF(trim(da.store), ''), '*') = '*' THEN 2 ELSE 1 END,
+          da.updated_at DESC
+        LIMIT 1
+      ) a ON TRUE
     ), priced AS (
       SELECT
         x.slot,
@@ -246,24 +330,21 @@ async function queryMarginBySlot(store, startDate, endDate) {
         x.recorded_discount,
         x.derived_discount,
         x.qty,
+        c.unit_cost AS matched_unit_cost,
         COALESCE(c.unit_cost, 0) AS unit_cost
-      FROM sales x
+      FROM resolved x
       LEFT JOIN LATERAL (
         SELECT dlc.unit_cost
         FROM dish_library_costs dlc
         WHERE dlc.enabled = TRUE
-          AND lower(regexp_replace(COALESCE(dlc.dish_name, ''), '\\s+', '', 'g')) = lower(regexp_replace(COALESCE(x.dish_name, ''), '\\s+', '', 'g'))
+          AND ${DISH_NAME_NORMALIZE_SQL('dlc.dish_name')} = ${DISH_NAME_NORMALIZE_SQL('x.resolved_dish_name')}
           AND (
             lower(regexp_replace(COALESCE(dlc.store, '*'), '\\s+', '', 'g')) = lower(regexp_replace(COALESCE(x.store, ''), '\\s+', '', 'g'))
             OR COALESCE(NULLIF(trim(dlc.store), ''), '*') = '*'
           )
+          AND ${BIZ_MATCH_WHERE_SQL('dlc.biz_type', 'x.biz_type')}
         ORDER BY
-          CASE
-            WHEN lower(regexp_replace(COALESCE(dlc.biz_type, ''), '\\s+', '', 'g')) IN ('takeaway','delivery','外卖','外送') AND x.biz_type = 'takeaway' THEN 0
-            WHEN lower(regexp_replace(COALESCE(dlc.biz_type, ''), '\\s+', '', 'g')) IN ('dinein','堂食','店内','堂食点餐') AND x.biz_type = 'dinein' THEN 0
-            WHEN COALESCE(NULLIF(trim(dlc.biz_type), ''), '*') IN ('*', 'all', 'ALL', '全部', '通用') THEN 1
-            ELSE 2
-          END,
+          ${BIZ_PRIORITY_SQL('dlc.biz_type', 'x.biz_type')},
           CASE WHEN COALESCE(NULLIF(trim(dlc.store), ''), '*') = '*' THEN 2 ELSE 1 END,
           dlc.updated_at DESC
         LIMIT 1
@@ -272,11 +353,11 @@ async function queryMarginBySlot(store, startDate, endDate) {
     SELECT
       slot,
       biz_type,
-      ROUND(SUM(sales_amount)::numeric, 2) AS total_sales_amount,
-      ROUND(SUM(revenue)::numeric, 2) AS total_revenue,
-      ROUND(SUM(recorded_discount)::numeric, 2) AS total_discount_recorded,
-      ROUND(SUM(derived_discount)::numeric, 2) AS total_discount_derived,
-      ROUND(SUM(qty * unit_cost)::numeric, 2) AS total_cost
+      ROUND(SUM(CASE WHEN matched_unit_cost IS NOT NULL THEN sales_amount ELSE 0 END)::numeric, 2) AS total_sales_amount,
+      ROUND(SUM(CASE WHEN matched_unit_cost IS NOT NULL THEN revenue ELSE 0 END)::numeric, 2) AS total_revenue,
+      ROUND(SUM(CASE WHEN matched_unit_cost IS NOT NULL THEN recorded_discount ELSE 0 END)::numeric, 2) AS total_discount_recorded,
+      ROUND(SUM(CASE WHEN matched_unit_cost IS NOT NULL THEN derived_discount ELSE 0 END)::numeric, 2) AS total_discount_derived,
+      ROUND(SUM(CASE WHEN matched_unit_cost IS NOT NULL THEN qty * unit_cost ELSE 0 END)::numeric, 2) AS total_cost
     FROM priced
     GROUP BY slot, biz_type
   `, [store, startDate, endDate]);
@@ -320,6 +401,201 @@ async function queryMarginBySlot(store, startDate, endDate) {
   }
 
   return bySlot;
+}
+
+async function queryCostCoverageDiagnostics(store, startDate, endDate, unmatchedLimit = 12) {
+  const summary = await pool().query(`
+    WITH sales AS (
+      SELECT
+        s.store,
+        ${BIZ_NORMALIZE_SQL} AS biz_type,
+        s.dish_name,
+        SUM(COALESCE(s.qty, 0)) AS qty,
+        SUM(COALESCE(s.sales_amount, 0)) AS sales_amount,
+        SUM(COALESCE(s.revenue, 0)) AS revenue
+      FROM sales_raw s
+      WHERE s.store = $1
+        AND s.date BETWEEN $2 AND $3
+      GROUP BY s.store, s.biz_type, s.dish_name
+    ), resolved AS (
+      SELECT
+        x.*,
+        COALESCE(a.canonical_name, x.dish_name) AS resolved_dish_name
+      FROM sales x
+      LEFT JOIN LATERAL (
+        SELECT da.canonical_name
+        FROM dish_name_aliases da
+        WHERE da.enabled = TRUE
+          AND ${DISH_NAME_NORMALIZE_SQL('da.alias_name')} = ${DISH_NAME_NORMALIZE_SQL('x.dish_name')}
+          AND (
+            lower(regexp_replace(COALESCE(da.store, '*'), '\\s+', '', 'g')) = lower(regexp_replace(COALESCE(x.store, ''), '\\s+', '', 'g'))
+            OR COALESCE(NULLIF(trim(da.store), ''), '*') = '*'
+          )
+          AND ${BIZ_MATCH_WHERE_SQL('da.biz_type', 'x.biz_type')}
+        ORDER BY
+          ${BIZ_PRIORITY_SQL('da.biz_type', 'x.biz_type')},
+          CASE WHEN COALESCE(NULLIF(trim(da.store), ''), '*') = '*' THEN 2 ELSE 1 END,
+          da.updated_at DESC
+        LIMIT 1
+      ) a ON TRUE
+    ), priced AS (
+      SELECT
+        x.biz_type,
+        x.dish_name,
+        x.resolved_dish_name,
+        x.qty,
+        x.sales_amount,
+        x.revenue,
+        c.unit_cost
+      FROM resolved x
+      LEFT JOIN LATERAL (
+        SELECT dlc.unit_cost
+        FROM dish_library_costs dlc
+        WHERE dlc.enabled = TRUE
+          AND ${DISH_NAME_NORMALIZE_SQL('dlc.dish_name')} = ${DISH_NAME_NORMALIZE_SQL('x.resolved_dish_name')}
+          AND (
+            lower(regexp_replace(COALESCE(dlc.store, '*'), '\\s+', '', 'g')) = lower(regexp_replace(COALESCE(x.store, ''), '\\s+', '', 'g'))
+            OR COALESCE(NULLIF(trim(dlc.store), ''), '*') = '*'
+          )
+          AND ${BIZ_MATCH_WHERE_SQL('dlc.biz_type', 'x.biz_type')}
+        ORDER BY
+          ${BIZ_PRIORITY_SQL('dlc.biz_type', 'x.biz_type')},
+          CASE WHEN COALESCE(NULLIF(trim(dlc.store), ''), '*') = '*' THEN 2 ELSE 1 END,
+          dlc.updated_at DESC
+        LIMIT 1
+      ) c ON TRUE
+    )
+    SELECT
+      biz_type,
+      ROUND(SUM(sales_amount)::numeric, 2) AS total_sales,
+      ROUND(SUM(CASE WHEN unit_cost IS NOT NULL THEN sales_amount ELSE 0 END)::numeric, 2) AS covered_sales,
+      ROUND(SUM(revenue)::numeric, 2) AS total_revenue,
+      ROUND(SUM(CASE WHEN unit_cost IS NOT NULL THEN revenue ELSE 0 END)::numeric, 2) AS covered_revenue
+    FROM priced
+    GROUP BY biz_type
+  `, [store, startDate, endDate]);
+
+  const unmatched = await pool().query(`
+    WITH sales AS (
+      SELECT
+        s.store,
+        ${BIZ_NORMALIZE_SQL} AS biz_type,
+        s.dish_name,
+        SUM(COALESCE(s.qty, 0)) AS qty,
+        SUM(COALESCE(s.sales_amount, 0)) AS sales_amount,
+        SUM(COALESCE(s.revenue, 0)) AS revenue
+      FROM sales_raw s
+      WHERE s.store = $1
+        AND s.date BETWEEN $2 AND $3
+      GROUP BY s.store, s.biz_type, s.dish_name
+    ), resolved AS (
+      SELECT
+        x.*,
+        COALESCE(a.canonical_name, x.dish_name) AS resolved_dish_name
+      FROM sales x
+      LEFT JOIN LATERAL (
+        SELECT da.canonical_name
+        FROM dish_name_aliases da
+        WHERE da.enabled = TRUE
+          AND ${DISH_NAME_NORMALIZE_SQL('da.alias_name')} = ${DISH_NAME_NORMALIZE_SQL('x.dish_name')}
+          AND (
+            lower(regexp_replace(COALESCE(da.store, '*'), '\\s+', '', 'g')) = lower(regexp_replace(COALESCE(x.store, ''), '\\s+', '', 'g'))
+            OR COALESCE(NULLIF(trim(da.store), ''), '*') = '*'
+          )
+          AND ${BIZ_MATCH_WHERE_SQL('da.biz_type', 'x.biz_type')}
+        ORDER BY
+          ${BIZ_PRIORITY_SQL('da.biz_type', 'x.biz_type')},
+          CASE WHEN COALESCE(NULLIF(trim(da.store), ''), '*') = '*' THEN 2 ELSE 1 END,
+          da.updated_at DESC
+        LIMIT 1
+      ) a ON TRUE
+    ), priced AS (
+      SELECT
+        x.biz_type,
+        x.dish_name,
+        x.resolved_dish_name,
+        x.qty,
+        x.sales_amount,
+        x.revenue,
+        c.unit_cost
+      FROM resolved x
+      LEFT JOIN LATERAL (
+        SELECT dlc.unit_cost
+        FROM dish_library_costs dlc
+        WHERE dlc.enabled = TRUE
+          AND ${DISH_NAME_NORMALIZE_SQL('dlc.dish_name')} = ${DISH_NAME_NORMALIZE_SQL('x.resolved_dish_name')}
+          AND (
+            lower(regexp_replace(COALESCE(dlc.store, '*'), '\\s+', '', 'g')) = lower(regexp_replace(COALESCE(x.store, ''), '\\s+', '', 'g'))
+            OR COALESCE(NULLIF(trim(dlc.store), ''), '*') = '*'
+          )
+          AND ${BIZ_MATCH_WHERE_SQL('dlc.biz_type', 'x.biz_type')}
+        ORDER BY
+          ${BIZ_PRIORITY_SQL('dlc.biz_type', 'x.biz_type')},
+          CASE WHEN COALESCE(NULLIF(trim(dlc.store), ''), '*') = '*' THEN 2 ELSE 1 END,
+          dlc.updated_at DESC
+        LIMIT 1
+      ) c ON TRUE
+    )
+    SELECT
+      biz_type,
+      dish_name,
+      resolved_dish_name,
+      ROUND(SUM(sales_amount)::numeric, 2) AS sales,
+      ROUND(SUM(revenue)::numeric, 2) AS revenue,
+      ROUND(SUM(qty)::numeric, 2) AS qty
+    FROM priced
+    WHERE unit_cost IS NULL
+    GROUP BY biz_type, dish_name, resolved_dish_name
+    ORDER BY SUM(sales_amount) DESC
+    LIMIT $4
+  `, [store, startDate, endDate, Math.max(1, Math.min(30, Number(unmatchedLimit) || 12))]);
+
+  const byBiz = {
+    dinein: { totalSales: 0, coveredSales: 0, totalRevenue: 0, coveredRevenue: 0, salesCoveragePct: null, revenueCoveragePct: null },
+    takeaway: { totalSales: 0, coveredSales: 0, totalRevenue: 0, coveredRevenue: 0, salesCoveragePct: null, revenueCoveragePct: null }
+  };
+
+  for (const row of summary.rows || []) {
+    const biz = String(row.biz_type || '').trim();
+    if (!byBiz[biz]) continue;
+    const totalSales = toNum(row.total_sales);
+    const coveredSales = toNum(row.covered_sales);
+    const totalRevenue = toNum(row.total_revenue);
+    const coveredRevenue = toNum(row.covered_revenue);
+    byBiz[biz] = {
+      totalSales,
+      coveredSales,
+      totalRevenue,
+      coveredRevenue,
+      salesCoveragePct: pct(coveredSales, totalSales),
+      revenueCoveragePct: pct(coveredRevenue, totalRevenue)
+    };
+  }
+
+  const totalSales = byBiz.dinein.totalSales + byBiz.takeaway.totalSales;
+  const coveredSales = byBiz.dinein.coveredSales + byBiz.takeaway.coveredSales;
+  const totalRevenue = byBiz.dinein.totalRevenue + byBiz.takeaway.totalRevenue;
+  const coveredRevenue = byBiz.dinein.coveredRevenue + byBiz.takeaway.coveredRevenue;
+
+  return {
+    byBiz,
+    total: {
+      totalSales,
+      coveredSales,
+      totalRevenue,
+      coveredRevenue,
+      salesCoveragePct: pct(coveredSales, totalSales),
+      revenueCoveragePct: pct(coveredRevenue, totalRevenue)
+    },
+    unmatchedTop: (unmatched.rows || []).map((row) => ({
+      bizType: String(row.biz_type || '').trim(),
+      dishName: String(row.dish_name || '').trim(),
+      resolvedDishName: String(row.resolved_dish_name || '').trim(),
+      sales: toNum(row.sales),
+      revenue: toNum(row.revenue),
+      qty: toNum(row.qty)
+    }))
+  };
 }
 
 async function generatePeriodReport(store, startDate, endDate, reportType = 'weekly') {
@@ -416,6 +692,16 @@ async function generatePeriodReport(store, startDate, endDate, reportType = 'wee
     }
   };
   report.sections.slotMargins = await queryMarginBySlot(store, startDate, endDate);
+  report.sections.costCoverage = await queryCostCoverageDiagnostics(store, startDate, endDate, 15);
+
+  const takeCoverage = toNum(report.sections.costCoverage?.byBiz?.takeaway?.salesCoveragePct);
+  const dineinCoverage = toNum(report.sections.costCoverage?.byBiz?.dinein?.salesCoveragePct);
+  if (hasTakeaway && takeCoverage > 0 && takeCoverage < COST_COVERAGE_WARN_THRESHOLD_PCT) {
+    report.dataQualityWarnings.push(`外卖成本覆盖率仅 ${takeCoverage.toFixed(1)}%，低于${COST_COVERAGE_WARN_THRESHOLD_PCT}%门槛，本期外卖毛利可信度较低。请先补齐成本库/别名映射后再解读毛利。`);
+  }
+  if (dineinCoverage > 0 && dineinCoverage < COST_COVERAGE_WARN_THRESHOLD_PCT) {
+    report.dataQualityWarnings.push(`堂食成本覆盖率仅 ${dineinCoverage.toFixed(1)}%，低于${COST_COVERAGE_WARN_THRESHOLD_PCT}%门槛，本期堂食毛利可信度较低。`);
+  }
 
   // f) 环比（上一周期）
   const periodDays = daysBetweenInclusive(startDate, endDate);
@@ -472,7 +758,15 @@ export function formatReportMarkdown(r) {
 
   const m = r.sections.theoreticalMargins || {};
   const totals = m.totals || {};
+  const costCoverage = r.sections.costCoverage || {};
   const wowSec = r.sections.wow || {};
+
+  const coverageLabel = (v) => {
+    if (v === null || v === undefined || !Number.isFinite(v)) return '-';
+    if (v >= COST_COVERAGE_GOOD_THRESHOLD_PCT) return `✅${v.toFixed(1)}%`;
+    if (v >= COST_COVERAGE_WARN_THRESHOLD_PCT) return `⚠️${v.toFixed(1)}%`;
+    return `🚨${v.toFixed(1)}%`;
+  };
 
   let md = '';
 
@@ -502,7 +796,8 @@ export function formatReportMarkdown(r) {
 
   // ── 二、毛利分析 ──
   md += `\n${sep}\n`;
-  md += `**二、理论毛利率**\n`;
+  md += `**二、理论毛利分析**（折前/实收双口径）\n\n`;
+  md += `> 口径说明：以下毛利率按“已匹配到成本”的销售明细计算；未命中成本的记录不计入收入与成本。\n`;
   md += `> 基于菜品库成本计算\n\n`;
 
   const marginRows = [
@@ -517,6 +812,15 @@ export function formatReportMarkdown(r) {
   md += `|:--|--:|--:|--:|--:|--:|\n`;
   for (const row of marginRows) {
     md += `| ${row.label} | ${fmtMoneyPlain(row.data?.sales)} | ${fmtMoneyPlain(row.data?.revenue)} | ${fmtMoneyPlain(row.data?.cost)} | ${fmtPct(row.pre)} | **${fmtPct(row.net)}** |\n`;
+  }
+
+  md += `\n**成本覆盖率（覆盖率越高，毛利越可信）**\n`;
+  md += `| 类型 | 销售额覆盖率 | 实收覆盖率 |\n`;
+  md += `|:--|--:|--:|\n`;
+  md += `| 📊 总计 | ${coverageLabel(costCoverage.total?.salesCoveragePct)} | ${coverageLabel(costCoverage.total?.revenueCoveragePct)} |\n`;
+  md += `| 🍽 堂食 | ${coverageLabel(costCoverage.byBiz?.dinein?.salesCoveragePct)} | ${coverageLabel(costCoverage.byBiz?.dinein?.revenueCoveragePct)} |\n`;
+  if (hasTakeaway) {
+    md += `| 🛵 外卖 | ${coverageLabel(costCoverage.byBiz?.takeaway?.salesCoveragePct)} | ${coverageLabel(costCoverage.byBiz?.takeaway?.revenueCoveragePct)} |\n`;
   }
 
   // ── 三、时段经营维度 ──
@@ -626,6 +930,17 @@ export function formatReportMarkdown(r) {
   } else {
     summary.forEach((line, idx) => {
       md += `${idx + 1}. ${line}\n`;
+    });
+  }
+
+  const unmatchedTop = Array.isArray(costCoverage.unmatchedTop) ? costCoverage.unmatchedTop : [];
+  if (unmatchedTop.length) {
+    md += `\n${sep}\n`;
+    md += `**附录：未匹配成本菜品TOP（按折前营收）**\n\n`;
+    unmatchedTop.slice(0, 15).forEach((x, idx) => {
+      const bizCn = BIZ_CN[String(x.bizType || '').trim()] || String(x.bizType || '-').trim() || '-';
+      const resolvedHint = x.resolvedDishName && x.resolvedDishName !== x.dishName ? ` → 标准名:${x.resolvedDishName}` : '';
+      md += `${String(idx + 1).padStart(2, ' ')}. [${bizCn}] ${x.dishName}${resolvedHint} ｜ 折前${fmtMoneyPlain(x.sales)} ｜ 实收${fmtMoneyPlain(x.revenue)} ｜ 数量${toNum(x.qty).toFixed(0)}\n`;
     });
   }
 

@@ -9,65 +9,73 @@
 export const UNIFIED_DEDUCTION_RULES = {
   '实收营收异常': { 
     role: 'store_manager', 
-    highDeduct: 5, 
-    mediumDeduct: 3, 
-    lowDeduct: 1,
+    highDeduct: 40, 
+    mediumDeduct: 20, 
+    lowDeduct: 0,
+    frequency: 'monthly',  // 每月触发1次
     dimension: '成本控制',
     description: '营收达成率偏低'
   },
   '人效值异常': { 
     role: 'store_manager', 
-    highDeduct: 5, 
-    mediumDeduct: 3, 
-    lowDeduct: 1,
+    highDeduct: 20, 
+    mediumDeduct: 10, 
+    lowDeduct: 0,
+    frequency: 'monthly',  // 每月触发1次
     dimension: '成本控制',
     description: '人效率不达标'
   },
   '充值异常': { 
     role: 'store_manager', 
-    highDeduct: 5, 
-    mediumDeduct: 3, 
-    lowDeduct: 1,
+    highDeduct: 2, 
+    mediumDeduct: 1, 
+    lowDeduct: 0,
+    frequency: 'daily',    // 每天触发1次
     dimension: '成本控制',
     description: '无充值记录'
   },
   '桌访异常': { 
     role: 'store_production_manager', 
-    highDeduct: 5, 
-    mediumDeduct: 3, 
-    lowDeduct: 1,
+    highDeduct: 10, 
+    mediumDeduct: 5, 
+    lowDeduct: 0,
+    frequency: 'weekly',   // 每周触发1次
     dimension: '质量得分',
     description: '产品投诉过多'
   },
   '桌访占比异常': { 
     role: 'store_manager', 
-    highDeduct: 5, 
-    mediumDeduct: 3, 
-    lowDeduct: 1,
+    highDeduct: 20, 
+    mediumDeduct: 10, 
+    lowDeduct: 0,
+    frequency: 'monthly',  // 每月触发1次
     dimension: '质量得分',
     description: '桌访率偏低'
   },
   '总实收毛利率异常': { 
     role: 'store_production_manager', 
-    highDeduct: 5, 
-    mediumDeduct: 3, 
-    lowDeduct: 1,
+    highDeduct: 40, 
+    mediumDeduct: 20, 
+    lowDeduct: 0,
+    frequency: 'monthly',  // 每月触发1次
     dimension: '成本控制',
     description: '毛利率不达标'
   },
   '产品差评异常': { 
     role: 'store_production_manager', 
-    highDeduct: 5, 
-    mediumDeduct: 3, 
-    lowDeduct: 1,
+    highDeduct: 10, 
+    mediumDeduct: 5, 
+    lowDeduct: 0,
+    frequency: 'weekly',   // 每周触发1次
     dimension: '质量得分',
     description: '产品质量差评'
   },
   '服务差评异常': { 
     role: 'store_manager', 
-    highDeduct: 5, 
-    mediumDeduct: 3, 
-    lowDeduct: 1,
+    highDeduct: 10, 
+    mediumDeduct: 5, 
+    lowDeduct: 0,
+    frequency: 'weekly',   // 每周触发1次
     dimension: '质量得分',
     description: '服务质量差评'
   }

@@ -1,0 +1,9 @@
+{
+  "name": "save-user-phone",
+  "version": "1.0.0",
+  "description": "保存用户手机号并检测老会员",
+  "main": "index.js",
+  "dependencies": {
+    "wx-server-sdk": "~2.6.3"
+  }
+}

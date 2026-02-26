@@ -1,0 +1,23 @@
+<view class="page">
+  <view class="debug">年年有喜小程序</view>
+  <view class="debug">isFromScan: {{isFromScan}}</view>
+  <view class="debug">showAuthModal: {{showAuthModal}}</view>
+  <view class="debug" wx:if="{{scanParams}}">table_id: {{scanParams.table_id}} / store_id: {{scanParams.store_id}}</view>
+
+  <view wx:if="{{isFromScan && !showAuthModal}}" style="margin-top: 20rpx;">
+    <button class="modal-btn" open-type="getPhoneNumber" bindgetphonenumber="onGetPhoneNumber" bindtap="onAuthTap">再次弹出授权</button>
+  </view>
+
+  <view wx:if="{{showAuthModal}}" class="modal">
+    <view class="modal-content">
+      <view class="modal-title">禧事临门！</view>
+      <view class="modal-desc">请先授权手机号领取会员权益</view>
+      <button class="modal-btn" open-type="getPhoneNumber" bindgetphonenumber="onGetPhoneNumber" bindtap="onAuthTap">立即授权领取</button>
+    </view>
+  </view>
+
+  <view wx:if="{{showLegacyMemberTip}}" class="legacy">
+    <view class="legacy-title">检测到老会员</view>
+    <view class="legacy-points">积分已同步 +{{legacyMemberPoints}}</view>
+  </view>
+</view>

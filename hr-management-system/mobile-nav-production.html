@@ -7590,6 +7590,7 @@
                                             <th>姓名</th>
                                             <th>性别</th>
                                             <th>生日</th>
+                                            <th>年龄</th>
                                             <th>所属门店</th>
                                             <th>岗位</th>
                                             <th>工资</th>
@@ -8854,6 +8855,10 @@
                         <input id="employee-form-birthday" type="date" style="width: 100%; padding: 12px;">
                     </div>
                     <div class="ui-form-group">
+                        <label class="ui-label">年龄</label>
+                        <input id="employee-form-age" type="text" placeholder="根据出生年月自动计算" readonly style="width: 100%; padding: 12px; opacity: 0.9;">
+                    </div>
+                    <div class="ui-form-group">
                         <label class="ui-label">身份证号码</label>
                         <input id="employee-form-idCardNumber" type="text" placeholder="18位身份证号" style="width: 100%; padding: 12px;">
                     </div>
@@ -8927,8 +8932,20 @@
                         <input id="employee-form-joinDate" type="date" required style="width: 100%; padding: 12px;">
                     </div>
                     <div class="ui-form-group">
-                        <label class="ui-label">工资卡号</label>
-                        <input id="employee-form-bankCard" type="text" placeholder="银行卡号" style="width: 100%; padding: 12px;">
+                        <label class="ui-label">工资卡号公</label>
+                        <input id="employee-form-bankCardCompany" type="text" placeholder="工资卡号公" style="width: 100%; padding: 12px;">
+                    </div>
+                    <div class="ui-form-group">
+                        <label class="ui-label">工资银行公</label>
+                        <input id="employee-form-bankNameCompany" type="text" placeholder="工资银行公" style="width: 100%; padding: 12px;">
+                    </div>
+                    <div class="ui-form-group">
+                        <label class="ui-label">工资卡号私</label>
+                        <input id="employee-form-bankCardPersonal" type="text" placeholder="工资卡号私" style="width: 100%; padding: 12px;">
+                    </div>
+                    <div class="ui-form-group">
+                        <label class="ui-label">工资银行私</label>
+                        <input id="employee-form-bankNamePersonal" type="text" placeholder="工资银行私" style="width: 100%; padding: 12px;">
                     </div>
                     <div class="ui-form-group">
                         <label class="ui-label">电话</label>
@@ -20392,6 +20409,22 @@ ${knowledgeContent.slice(0, 30000)}`;
         }
         
         // 员工管理功能
+        function empCalcAgeFromBirthday(birthdayRaw) {
+            const s = String(birthdayRaw || '').trim();
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+            const b = new Date(s + 'T00:00:00');
+            if (!(b instanceof Date) || isNaN(b.getTime())) return null;
+            const now = new Date();
+            let age = now.getFullYear() - b.getFullYear();
+            const mNow = now.getMonth() + 1;
+            const dNow = now.getDate();
+            const mBirth = b.getMonth() + 1;
+            const dBirth = b.getDate();
+            if (mNow < mBirth || (mNow === mBirth && dNow < dBirth)) age -= 1;
+            if (!Number.isFinite(age) || age < 0 || age > 120) return null;
+            return age;
+        }
+
         function loadEmployeesData() {
             const tbody = document.getElementById('employee-tbody');
             if (!tbody) return;
@@ -20469,7 +20502,7 @@ ${knowledgeContent.slice(0, 30000)}`;
             };
             
             if (filtered.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:#888;padding:40px;">暂无员工数据</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;color:#888;padding:40px;">暂无员工数据</td></tr>';
                 try {
                     if (cardsEl) {
                         cardsEl.innerHTML = '<div style="text-align:center;color:rgba(200,215,230,0.72);padding:28px 12px;">暂无员工数据</div>';
@@ -20516,6 +20549,8 @@ ${knowledgeContent.slice(0, 30000)}`;
                 const salary = (salaryRaw === null || salaryRaw === undefined || salaryRaw === '') ? '-' : String(salaryRaw);
                 const gender = String(emp.gender || '').trim() || '-';
                 const birthday = String(emp.birthday || '').trim() || '-';
+                const age = empCalcAgeFromBirthday(emp?.birthday);
+                const ageDisp = age !== null ? `${age}岁` : '-';
                 const mgrU = String(emp.managerUsername || '').trim();
                 let mgrDisp = '-';
                 if (mgrU) {
@@ -20541,6 +20576,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                     <td>${name}${newBadge}${coreTalentBadge}</td>
                     <td>${gender}</td>
                     <td>${birthday}</td>
+                    <td>${ageDisp}</td>
                     <td>${store}</td>
                     <td>${pos}</td>
                     <td>${salary}</td>
@@ -20584,6 +20620,8 @@ ${knowledgeContent.slice(0, 30000)}`;
                         const salary = (salaryRaw === null || salaryRaw === undefined || salaryRaw === '') ? '-' : String(salaryRaw);
                         const gender = String(emp.gender || '').trim() || '-';
                         const birthday = String(emp.birthday || '').trim() || '-';
+                        const ageM = empCalcAgeFromBirthday(emp?.birthday);
+                        const ageDispM = ageM !== null ? `${ageM}岁` : '-';
                         const role = String(roleLabels[emp.role] || emp.role || '-');
                         const st = String(statusText[emp.status] || emp.status || '-');
                         const statusBadge = st === '在职' ? '在职' : (st === '离职' ? '离职' : st);
@@ -20628,6 +20666,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                                     <div class="emp-card-grid">
                                         <div class="emp-card-item"><div class="k">性别</div><div class="v">${escapeHtml(gender)}</div></div>
                                         <div class="emp-card-item"><div class="k">生日</div><div class="v">${escapeHtml(birthday)}</div></div>
+                                        <div class="emp-card-item"><div class="k">年龄</div><div class="v">${escapeHtml(ageDispM)}</div></div>
                                         <div class="emp-card-item"><div class="k">工资</div><div class="v">${escapeHtml(salary)}</div></div>
                                         <div class="emp-card-item"><div class="k">部门</div><div class="v">${escapeHtml(dept)}</div></div>
                                         <div class="emp-card-item"><div class="k">级别</div><div class="v">${escapeHtml(level)}</div></div>
@@ -20860,6 +20899,7 @@ ${knowledgeContent.slice(0, 30000)}`;
             const pwdTipEl = document.getElementById('employee-form-password-tip');
             const genderEl = document.getElementById('employee-form-gender');
             const birthdayEl = document.getElementById('employee-form-birthday');
+            const ageEl = document.getElementById('employee-form-age');
             const idCardNumberEl = document.getElementById('employee-form-idCardNumber');
             const hometownEl = document.getElementById('employee-form-hometown');
             const registeredResidenceEl = document.getElementById('employee-form-registeredResidence');
@@ -20874,7 +20914,10 @@ ${knowledgeContent.slice(0, 30000)}`;
             const salaryEl = document.getElementById('employee-form-salary');
             const educationEl = document.getElementById('employee-form-education');
             const joinDateEl = document.getElementById('employee-form-joinDate');
-            const bankCardEl = document.getElementById('employee-form-bankCard');
+            const bankCardCompanyEl = document.getElementById('employee-form-bankCardCompany');
+            const bankNameCompanyEl = document.getElementById('employee-form-bankNameCompany');
+            const bankCardPersonalEl = document.getElementById('employee-form-bankCardPersonal');
+            const bankNamePersonalEl = document.getElementById('employee-form-bankNamePersonal');
             const phoneEl = document.getElementById('employee-form-phone');
             const emailEl = document.getElementById('employee-form-email');
             const ecNameEl = document.getElementById('employee-form-emergencyContactName');
@@ -20973,6 +21016,12 @@ ${knowledgeContent.slice(0, 30000)}`;
                 } catch (e) {}
             };
 
+            const syncFormAge = () => {
+                if (!ageEl) return;
+                const age = empCalcAgeFromBirthday(String(birthdayEl?.value || '').trim());
+                ageEl.value = age === null ? '' : `${age}岁`;
+            };
+
             try {
                 if (managerEl) {
                     managerEl.onchange = () => {
@@ -20985,6 +21034,10 @@ ${knowledgeContent.slice(0, 30000)}`;
                 }
                 if (roleEl) {
                     roleEl.onchange = () => applyAutoManager();
+                }
+                if (birthdayEl) {
+                    birthdayEl.onchange = () => syncFormAge();
+                    birthdayEl.oninput = () => syncFormAge();
                 }
             } catch (e) {}
 
@@ -21029,6 +21082,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                     const raw = String(emp.birthday || '');
                     birthdayEl.value = raw && raw.length >= 10 ? raw.slice(0, 10) : raw;
                 }
+                syncFormAge();
                 if (idCardNumberEl) idCardNumberEl.value = String(emp.idCardNumber || emp.idCardNo || emp.idNumber || '');
                 if (hometownEl) hometownEl.value = String(emp.hometown || '');
                 if (registeredResidenceEl) registeredResidenceEl.value = String(emp.registeredResidence || '');
@@ -21043,7 +21097,10 @@ ${knowledgeContent.slice(0, 30000)}`;
                 if (salaryEl) salaryEl.value = emp.salary === null || emp.salary === undefined ? '' : String(emp.salary);
                 if (educationEl) educationEl.value = String(emp.education || '');
                 if (joinDateEl) joinDateEl.value = String(emp.joinDate || '');
-                if (bankCardEl) bankCardEl.value = String(emp.bankCard || '');
+                if (bankCardCompanyEl) bankCardCompanyEl.value = String(emp.bankCardCompany || '');
+                if (bankNameCompanyEl) bankNameCompanyEl.value = String(emp.bankNameCompany || '');
+                if (bankCardPersonalEl) bankCardPersonalEl.value = String(emp.bankCardPersonal || emp.bankCard || '');
+                if (bankNamePersonalEl) bankNamePersonalEl.value = String(emp.bankNamePersonal || '');
                 if (phoneEl) phoneEl.value = String(emp.phone || '');
                 if (emailEl) emailEl.value = String(emp.email || '');
                 if (ecNameEl) ecNameEl.value = String(emp.emergencyContactName || '');
@@ -21118,6 +21175,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                 if (pwdTipEl) pwdTipEl.textContent = '（留空=默认 123456）';
                 if (genderEl) genderEl.value = '';
                 if (birthdayEl) birthdayEl.value = '';
+                syncFormAge();
                 if (idCardNumberEl) idCardNumberEl.value = '';
                 if (hometownEl) hometownEl.value = '';
                 if (registeredResidenceEl) registeredResidenceEl.value = '';
@@ -21142,7 +21200,10 @@ ${knowledgeContent.slice(0, 30000)}`;
                 if (salaryEl) salaryEl.value = '';
                 if (educationEl) educationEl.value = '';
                 if (joinDateEl) joinDateEl.value = '';
-                if (bankCardEl) bankCardEl.value = '';
+                if (bankCardCompanyEl) bankCardCompanyEl.value = '';
+                if (bankNameCompanyEl) bankNameCompanyEl.value = '';
+                if (bankCardPersonalEl) bankCardPersonalEl.value = '';
+                if (bankNamePersonalEl) bankNamePersonalEl.value = '';
                 if (phoneEl) phoneEl.value = '';
                 if (emailEl) emailEl.value = '';
                 if (ecNameEl) ecNameEl.value = '';
@@ -21195,7 +21256,10 @@ ${knowledgeContent.slice(0, 30000)}`;
             if (salaryEl) salaryEl.disabled = lock;
             if (educationEl) educationEl.disabled = lock;
             if (joinDateEl) joinDateEl.disabled = lock;
-            if (bankCardEl) bankCardEl.disabled = lock;
+            if (bankCardCompanyEl) bankCardCompanyEl.disabled = lock;
+            if (bankNameCompanyEl) bankNameCompanyEl.disabled = lock;
+            if (bankCardPersonalEl) bankCardPersonalEl.disabled = lock;
+            if (bankNamePersonalEl) bankNamePersonalEl.disabled = lock;
             if (phoneEl) phoneEl.disabled = lock;
             if (emailEl) emailEl.disabled = lock;
             if (ecNameEl) ecNameEl.disabled = lock;
@@ -21418,7 +21482,10 @@ ${knowledgeContent.slice(0, 30000)}`;
             const salaryEl = document.getElementById('employee-form-salary');
             const educationEl = document.getElementById('employee-form-education');
             const joinDateEl = document.getElementById('employee-form-joinDate');
-            const bankCardEl = document.getElementById('employee-form-bankCard');
+            const bankCardCompanyEl = document.getElementById('employee-form-bankCardCompany');
+            const bankNameCompanyEl = document.getElementById('employee-form-bankNameCompany');
+            const bankCardPersonalEl = document.getElementById('employee-form-bankCardPersonal');
+            const bankNamePersonalEl = document.getElementById('employee-form-bankNamePersonal');
             const phoneEl = document.getElementById('employee-form-phone');
             const emailEl = document.getElementById('employee-form-email');
             const ecNameEl = document.getElementById('employee-form-emergencyContactName');
@@ -21462,7 +21529,11 @@ ${knowledgeContent.slice(0, 30000)}`;
             const level = String(levelEl?.value || '').trim();
             let managerUsername = String(managerEl?.value || '').trim();
             const joinDate = String(joinDateEl?.value || '').trim();
-            const bankCard = String(bankCardEl?.value || '').trim();
+            const bankCardCompany = String(bankCardCompanyEl?.value || '').trim();
+            const bankNameCompany = String(bankNameCompanyEl?.value || '').trim();
+            const bankCardPersonal = String(bankCardPersonalEl?.value || '').trim();
+            const bankNamePersonal = String(bankNamePersonalEl?.value || '').trim();
+            const bankCard = bankCardPersonal;
             const phone = String(phoneEl?.value || '').trim();
             const email = String(emailEl?.value || '').trim();
             const education = String(educationEl?.value || '').trim();
@@ -21560,7 +21631,7 @@ ${knowledgeContent.slice(0, 30000)}`;
 
             if (isStoreMgrCreate) {
                 const pwd = passwordInput || '123456';
-                const employee = { id, username, name, password: pwd, gender, birthday, idCardNumber, hometown, registeredResidence, maritalStatus, wechat, store, role, department, position, level, managerUsername, salary, education, bankCard, emergencyContactName, emergencyContactPhone, emergencyContactRelation, idCardFrontUrl, idCardBackUrl, joinDate, phone, email, coreTalent };
+                const employee = { id, username, name, password: pwd, gender, birthday, idCardNumber, hometown, registeredResidence, maritalStatus, wechat, store, role, department, position, level, managerUsername, salary, education, bankCardCompany, bankNameCompany, bankCardPersonal, bankNamePersonal, bankCard, emergencyContactName, emergencyContactPhone, emergencyContactRelation, idCardFrontUrl, idCardBackUrl, joinDate, phone, email, coreTalent };
                 HRMS_API.createApproval('onboarding', { employee })
                     .then(() => {
                         closeEmployeeFormModal();
@@ -21593,10 +21664,10 @@ ${knowledgeContent.slice(0, 30000)}`;
                 }
                 const old = employees[idx] || {};
                 const nextPwd = passwordInput ? passwordInput : (old.password || '');
-                employees[idx] = { ...old, id, username, name, password: nextPwd, gender, birthday, idCardNumber, hometown, registeredResidence, maritalStatus, wechat, store, role, department, position, level, managerUsername, salary, education, bankCard, emergencyContactName, emergencyContactPhone, emergencyContactRelation, idCardFrontUrl, idCardBackUrl, joinDate, phone, email, status, coreTalent };
+                employees[idx] = { ...old, id, username, name, password: nextPwd, gender, birthday, idCardNumber, hometown, registeredResidence, maritalStatus, wechat, store, role, department, position, level, managerUsername, salary, education, bankCardCompany, bankNameCompany, bankCardPersonal, bankNamePersonal, bankCard, emergencyContactName, emergencyContactPhone, emergencyContactRelation, idCardFrontUrl, idCardBackUrl, joinDate, phone, email, status, coreTalent };
             } else {
                 const pwd = passwordInput || '123456';
-                employees.push({ id, username, name, password: pwd, gender, birthday, idCardNumber, hometown, registeredResidence, maritalStatus, wechat, store, role, department, position, level, managerUsername, salary, education, bankCard, emergencyContactName, emergencyContactPhone, emergencyContactRelation, idCardFrontUrl, idCardBackUrl, joinDate, phone, email, status, coreTalent, promotionHistory: [], createdAt: new Date().toISOString().slice(0, 10), lastLogin: null });
+                employees.push({ id, username, name, password: pwd, gender, birthday, idCardNumber, hometown, registeredResidence, maritalStatus, wechat, store, role, department, position, level, managerUsername, salary, education, bankCardCompany, bankNameCompany, bankCardPersonal, bankNamePersonal, bankCard, emergencyContactName, emergencyContactPhone, emergencyContactRelation, idCardFrontUrl, idCardBackUrl, joinDate, phone, email, status, coreTalent, promotionHistory: [], createdAt: new Date().toISOString().slice(0, 10), lastLogin: null });
             }
 
             HRMS_STORE.setEmployees(employees);
@@ -22485,8 +22556,12 @@ ${knowledgeContent.slice(0, 30000)}`;
                 '工资': 'salary',
                 '学历': 'education',
                 '入职日期': 'joinDate',
-                '工资卡号': 'bankCard',
-                '银行卡号': 'bankCard',
+                '工资卡号公': 'bankCardCompany',
+                '工资银行公': 'bankNameCompany',
+                '工资卡号私': 'bankCardPersonal',
+                '工资银行私': 'bankNamePersonal',
+                '工资卡号': 'bankCardPersonal',
+                '银行卡号': 'bankCardPersonal',
                 '电话': 'phone',
                 '手机号': 'phone',
                 '邮箱': 'email',
@@ -22513,7 +22588,7 @@ ${knowledgeContent.slice(0, 30000)}`;
         }
 
         function hrmsImportEmployeesFromCsvObjects(objs) {
-            const templateHeaders = ['username', 'password', 'name', 'gender', 'birthday', 'idCardNumber', 'hometown', 'registeredResidence', 'maritalStatus', 'wechat', 'role', 'store', 'managerUsername', 'department', 'position', 'level', 'salary', 'education', 'joinDate', 'bankCard', 'phone', 'email', 'emergencyContactName', 'emergencyContactPhone', 'emergencyContactRelation', 'status', 'id'];
+            const templateHeaders = ['username', 'password', 'name', 'gender', 'birthday', 'idCardNumber', 'hometown', 'registeredResidence', 'maritalStatus', 'wechat', 'role', 'store', 'managerUsername', 'department', 'position', 'level', 'salary', 'education', 'joinDate', 'bankCardCompany', 'bankNameCompany', 'bankCardPersonal', 'bankNamePersonal', 'bankCard', 'phone', 'email', 'emergencyContactName', 'emergencyContactPhone', 'emergencyContactRelation', 'status', 'id'];
             const employees = HRMS_STORE.getEmployees();
             const byUsername = new Map((employees || []).map(e => [String(e?.username || ''), e]));
             let added = 0;
@@ -22534,6 +22609,8 @@ ${knowledgeContent.slice(0, 30000)}`;
                     const n = Number(next.salary);
                     next.salary = Number.isFinite(n) ? n : '';
                 }
+                if (!next.bankCardPersonal && next.bankCard) next.bankCardPersonal = next.bankCard;
+                if (!next.bankCard) next.bankCard = next.bankCardPersonal;
 
                 if (!next.id) next.id = hrmsGenerateEmployeeId();
                 if (!next.password) next.password = '123456';
@@ -22554,7 +22631,7 @@ ${knowledgeContent.slice(0, 30000)}`;
         }
 
         function hrmsImportUsersFromCsvObjects(objs) {
-            const templateHeaders = ['username', 'password', 'name', 'gender', 'birthday', 'idCardNumber', 'hometown', 'registeredResidence', 'maritalStatus', 'wechat', 'role', 'store', 'managerUsername', 'department', 'position', 'level', 'salary', 'education', 'joinDate', 'bankCard', 'phone', 'email', 'emergencyContactName', 'emergencyContactPhone', 'emergencyContactRelation', 'status'];
+            const templateHeaders = ['username', 'password', 'name', 'gender', 'birthday', 'idCardNumber', 'hometown', 'registeredResidence', 'maritalStatus', 'wechat', 'role', 'store', 'managerUsername', 'department', 'position', 'level', 'salary', 'education', 'joinDate', 'bankCardCompany', 'bankNameCompany', 'bankCardPersonal', 'bankNamePersonal', 'bankCard', 'phone', 'email', 'emergencyContactName', 'emergencyContactPhone', 'emergencyContactRelation', 'status'];
             const users = HRMS_STORE.getUsers();
             const byUname = new Map((users || []).map(u => [String(u?.username || ''), u]));
             let added = 0;
@@ -22573,6 +22650,8 @@ ${knowledgeContent.slice(0, 30000)}`;
                     const n = Number(next.salary);
                     next.salary = Number.isFinite(n) ? n : '';
                 }
+                if (!next.bankCardPersonal && next.bankCard) next.bankCardPersonal = next.bankCard;
+                if (!next.bankCard) next.bankCard = next.bankCardPersonal;
 
                 if (byUname.has(username)) {
                     const old = byUname.get(username) || {};
@@ -22648,13 +22727,19 @@ ${knowledgeContent.slice(0, 30000)}`;
                 showNotification('仅管理员可导出数据', 'warning');
                 return;
             }
-            const headers = ['员工编号', '账号', '密码', '姓名', '性别', '出生年月', '身份证号码', '籍贯', '户籍所在地', '婚姻状况', '微信号', '角色', '所属门店', '直属上级账号', '部门', '岗位', '级别', '工资', '学历', '入职日期', '工资卡号', '电话', '邮箱', '紧急联系人', '联系人电话', '联系人关系', '状态'];
-            const keys = ['id', 'username', 'password', 'name', 'gender', 'birthday', 'idCardNumber', 'hometown', 'registeredResidence', 'maritalStatus', 'wechat', 'role', 'store', 'managerUsername', 'department', 'position', 'level', 'salary', 'education', 'joinDate', 'bankCard', 'phone', 'email', 'emergencyContactName', 'emergencyContactPhone', 'emergencyContactRelation', 'status'];
+            const headers = ['员工编号', '账号', '密码', '姓名', '性别', '出生年月', '年龄', '身份证号码', '籍贯', '户籍所在地', '婚姻状况', '微信号', '角色', '所属门店', '直属上级账号', '部门', '岗位', '级别', '工资', '学历', '入职日期', '工资卡号公', '工资银行公', '工资卡号私', '工资银行私', '电话', '邮箱', '紧急联系人', '联系人电话', '联系人关系', '状态'];
+            const keys = ['id', 'username', 'password', 'name', 'gender', 'birthday', '__ageDisp', 'idCardNumber', 'hometown', 'registeredResidence', 'maritalStatus', 'wechat', 'role', 'store', 'managerUsername', 'department', 'position', 'level', 'salary', 'education', 'joinDate', 'bankCardCompany', 'bankNameCompany', 'bankCardPersonal', 'bankNamePersonal', 'phone', 'email', 'emergencyContactName', 'emergencyContactPhone', 'emergencyContactRelation', 'status'];
             const employees = HRMS_STORE.getEmployees();
             const lines = [];
             lines.push(headers.join(','));
             (employees || []).forEach(e => {
-                const row = keys.map(k => hrmsEscapeCsvCell(e?.[k] ?? ''));
+                const row = keys.map(k => {
+                    if (k === '__ageDisp') {
+                        const age = empCalcAgeFromBirthday(e?.birthday);
+                        return hrmsEscapeCsvCell(age !== null ? `${age}` : '');
+                    }
+                    return hrmsEscapeCsvCell(e?.[k] ?? '');
+                });
                 lines.push(row.join(','));
             });
             hrmsDownloadText(`employees_${new Date().toISOString().slice(0, 10)}.csv`, lines.join('\n'));
@@ -22666,8 +22751,8 @@ ${knowledgeContent.slice(0, 30000)}`;
                 showNotification('仅管理员可下载模板', 'warning');
                 return;
             }
-            const headers = ['员工编号', '账号', '密码', '姓名', '性别', '出生年月', '身份证号码', '籍贯', '户籍所在地', '婚姻状况', '微信号', '角色', '所属门店', '直属上级账号', '部门', '岗位', '级别', '工资', '学历', '入职日期', '工资卡号', '电话', '邮箱', '紧急联系人', '联系人电话', '联系人关系', '状态'];
-            const sample = ['(可留空自动生成)', '示例账号', '123456', '张三', '男', '1995-06-15', '430102199506150012', '湖南长沙', '湖南长沙', '单身', 'wx_zhangsan', '门店员工', '北京朝阳门店', '示例上级账号', '销售部', '销售员', 'L1', '8000', '高中', '2026-01-01', '6222021234567890', '13800138000', 'example@company.com', '李四', '13900139000', '父母', '启用'];
+            const headers = ['员工编号', '账号', '密码', '姓名', '性别', '出生年月', '年龄(自动计算，可留空)', '身份证号码', '籍贯', '户籍所在地', '婚姻状况', '微信号', '角色', '所属门店', '直属上级账号', '部门', '岗位', '级别', '工资', '学历', '入职日期', '工资卡号公', '工资银行公', '工资卡号私', '工资银行私', '电话', '邮箱', '紧急联系人', '联系人电话', '联系人关系', '状态'];
+            const sample = ['(可留空自动生成)', '示例账号', '123456', '张三', '男', '1995-06-15', '', '430102199506150012', '湖南长沙', '湖南长沙', '单身', 'wx_zhangsan', '门店员工', '北京朝阳门店', '示例上级账号', '销售部', '销售员', 'L1', '8000', '高中', '2026-01-01', '6222020000000001', '中国银行', '6222020000000002', '招商银行', '13800138000', 'example@company.com', '李四', '13900139000', '父母', '启用'];
             const lines = [];
             lines.push(headers.join(','));
             lines.push(sample.map(hrmsEscapeCsvCell).join(','));
@@ -22680,13 +22765,19 @@ ${knowledgeContent.slice(0, 30000)}`;
                 showNotification('仅管理员可导出用户', 'warning');
                 return;
             }
-            const headers = ['用户名', '密码', '姓名', '性别', '出生年月', '身份证号码', '籍贯', '户籍所在地', '婚姻状况', '微信号', '角色', '所属门店', '直属上级账号', '部门', '岗位', '级别', '工资', '学历', '入职日期', '工资卡号', '电话', '邮箱', '紧急联系人', '联系人电话', '联系人关系', '状态'];
-            const keys = ['username', 'password', 'name', 'gender', 'birthday', 'idCardNumber', 'hometown', 'registeredResidence', 'maritalStatus', 'wechat', 'role', 'store', 'managerUsername', 'department', 'position', 'level', 'salary', 'education', 'joinDate', 'bankCard', 'phone', 'email', 'emergencyContactName', 'emergencyContactPhone', 'emergencyContactRelation', 'status'];
+            const headers = ['用户名', '密码', '姓名', '性别', '出生年月', '年龄', '身份证号码', '籍贯', '户籍所在地', '婚姻状况', '微信号', '角色', '所属门店', '直属上级账号', '部门', '岗位', '级别', '工资', '学历', '入职日期', '工资卡号公', '工资银行公', '工资卡号私', '工资银行私', '电话', '邮箱', '紧急联系人', '联系人电话', '联系人关系', '状态'];
+            const keys = ['username', 'password', 'name', 'gender', 'birthday', '__ageDisp', 'idCardNumber', 'hometown', 'registeredResidence', 'maritalStatus', 'wechat', 'role', 'store', 'managerUsername', 'department', 'position', 'level', 'salary', 'education', 'joinDate', 'bankCardCompany', 'bankNameCompany', 'bankCardPersonal', 'bankNamePersonal', 'phone', 'email', 'emergencyContactName', 'emergencyContactPhone', 'emergencyContactRelation', 'status'];
             const users = HRMS_STORE.getUsers();
             const lines = [];
             lines.push(headers.join(','));
             (users || []).forEach(u => {
-                const row = keys.map(k => hrmsEscapeCsvCell(u?.[k] ?? ''));
+                const row = keys.map(k => {
+                    if (k === '__ageDisp') {
+                        const age = empCalcAgeFromBirthday(u?.birthday);
+                        return hrmsEscapeCsvCell(age !== null ? `${age}` : '');
+                    }
+                    return hrmsEscapeCsvCell(u?.[k] ?? '');
+                });
                 lines.push(row.join(','));
             });
             hrmsDownloadText(`users_${new Date().toISOString().slice(0, 10)}.csv`, lines.join('\n'));

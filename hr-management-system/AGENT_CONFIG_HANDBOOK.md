@@ -195,8 +195,8 @@
 
 | 配置项 | 名称 | 数值(分钟) | 代码位置 |
 |--------|------|------------|----------|
-| followUpRules | firstReminder | 15 | `agents.js:2943` |
-| followUpRules | secondReminder | 60 | `agents.js:2944` |
+| followUpRules | firstReminder | 60 | `agents.js:2943` |
+| followUpRules | secondReminder | 90 | `agents.js:2944` |
 | followUpRules | escalationDelay | 120 | `agents.js:2945` |
 | followUpRules | maxReminders | 3 | `agents.js:2946` |
 | logicValidation | photoLocationRadius | 500米 | `agents.js:2950` |

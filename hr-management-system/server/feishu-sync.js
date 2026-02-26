@@ -44,6 +44,21 @@ export const FEISHU_TABLE_CONFIG = {
     name: '例会报告',
     type: 'store_meeting'
   },
+  dish_library: {
+    app_token: 'PTWrbUdcbarCshst0QncMoY7nKe',
+    table_id: 'tbltSvY7SBTr3Sw8',
+    view_id: 'vewva7M4SZ',
+    name: '菜品库',
+    type: 'dish_library'
+  },
+  dish_library_majixian_takeaway: {
+    app_token: 'PTWrbUdcbarCshst0QncMoY7nKe',
+    table_id: 'tbltaVzb2nei9NwO',
+    view_id: '',
+    name: '马己仙外卖菜品库',
+    type: 'dish_library',
+    force_biz_type: 'takeaway'
+  },
   
   // 品牌专属表格
   material_reports: {
@@ -63,6 +78,107 @@ export const FEISHU_TABLE_CONFIG = {
     }
   }
 };
+
+function extractFieldText(value) {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return String(value).trim();
+  }
+  if (Array.isArray(value)) {
+    return value
+      .map(v => {
+        if (v === null || v === undefined) return '';
+        if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') return String(v).trim();
+        if (typeof v === 'object') return String(v.text || v.name || v.value || '').trim();
+        return '';
+      })
+      .filter(Boolean)
+      .join(' ')
+      .trim();
+  }
+  if (typeof value === 'object') return String(value.text || value.name || value.value || '').trim();
+  return '';
+}
+
+function pickFieldValue(fields, names = []) {
+  for (const name of names) {
+    if (Object.prototype.hasOwnProperty.call(fields, name)) return fields[name];
+  }
+  return null;
+}
+
+function pickFieldText(fields, names = [], fallback = '') {
+  const v = pickFieldValue(fields, names);
+  const text = extractFieldText(v);
+  return text || fallback;
+}
+
+function parseFieldNumber(value) {
+  const text = extractFieldText(value).replace(/[,，\s]/g, '');
+  if (!text) return null;
+  const num = Number(text);
+  return Number.isFinite(num) ? Number(num.toFixed(2)) : null;
+}
+
+function pickFieldNumber(fields, names = []) {
+  const v = pickFieldValue(fields, names);
+  return parseFieldNumber(v);
+}
+
+function extractDishLibraryEntries(fields, recordId, opts = {}) {
+  const forceBizType = String(opts.forceBizType || '').trim();
+  const store = pickFieldText(fields, ['门店', '门店名称', '适用门店', '适用店铺'], '*') || '*';
+
+  const commonCost = pickFieldNumber(fields, ['菜品成本', '成本', '标准成本']);
+  const dineinName = pickFieldText(fields, ['堂食名称', '堂食菜品名称', '堂食菜名', '菜品名称']);
+  const dineinPrice = pickFieldNumber(fields, ['堂食价格', '堂食售价', '堂食单价', '堂食出品价']);
+  const dineinCost = pickFieldNumber(fields, ['堂食成本', '堂食菜品成本', '堂食标准成本']);
+
+  const takeawayName = pickFieldText(fields, ['外卖名称', '外卖菜品名称', '外卖菜名']);
+  const takeawayPrice = pickFieldNumber(fields, ['外卖价格', '外卖售价', '外卖单价']);
+  const takeawayCost = pickFieldNumber(fields, ['外卖成本', '外卖菜品成本', '外卖标准成本']);
+  const genericDishName = pickFieldText(fields, ['菜品名称', '菜名', '商品名称', 'SKU名称']);
+  const genericPrice = pickFieldNumber(fields, ['售价', '价格', '单价']);
+
+  const rows = [];
+  if (forceBizType === 'takeaway' && genericDishName && (genericPrice !== null || takeawayCost !== null || commonCost !== null)) {
+    rows.push({
+      feishu_record_id: recordId,
+      store,
+      biz_type: 'takeaway',
+      dish_name: genericDishName,
+      dish_price: genericPrice,
+      unit_cost: takeawayCost ?? commonCost ?? 0,
+      source_data: fields
+    });
+  }
+
+  if (forceBizType !== 'takeaway' && dineinName && (dineinPrice !== null || dineinCost !== null || commonCost !== null)) {
+    rows.push({
+      feishu_record_id: recordId,
+      store,
+      biz_type: 'dinein',
+      dish_name: dineinName,
+      dish_price: dineinPrice,
+      unit_cost: dineinCost ?? commonCost ?? 0,
+      source_data: fields
+    });
+  }
+
+  if (takeawayName && (takeawayPrice !== null || takeawayCost !== null || commonCost !== null)) {
+    rows.push({
+      feishu_record_id: recordId,
+      store,
+      biz_type: 'takeaway',
+      dish_name: takeawayName,
+      dish_price: takeawayPrice,
+      unit_cost: takeawayCost ?? commonCost ?? 0,
+      source_data: fields
+    });
+  }
+
+  return rows;
+}
 
 // ─────────────────────────────────────────────
 // 3. 字段提取函数
@@ -173,9 +289,11 @@ export async function fetchTableRecords(tableConfig, accessToken) {
   
   do {
     const queryParams = new URLSearchParams({
-      page_size: '100',
-      view_id: tableConfig.view_id
+      page_size: '100'
     });
+    if (String(tableConfig.view_id || '').trim()) {
+      queryParams.append('view_id', String(tableConfig.view_id || '').trim());
+    }
     
     if (pageToken) {
       queryParams.append('page_token', pageToken);
@@ -353,6 +471,82 @@ export async function syncMaterialReports(tableConfig, accessToken, brand) {
   }
 }
 
+async function ensureDishLibraryTable() {
+  await pool().query(`
+    CREATE TABLE IF NOT EXISTS dish_library_costs (
+      id BIGSERIAL PRIMARY KEY,
+      store VARCHAR(200) NOT NULL,
+      biz_type VARCHAR(20) NOT NULL,
+      dish_name VARCHAR(255) NOT NULL,
+      dish_price NUMERIC(12,2),
+      unit_cost NUMERIC(12,2) NOT NULL DEFAULT 0,
+      source_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+      source_record_id VARCHAR(120),
+      enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      CONSTRAINT uq_dish_library_costs_store_biz_dish UNIQUE (store, biz_type, dish_name)
+    )
+  `);
+  await pool().query(`CREATE INDEX IF NOT EXISTS idx_dish_library_costs_lookup ON dish_library_costs (store, biz_type, dish_name) WHERE enabled = TRUE`);
+}
+
+export async function syncDishLibraryCosts() {
+  try {
+    console.log('[sync] 开始同步菜品库...');
+    await ensureDishLibraryTable();
+
+    const accessToken = await getFeishuAccessToken();
+    let upserted = 0;
+    let recordCount = 0;
+    const syncTargets = [
+      FEISHU_TABLE_CONFIG.dish_library,
+      FEISHU_TABLE_CONFIG.dish_library_majixian_takeaway
+    ].filter(Boolean);
+
+    for (const tableConfig of syncTargets) {
+      const records = await fetchTableRecords(tableConfig, accessToken);
+      recordCount += records.length;
+      for (const record of records) {
+        const rows = extractDishLibraryEntries(record.fields || {}, record.record_id, {
+          forceBizType: tableConfig.force_biz_type
+        });
+        for (const row of rows) {
+          await pool().query(
+            `INSERT INTO dish_library_costs
+              (store, biz_type, dish_name, dish_price, unit_cost, source_data, source_record_id, enabled, updated_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,TRUE,NOW())
+             ON CONFLICT (store, biz_type, dish_name)
+             DO UPDATE SET
+               dish_price = EXCLUDED.dish_price,
+               unit_cost = EXCLUDED.unit_cost,
+               source_data = EXCLUDED.source_data,
+               source_record_id = EXCLUDED.source_record_id,
+               enabled = TRUE,
+               updated_at = NOW()`,
+            [
+              row.store,
+              row.biz_type,
+              row.dish_name,
+              row.dish_price,
+              row.unit_cost,
+              JSON.stringify(row.source_data || {}),
+              row.feishu_record_id
+            ]
+          );
+          upserted++;
+        }
+      }
+    }
+
+    console.log(`[sync] 菜品库同步完成: ${upserted} 条成本记录（来源${recordCount}条飞书记录）`);
+    return { ok: true, records: recordCount, upserted };
+  } catch (error) {
+    console.error('[sync] 菜品库同步失败:', error);
+    return { ok: false, error: String(error?.message || error) };
+  }
+}
+
 // ─────────────────────────────────────────────
 // 6. 主同步函数
 // ─────────────────────────────────────────────
@@ -377,7 +571,7 @@ export async function syncAllFeishuTables() {
     
     // 5. 同步洪潮原料收货日报
     await syncMaterialReports(FEISHU_TABLE_CONFIG.material_reports.hongchao, accessToken, 'hongchao');
-    
+
     console.log('[sync] 飞书表格数据同步完成');
     
   } catch (error) {
@@ -417,4 +611,25 @@ export function startDailyFeishuSync() {
   // 启动调度器
   scheduleNextSync();
   console.log('[scheduler] 每日凌晨1点飞书同步调度器已启动');
+
+  const localDateKey = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+  // 每周六 00:00（Asia/Shanghai）同步菜品库（每周一次）
+  let lastWeeklyDishSyncKey = '';
+  setInterval(async () => {
+    try {
+      const nowSh = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Shanghai' }));
+      if (nowSh.getDay() === 6 && nowSh.getHours() === 0 && nowSh.getMinutes() < 5) {
+        const runKey = localDateKey(nowSh);
+        if (runKey !== lastWeeklyDishSyncKey) {
+          lastWeeklyDishSyncKey = runKey;
+          await syncDishLibraryCosts();
+          console.log('[scheduler] 每周菜品库同步完成');
+        }
+      }
+    } catch (error) {
+      console.error('[scheduler] 每周菜品库同步失败:', error?.message || error);
+    }
+  }, 60 * 1000);
+  console.log('[scheduler] 每周六00:00菜品库同步调度器已启动');
 }

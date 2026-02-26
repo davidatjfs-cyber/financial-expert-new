@@ -1,0 +1,14 @@
+{
+  "pages": [
+    "pages/index/index"
+  ],
+  "window": {
+    "backgroundTextStyle": "light",
+    "navigationBarBackgroundColor": "#FF6A00",
+    "navigationBarTitleText": "年年有喜",
+    "navigationBarTextStyle": "white",
+    "backgroundColor": "#F8F5F2"
+  },
+  "sitemapLocation": "sitemap.json",
+  "style": "v2"
+}

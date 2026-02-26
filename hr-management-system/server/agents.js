@@ -7368,7 +7368,7 @@ export async function onFeishuEvent(body) {
       || (imageUrls.length > 0);
     if (_isSlowRequest) {
       const loadingHint = imageUrls.length > 0 ? '📸 收到照片，正在审核中...' : '🔍 正在为您查询，请稍候...';
-      sendLarkMessage(openId, loadingHint).catch(() => {});
+      sendLarkMessage(openId, loadingHint, { skipDedup: true }).catch(() => {});
     }
 
     const result = await handleAgentMessage(

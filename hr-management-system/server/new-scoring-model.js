@@ -129,19 +129,20 @@ export const EMPLOYEE_SCORE_CONFIG = {
 };
 
 const DEFAULT_EMPLOYEE_RATING_CONFIG = {
+  levelLabels: { A: 'A', B: 'B', C: 'C', D: 'D' },
   execution: {
-    store_production_manager: { A_max_missing: 6, B_max_missing: 13, C_max_missing: 20 },
+    store_production_manager: { A_max_missing: 6, B_max_missing: 13, C_max_missing: 20, D_min_missing: 21 },
     store_manager: {
-      hongchao: { A_min_new_members: 300, B_min_new_members: 249, C_min_new_members: 200 },
-      majixian: { low_score_threshold: 7, A_max_missing: 2, A_max_low_score: 2, B_max_missing: 4, B_max_low_score: 4, C_max_missing: 6, C_max_low_score: 6 }
+      hongchao: { A_min_new_members: 300, B_min_new_members: 249, C_min_new_members: 200, D_max_new_members: 199 },
+      majixian: { low_score_threshold: 7, A_max_missing: 2, A_max_low_score: 2, B_max_missing: 4, B_max_low_score: 4, C_max_missing: 6, C_max_low_score: 6, D_min_missing: 7, D_min_low_score: 7 }
     }
   },
-  attitude: { A_max_incomplete: 2, B_max_incomplete: 4 },
+  attitude: { A_max_incomplete: 2, B_max_incomplete: 4, C_max_incomplete: 8 },
   ability: {
-    store_production_manager: { A_min_diff: 1.01, B_min_diff: -1, B_max_diff: 1, C_min_diff: -2, C_max_diff: -1.01 },
+    store_production_manager: { A_min_diff: 1.01, B_min_diff: -1, B_max_diff: 1, C_min_diff: -2, C_max_diff: -1.01, D_max_diff: -2 },
     store_manager: {
-      hongchao: { A_min_rating: 4.6, B_min_rating: 4.5, C_min_rating: 4.3 },
-      majixian: { A_min_rating: 4.5, B_min_rating: 4.4, C_min_rating: 4.0 }
+      hongchao: { A_min_rating: 4.6, B_min_rating: 4.5, C_min_rating: 4.3, D_max_rating: 4.2 },
+      majixian: { A_min_rating: 4.5, B_min_rating: 4.4, C_min_rating: 4.0, D_max_rating: 3.9 }
     }
   }
 };
@@ -331,11 +332,12 @@ export async function calculateAttitudeRating(username, period) {
     // 根据未完成任务次数确定评级
     if (incompleteCount <= Number(t.A_max_incomplete)) return 'A';
     else if (incompleteCount <= Number(t.B_max_incomplete)) return 'B';
-    else return 'C';
+    else if (incompleteCount <= Number(t.C_max_incomplete ?? 8)) return 'C';
+    else return 'D';
     
   } catch (error) {
     console.error('[attitude_rating] 计算失败:', error);
-    return 'C';
+    return 'D';
   }
 }
 

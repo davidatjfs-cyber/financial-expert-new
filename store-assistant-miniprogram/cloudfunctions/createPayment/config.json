@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "openapi": [
+      "wxacode.getUnlimited",
+      "subscribeMessage.send"
+    ]
+  },
+  "triggers": []
+}

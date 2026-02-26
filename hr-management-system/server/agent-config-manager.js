@@ -17,8 +17,7 @@ function normalizeFrequency(v) {
 function normalizeOpsType(v) {
   const raw = String(v || '').trim();
   if (!raw) return 'opening';
-  if (raw === 'opening' || raw === 'closing') return raw;
-  return 'opening';
+  return raw;
 }
 
 function normalizeOpsStore(v) {
@@ -174,7 +173,7 @@ function normalizeOpsAgentConfig(cfg) {
   const c = cfg && typeof cfg === 'object' ? cfg : {};
   const normalizedDaily = (Array.isArray(c?.scheduledTasks?.dailyInspections)
     ? c.scheduledTasks.dailyInspections
-    : DEFAULT_OPS_AGENT_CONFIG.scheduledTasks.dailyInspections
+    : []
   ).map((x) => ({
     store: normalizeOpsStore(x?.store),
     brand: String(x?.brand || '').trim(),
@@ -186,7 +185,7 @@ function normalizeOpsAgentConfig(cfg) {
   }));
   const normalizedRandom = (Array.isArray(c?.scheduledTasks?.randomInspections)
     ? c.scheduledTasks.randomInspections
-    : DEFAULT_OPS_AGENT_CONFIG.scheduledTasks.randomInspections
+    : []
   ).map((x) => {
     const store = normalizeOpsStore(x?.store);
     const brand = String(x?.brand || '').trim();

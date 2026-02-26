@@ -1539,97 +1539,136 @@ def get_report_alerts(report_id: str):
 
 @app.get("/api/portfolio/positions", response_model=list[PortfolioPositionResponse])
 def list_portfolio_positions():
+    import concurrent.futures as _cf
+
     def _normalize_market(m: str) -> str:
         mm = (m or "").strip().upper()
         return mm or "CN"
 
-    out: list[PortfolioPositionResponse] = []
+    # First, collect all positions from DB
+    positions_raw: list[tuple] = []
     with session_scope() as s:
         rows = s.execute(select(PortfolioPosition).order_by(PortfolioPosition.updated_at.desc())).scalars().all()
         for p in rows:
             market = _normalize_market(p.market)
             symbol = (p.symbol or "").strip().upper()
             name = (p.name or "").strip() or None
+            positions_raw.append((p, market, symbol, name))
 
-            current_price = None
-            try:
+    # Parallel fetch prices for all positions with timeout
+    def _fetch_price_for_pos(args):
+        p, market, symbol, name = args
+        import concurrent.futures as _cf2
+        try:
+            def _do_fetch():
                 sp = get_stock_price(symbol=symbol, market=market)
-                current_price = getattr(sp, "price", None) if sp is not None else None
-            except Exception:
-                current_price = None
+                return getattr(sp, "price", None) if sp is not None else None
+            # Run with 5s timeout to prevent slow yfinance calls from blocking
+            with _cf2.ThreadPoolExecutor(max_workers=1) as _ex:
+                fut = _ex.submit(_do_fetch)
+                try:
+                    price = fut.result(timeout=5.0)
+                except Exception:
+                    price = None
+        except Exception:
+            price = None
+        return (p, market, symbol, name, price)
 
-            qty = float(p.quantity or 0.0)
-            avg_cost = float(p.avg_cost or 0.0)
-            mv = None
-            pnl = None
-            pnl_pct = None
-            if current_price is not None:
-                mv = current_price * qty
-                pnl = (current_price - avg_cost) * qty
-                pnl_pct = None if avg_cost <= 0 else (current_price / avg_cost - 1.0) * 100.0
+    # Use ThreadPoolExecutor to fetch prices in parallel with per-task timeout
+    prices_map: dict[tuple, float | None] = {}
+    try:
+        with _cf.ThreadPoolExecutor(max_workers=min(10, max(1, len(positions_raw)))) as ex:
+            futures = {ex.submit(_fetch_price_for_pos, args): args for args in positions_raw}
+            for fut in _cf.as_completed(futures, timeout=30):
+                try:
+                    p, market, symbol, name, price = fut.result(timeout=5)
+                    prices_map[(market, symbol)] = price
+                except Exception:
+                    # Individual task failed or timed out
+                    args = futures[fut]
+                    _, market, symbol, _ = args
+                    prices_map[(market, symbol)] = None
+    except Exception:
+        # Fallback: use None for any missing prices
+        for p, market, symbol, name in positions_raw:
+            prices_map.setdefault((market, symbol), None)
 
-            # Use cached indicators only (no blocking fetch).
-            # If cache is empty, return nulls — frontend or direct
-            # /api/stock/indicators call will populate the cache.
-            strategy_buy_price = None
-            strategy_buy_ok = None
-            strategy_buy_reason = None
-            strategy_buy_desc = None
-            strategy_sell_price = None
-            strategy_sell_ok = None
-            strategy_sell_reason = None
-            strategy_sell_desc = None
-            try:
-                _ind_key = (market, symbol)
-                _ind_cached = _INDICATOR_CACHE.get(_ind_key)
-                si = _ind_cached[1] if _ind_cached else None
-                if si is not None:
-                    if isinstance(si, dict):
-                        strategy_buy_price = si.get("buy_price_aggressive")
-                        strategy_buy_ok = si.get("buy_price_aggressive_ok")
-                        strategy_buy_reason = si.get("buy_reason")
-                        strategy_buy_desc = si.get("buy_condition_desc")
-                        strategy_sell_price = si.get("sell_price")
-                        strategy_sell_ok = si.get("sell_price_ok")
-                        strategy_sell_reason = si.get("sell_reason")
-                        strategy_sell_desc = si.get("sell_condition_desc")
-                    else:
-                        strategy_buy_price = getattr(si, "buy_price_aggressive", None)
-                        strategy_buy_ok = getattr(si, "buy_price_aggressive_ok", None)
-                        strategy_buy_reason = getattr(si, "buy_reason", None)
-                        strategy_buy_desc = getattr(si, "buy_condition_desc", None)
-                        strategy_sell_price = getattr(si, "sell_price", None)
-                        strategy_sell_ok = getattr(si, "sell_price_ok", None)
-                        strategy_sell_reason = getattr(si, "sell_reason", None)
-                        strategy_sell_desc = getattr(si, "sell_condition_desc", None)
-            except Exception:
-                pass
+    out: list[PortfolioPositionResponse] = []
+    for p, market, symbol, name in positions_raw:
+        current_price = prices_map.get((market, symbol))
 
-            out.append(
-                PortfolioPositionResponse(
-                    id=p.id,
-                    market=market,
-                    symbol=symbol,
-                    name=name,
-                    quantity=qty,
-                    avg_cost=avg_cost,
-                    target_buy_price=p.target_buy_price,
-                    target_sell_price=p.target_sell_price,
-                    current_price=current_price,
-                    market_value=mv,
-                    unrealized_pnl=pnl,
-                    unrealized_pnl_pct=pnl_pct,
-                    strategy_buy_price=strategy_buy_price,
-                    strategy_buy_ok=strategy_buy_ok,
-                    strategy_buy_reason=strategy_buy_reason,
-                    strategy_buy_desc=strategy_buy_desc,
-                    strategy_sell_price=strategy_sell_price,
-                    strategy_sell_ok=strategy_sell_ok,
-                    strategy_sell_reason=strategy_sell_reason,
-                    strategy_sell_desc=strategy_sell_desc,
-                    updated_at=int(p.updated_at or 0),
-                )
+        qty = float(p.quantity or 0.0)
+        avg_cost = float(p.avg_cost or 0.0)
+        mv = None
+        pnl = None
+        pnl_pct = None
+        if current_price is not None:
+            mv = current_price * qty
+            pnl = (current_price - avg_cost) * qty
+            pnl_pct = None if avg_cost <= 0 else (current_price / avg_cost - 1.0) * 100.0
+
+        # Use cached indicators only (no blocking fetch).
+        # If cache is empty, return nulls — frontend or direct
+        # /api/stock/indicators call will populate the cache.
+        strategy_buy_price = None
+        strategy_buy_ok = None
+        strategy_buy_reason = None
+        strategy_buy_desc = None
+        strategy_sell_price = None
+        strategy_sell_ok = None
+        strategy_sell_reason = None
+        strategy_sell_desc = None
+        try:
+            _ind_key = (market, symbol)
+            _ind_cached = _INDICATOR_CACHE.get(_ind_key)
+            si = _ind_cached[1] if _ind_cached else None
+            if si is not None:
+                if isinstance(si, dict):
+                    strategy_buy_price = si.get("buy_price_aggressive")
+                    strategy_buy_ok = si.get("buy_price_aggressive_ok")
+                    strategy_buy_reason = si.get("buy_reason")
+                    strategy_buy_desc = si.get("buy_condition_desc")
+                    strategy_sell_price = si.get("sell_price")
+                    strategy_sell_ok = si.get("sell_price_ok")
+                    strategy_sell_reason = si.get("sell_reason")
+                    strategy_sell_desc = si.get("sell_condition_desc")
+                else:
+                    strategy_buy_price = getattr(si, "buy_price_aggressive", None)
+                    strategy_buy_ok = getattr(si, "buy_price_aggressive_ok", None)
+                    strategy_buy_reason = getattr(si, "buy_reason", None)
+                    strategy_buy_desc = getattr(si, "buy_condition_desc", None)
+                    strategy_sell_price = getattr(si, "sell_price", None)
+                    strategy_sell_ok = getattr(si, "sell_price_ok", None)
+                    strategy_sell_reason = getattr(si, "sell_reason", None)
+                    strategy_sell_desc = getattr(si, "sell_condition_desc", None)
+        except Exception:
+            pass
+
+        out.append(
+            PortfolioPositionResponse(
+                id=p.id,
+                market=market,
+                symbol=symbol,
+                name=name,
+                quantity=qty,
+                avg_cost=avg_cost,
+                target_buy_price=p.target_buy_price,
+                target_sell_price=p.target_sell_price,
+                current_price=current_price,
+                market_value=mv,
+                unrealized_pnl=pnl,
+                unrealized_pnl_pct=pnl_pct,
+                strategy_buy_price=strategy_buy_price,
+                strategy_buy_ok=strategy_buy_ok,
+                strategy_buy_reason=strategy_buy_reason,
+                strategy_buy_desc=strategy_buy_desc,
+                strategy_sell_price=strategy_sell_price,
+                strategy_sell_ok=strategy_sell_ok,
+                strategy_sell_reason=strategy_sell_reason,
+                strategy_sell_desc=strategy_sell_desc,
+                updated_at=int(p.updated_at or 0),
             )
+        )
 
     return out
 
@@ -3661,7 +3700,7 @@ class StockIndicatorsResponse(BaseModel):
 
 # Price cache: (market, symbol) -> (timestamp, StockPriceResponse)
 _PRICE_CACHE: dict[tuple[str, str], tuple[float, object]] = {}
-_PRICE_CACHE_TTL = 60  # seconds
+_PRICE_CACHE_TTL = 300  # seconds (5 min) - price changes slowly enough
 
 
 @app.get("/api/stock/price", response_model=Optional[StockPriceResponse])
@@ -3777,6 +3816,16 @@ def get_stock_price(symbol: str, market: str = "CN"):
             if yf_q is not None:
                 _PRICE_CACHE[_price_key] = (time.time(), yf_q)
                 return yf_q
+
+        # For CN/HK markets: prioritize fast Tencent single-stock query
+        # Skip slow akshare full-market data (_get_stock_spot_data) entirely
+        if market in ("CN", "HK"):
+            tq_quote = _tencent_fetch_quote(symbol, market)
+            if tq_quote is not None and tq_quote.price is not None:
+                _PRICE_CACHE[_price_key] = (time.time(), tq_quote)
+                return tq_quote
+            # Fallback: return None instead of blocking on slow akshare
+            return None
 
         df = _get_stock_spot_data(market)
         if df is None or df.empty:
@@ -3932,6 +3981,41 @@ _INDICATOR_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
 
 # Cache history data to reduce external calls (especially yfinance rate limits)
 _HISTORY_CACHE: dict[tuple[str, str], tuple[float, "pd.DataFrame"]] = {}
+
+# PE ratio changes slowly — cache for 4 hours to avoid repeated slow fetches
+_PE_CACHE: dict[tuple[str, str], tuple[float, object]] = {}
+
+# yfinance t.info is slow (1-3s); cache it separately so PE + name/market_cap share one call
+_YF_INFO_CACHE: dict[str, tuple[float, dict]] = {}
+
+
+def _fetch_yf_info(yf_symbol: str, timeout_s: float = 4.0) -> dict:
+    """Fetch yfinance Ticker.info with caching (1h TTL). Returns {} on failure."""
+    import time as _time
+    now = _time.time()
+    cached = _YF_INFO_CACHE.get(yf_symbol)
+    if cached and (now - cached[0]) < 3600:
+        return cached[1]
+    try:
+        disable_proxies_for_process()
+        import yfinance as yf
+        import concurrent.futures as _cf
+        def _do_fetch():
+            t = yf.Ticker(yf_symbol)
+            try:
+                return t.info or {}
+            except Exception:
+                return {}
+        with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
+            fut = _ex.submit(_do_fetch)
+            try:
+                info = fut.result(timeout=timeout_s)
+            except Exception:
+                info = {}
+        _YF_INFO_CACHE[yf_symbol] = (now, info)
+        return info
+    except Exception:
+        return {}
 
 
 def _rsi14(series):
@@ -4670,187 +4754,207 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
     except Exception:
         atr14 = None
 
-    pe_ratio = None
-    try:
-        m = (market or "CN").upper()
+    m = (market or "CN").upper()
 
-        def _find_pe_column(cols: list[str]) -> str | None:
-            try:
-                for c in cols:
-                    if not isinstance(c, str):
-                        continue
-                    if "市盈率" in c and "TTM" in c.upper():
-                        return c
-                for c in cols:
-                    if not isinstance(c, str):
-                        continue
-                    if "市盈率" in c:
-                        return c
-                for c in cols:
-                    if not isinstance(c, str):
-                        continue
-                    cl = c.lower()
-                    if "pe" == cl or "pe_ttm" in cl or "pettm" in cl or "pe(ttm" in cl or "pe (ttm" in cl:
-                        return c
-                    if "pe" in cl and "ratio" in cl:
-                        return c
-                for c in cols:
-                    if not isinstance(c, str):
-                        continue
-                    if "PE" in c:
-                        return c
-            except Exception:
-                return None
+    def _find_pe_column(cols: list[str]) -> str | None:
+        try:
+            for c in cols:
+                if not isinstance(c, str):
+                    continue
+                if "市盈率" in c and "TTM" in c.upper():
+                    return c
+            for c in cols:
+                if not isinstance(c, str):
+                    continue
+                if "市盈率" in c:
+                    return c
+            for c in cols:
+                if not isinstance(c, str):
+                    continue
+                cl = c.lower()
+                if "pe" == cl or "pe_ttm" in cl or "pettm" in cl or "pe(ttm" in cl or "pe (ttm" in cl:
+                    return c
+                if "pe" in cl and "ratio" in cl:
+                    return c
+            for c in cols:
+                if not isinstance(c, str):
+                    continue
+                if "PE" in c:
+                    return c
+        except Exception:
             return None
+        return None
 
-        if m in {"US", "HK"}:
-            disable_proxies_for_process()
-            import yfinance as yf
+    def _yf_sym_for_market(sym: str, mkt: str) -> str:
+        if mkt == "HK" and not sym.upper().endswith(".HK"):
+            base = sym.replace(".HK", "")
+            return f"{base.zfill(4)}.HK" if base.isdigit() else f"{base}.HK"
+        return sym
 
-            yf_symbol = symbol
-            if m == "HK" and not yf_symbol.upper().endswith(".HK"):
-                base = yf_symbol.replace(".HK", "")
-                yf_symbol = f"{base.zfill(4)}.HK" if base.isdigit() else f"{base}.HK"
-            t = yf.Ticker(yf_symbol)
-            info = {}
-            fast = getattr(t, "fast_info", None) or {}
-            try:
-                info = t.info or {}
-            except Exception:
-                info = {}
-            pe_ratio = _safe_float(
-                fast.get("trailing_pe")
-                or fast.get("trailingPE")
-                or info.get("trailingPE")
-                or info.get("forwardPE")
-            )
+    # --- Parallel fetch: PE + name/market_cap ---
+    # Both are slow network calls; run them concurrently to cut wall-clock time.
+    import concurrent.futures as _cf
+    import time as _time
 
-            # For HK, AkShare spot is often closer to the commonly quoted PE(TTM) in Chinese apps.
-            if m == "HK":
+    pe_cache_key = (m, (symbol or "").upper())
+    pe_now = _time.time()
+    _pe_cached = _PE_CACHE.get(pe_cache_key)
+    pe_ratio = None
+    name = None
+    market_cap = None
+    currency = "CNY" if m == "CN" else ("HKD" if m == "HK" else "USD")
+
+    def _fetch_pe_ratio_task() -> object:
+        """Fetch PE ratio; returns float or None."""
+        try:
+            if m in {"US", "HK"}:
+                yf_sym = _yf_sym_for_market(symbol, m)
+                info = _fetch_yf_info(yf_sym, timeout_s=4.0)
+                fast = {}
                 try:
                     disable_proxies_for_process()
-                    import akshare as ak
-
-                    spot = ak.stock_hk_spot_em()
-                    if spot is not None and not spot.empty:
-                        code_col = None
-                        for c in ("代码", "symbol", "Symbol"):
-                            if c in spot.columns:
-                                code_col = c
-                                break
-                        if code_col:
-                            base = (symbol or "").split(".", 1)[0].upper()
-                            base = base.replace(".HK", "")
-                            base = base.zfill(5) if base.isdigit() else base
-                            hit = spot[spot[code_col].astype(str).str.upper() == base]
-                            if not hit.empty:
-                                row = hit.iloc[0]
-                                pe_col = _find_pe_column([str(c) for c in list(spot.columns)])
-                                if pe_col and pe_col in spot.columns:
-                                    pe_ratio_ak = _safe_float(row.get(pe_col))
-                                    if pe_ratio_ak is not None:
-                                        pe_ratio = pe_ratio_ak
+                    import yfinance as yf
+                    t = yf.Ticker(yf_sym)
+                    fast = getattr(t, "fast_info", None) or {}
                 except Exception:
                     pass
-
-            if pe_ratio is None and m in {"US", "HK"}:
-                try:
-                    disable_proxies_for_process()
-                    import akshare as ak
-
-                    spot = ak.stock_us_spot_em() if m == "US" else ak.stock_hk_spot_em()
-                    if spot is not None and not spot.empty:
-                        code_col = None
-                        for c in ("代码", "symbol", "Symbol"):
-                            if c in spot.columns:
-                                code_col = c
-                                break
-                        if code_col:
-                            base = (symbol or "").split(".", 1)[0].upper()
-                            if m == "HK":
-                                base = base.replace(".HK", "")
-                                base = base.zfill(5) if base.isdigit() else base
-                            hit = spot[spot[code_col].astype(str).str.upper() == base]
-                            if not hit.empty:
-                                row = hit.iloc[0]
-                                pe_col = _find_pe_column([str(c) for c in list(spot.columns)])
-                                if pe_col and pe_col in spot.columns:
-                                    pe_ratio = _safe_float(row.get(pe_col))
-                except Exception:
-                    pe_ratio = None
-
-            # Fallback: Tencent quote contains PE fields and is usually reachable.
-            if pe_ratio is None:
-                try:
-                    pe_ratio = _safe_float(_tencent_fetch_pe_ratio(symbol, m))
-                except Exception:
-                    pe_ratio = None
-        elif m == "CN":
-            # For CN A-shares, Tencent quote field 39 is usually a stable PE value.
-            try:
-                pe_ratio = _safe_float(_tencent_fetch_pe_ratio(symbol, m))
-            except Exception:
-                pe_ratio = None
-
-            # AkShare PE fallback is expensive and occasionally hangs in production.
-            # Keep it opt-in to protect indicators endpoint latency.
-            if pe_ratio is None and (os.environ.get("ENABLE_AKSHARE_CN_PE_FALLBACK") or "").strip() == "1":
-                try:
-                    disable_proxies_for_process()
-                    import akshare as ak
-
-                    code = symbol.split(".")[0]
+                pe = _safe_float(
+                    fast.get("trailing_pe")
+                    or fast.get("trailingPE")
+                    or info.get("trailingPE")
+                    or info.get("forwardPE")
+                )
+                if m == "HK":
                     try:
+                        disable_proxies_for_process()
+                        import akshare as ak
+                        spot = ak.stock_hk_spot_em()
+                        if spot is not None and not spot.empty:
+                            code_col = next((c for c in ("代码", "symbol", "Symbol") if c in spot.columns), None)
+                            if code_col:
+                                base = (symbol or "").split(".", 1)[0].upper().replace(".HK", "")
+                                base = base.zfill(5) if base.isdigit() else base
+                                hit = spot[spot[code_col].astype(str).str.upper() == base]
+                                if not hit.empty:
+                                    pe_col = _find_pe_column([str(c) for c in list(spot.columns)])
+                                    if pe_col:
+                                        pe_ak = _safe_float(hit.iloc[0].get(pe_col))
+                                        if pe_ak is not None:
+                                            pe = pe_ak
+                    except Exception:
+                        pass
+                if pe is None:
+                    try:
+                        disable_proxies_for_process()
+                        import akshare as ak
+                        spot = ak.stock_us_spot_em() if m == "US" else ak.stock_hk_spot_em()
+                        if spot is not None and not spot.empty:
+                            code_col = next((c for c in ("代码", "symbol", "Symbol") if c in spot.columns), None)
+                            if code_col:
+                                base = (symbol or "").split(".", 1)[0].upper()
+                                if m == "HK":
+                                    base = base.replace(".HK", "")
+                                    base = base.zfill(5) if base.isdigit() else base
+                                hit = spot[spot[code_col].astype(str).str.upper() == base]
+                                if not hit.empty:
+                                    pe_col = _find_pe_column([str(c) for c in list(spot.columns)])
+                                    if pe_col:
+                                        pe = _safe_float(hit.iloc[0].get(pe_col))
+                    except Exception:
+                        pass
+                if pe is None:
+                    try:
+                        pe = _safe_float(_tencent_fetch_pe_ratio(symbol, m))
+                    except Exception:
+                        pass
+                return pe
+            elif m == "CN":
+                try:
+                    pe = _safe_float(_tencent_fetch_pe_ratio(symbol, m))
+                except Exception:
+                    pe = None
+                if pe is None and (os.environ.get("ENABLE_AKSHARE_CN_PE_FALLBACK") or "").strip() == "1":
+                    try:
+                        disable_proxies_for_process()
+                        import akshare as ak
+                        code = symbol.split(".")[0]
                         pe_df = ak.stock_a_indicator_lg(symbol=code)
                         if pe_df is not None and not pe_df.empty:
                             last = pe_df.iloc[-1]
-
-                            # Prefer TTM columns when present (case-insensitive).
                             cols = [str(c) for c in list(pe_df.columns)]
                             ttm_cols = [c for c in cols if ("ttm" in c.lower()) or ("市盈率" in c and "ttm" in c.upper())]
-                            prefer = []
-                            if ttm_cols:
-                                prefer.extend(ttm_cols)
-                            prefer.extend(["pe_ttm", "市盈率TTM", "市盈率(动)", "市盈率", "pe"])
-
+                            prefer = list(ttm_cols) + ["pe_ttm", "市盈率TTM", "市盈率(动)", "市盈率", "pe"]
                             for k in prefer:
                                 if k in pe_df.columns:
-                                    pe_ratio = _safe_float(last.get(k))
-                                    if pe_ratio is not None:
+                                    pe = _safe_float(last.get(k))
+                                    if pe is not None:
                                         break
                     except Exception:
-                        pe_ratio = None
+                        pass
+                if pe is None:
+                    try:
+                        pe = _safe_float(_tencent_fetch_pe_ratio(symbol, m))
+                    except Exception:
+                        pass
+                return pe
+        except Exception:
+            return None
 
-                    if pe_ratio is None:
-                        try:
-                            spot = ak.stock_zh_a_spot_em()
-                            if spot is not None and not spot.empty:
-                                code_col = None
-                                for c in ("代码", "symbol", "Symbol"):
-                                    if c in spot.columns:
-                                        code_col = c
-                                        break
-                                if code_col:
-                                    base = (symbol or "").split(".", 1)[0].upper()
-                                    hit = spot[spot[code_col].astype(str).str.upper() == base]
-                                    if not hit.empty:
-                                        row = hit.iloc[0]
-                                        pe_col = _find_pe_column([str(c) for c in list(spot.columns)])
-                                        if pe_col and pe_col in spot.columns:
-                                            pe_ratio = _safe_float(row.get(pe_col))
-                        except Exception:
-                            pe_ratio = None
-                except Exception:
-                    pe_ratio = None
-
-            # As a last resort, try Tencent again.
-            if pe_ratio is None:
+    def _fetch_name_cap_task() -> tuple:
+        """Fetch (name, market_cap, currency) for HK/US; returns (None, None, default_currency) for CN."""
+        cur = "CNY" if m == "CN" else ("HKD" if m == "HK" else "USD")
+        nm = None
+        cap = None
+        if m in {"US", "HK"}:
+            try:
+                yf_sym = _yf_sym_for_market(symbol, m)
+                info = _fetch_yf_info(yf_sym, timeout_s=4.0)
+                nm = info.get("shortName") or info.get("longName")
+                cap = _safe_float(info.get("marketCap"))
+                cur = info.get("currency") or cur
+            except Exception:
+                pass
+            if cap is None and m == "HK":
                 try:
-                    pe_ratio = _safe_float(_tencent_fetch_pe_ratio(symbol, m))
+                    tq = _tencent_fetch_quote(symbol, m)
+                    if tq is not None:
+                        if nm is None and tq.name:
+                            nm = tq.name
+                        if tq.market_cap is not None:
+                            cap = tq.market_cap
+                except Exception:
+                    pass
+        return nm, cap, cur
+
+    if _pe_cached and (pe_now - _pe_cached[0]) < 14400:
+        pe_ratio = _pe_cached[1]
+        # Still need name/market_cap
+        try:
+            with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
+                _nc_fut = _ex.submit(_fetch_name_cap_task)
+                try:
+                    name, market_cap, currency = _nc_fut.result(timeout=5)
+                except Exception:
+                    name, market_cap, currency = None, None, currency
+        except Exception:
+            pass
+    else:
+        # Run PE + name/market_cap in parallel
+        try:
+            with _cf.ThreadPoolExecutor(max_workers=2) as _ex:
+                _pe_fut = _ex.submit(_fetch_pe_ratio_task)
+                _nc_fut = _ex.submit(_fetch_name_cap_task)
+                try:
+                    pe_ratio = _pe_fut.result(timeout=6)
                 except Exception:
                     pe_ratio = None
-    except Exception:
-        pe_ratio = None
+                try:
+                    name, market_cap, currency = _nc_fut.result(timeout=6)
+                except Exception:
+                    name, market_cap, currency = None, None, currency
+        except Exception:
+            pass
+        _PE_CACHE[pe_cache_key] = (pe_now, pe_ratio)
 
     aggressive_ok = None
     stable_ok = None
@@ -4976,49 +5080,6 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
         prev_max_close=prev_max_close,
         prev_max_rsi=prev_max_rsi,
     )
-
-    currency = "CNY" if market.upper() == "CN" else ("HKD" if market.upper() == "HK" else "USD")
-    name = None
-    market_cap = None
-    if market.upper() in {"US", "HK"}:
-        try:
-            disable_proxies_for_process()
-            import yfinance as yf
-
-            yf_symbol = symbol
-            if market.upper() == "HK" and not yf_symbol.upper().endswith(".HK"):
-                base = yf_symbol.replace(".HK", "")
-                yf_symbol = f"{base.zfill(4)}.HK" if base.isdigit() else f"{base}.HK"
-            t = yf.Ticker(yf_symbol)
-            info = getattr(t, "fast_info", None) or {}
-            try:
-                name = (t.info or {}).get("shortName") or (t.info or {}).get("longName")
-            except Exception:
-                name = None
-            try:
-                market_cap = (
-                    info.get("market_cap")
-                    or info.get("marketCap")
-                    or (t.info or {}).get("marketCap")
-                )
-                if market_cap is not None:
-                    market_cap = float(market_cap)
-            except Exception:
-                market_cap = None
-            try:
-                currency = (t.info or {}).get("currency") or currency
-            except Exception:
-                pass
-        except Exception:
-            pass
-
-    if market_cap is None and market.upper() in {"HK"}:
-        tq = _tencent_fetch_quote(symbol, market)
-        if tq is not None:
-            if name is None and tq.name:
-                name = tq.name
-            if tq.market_cap is not None:
-                market_cap = tq.market_cap
 
     payload = StockIndicatorsResponse(
         symbol=symbol,

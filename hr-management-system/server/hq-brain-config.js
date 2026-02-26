@@ -17,7 +17,7 @@ const MODEL_TIERS = {
   // 总部决策大脑 — 深度推理与跨域分析
   hq_brain: {
     label: '总部决策大脑',
-    reasoningModel: 'deepseek-r1',          // 深度推理 (策略生成/因果分析)
+    reasoningModel: 'deepseek-chat',         // 深度推理 (策略生成/因果分析)
     analysisModel: 'deepseek-v3.2',         // 通用分析 (数据解读/报表)
     temperature: 0.3,                        // 较低温度保证稳定性
     maxTokens: 8192,                         // 允许长输出 (行动计划书)

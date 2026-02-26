@@ -17,13 +17,13 @@ import { Readable } from 'stream';
 import zlib from 'zlib';
 import XLSX from 'xlsx';
 import axios from 'axios';
-import { setPool as setAgentPool, ensureAgentTables, registerAgentRoutes, startAgentScheduler, setTaskResponseHook, startBitablePolling, startScheduledTasks, assertCriticalFunctions, getAgentHealthStatus, startWeeklyReportScheduler, sendWeeklyReports } from './agents.js';
+import { setPool as setAgentPool, ensureAgentTables, registerAgentRoutes, startAgentScheduler, setTaskResponseHook, startBitablePolling, startScheduledTasks, assertCriticalFunctions, getAgentHealthStatus, startWeeklyReportScheduler, sendWeeklyReports, sendMonthlyReports } from './agents.js';
 import { ensureAgentConfigTables, registerAgentConfigRoutes } from "./agent-config-manager.js";
 
 import { setMasterPool, ensureMasterTables, startMasterAgent, registerMasterRoutes, handleTaskResponse } from './master-agent.js';
 import { setReportPool, generateWeeklyReport, formatReportMarkdown } from './bi-weekly-report.js';
-import { setSalesRawPool, parseSalesRawRows, insertSalesRawRows } from './sales-raw-upload.js';
-import { startDailyFeishuSync } from './feishu-sync.js';
+import { setSalesRawPool, parseSalesRawRows, insertSalesRawRows, evaluateSalesRawUploadQuality } from './sales-raw-upload.js';
+import { startDailyFeishuSync, syncDishLibraryCosts } from './feishu-sync.js';
 import { calculateStoreRating, calculateEmployeeScore } from './new-scoring-model.js';
 import { registerNewScoringRoutes } from './new-scoring-api.js';
 import { handleMarginMessage } from './margin-message-handler.js';
@@ -1093,6 +1093,43 @@ const r = String(role || '').trim();
 return r === 'admin' || r === 'hq_manager';
 }
 
+function normalizeDishAliasBizType(v) {
+  const s = String(v || '').trim().toLowerCase();
+  if (!s || s === '*' || s === 'all' || s === '全部' || s === '通用') return '*';
+  if (/takeaway|delivery|外卖|外送/.test(s)) return 'takeaway';
+  if (/dinein|堂食|店内|堂食点餐/.test(s)) return 'dinein';
+  return '*';
+}
+
+async function ensureDataGovernanceTables() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS dish_name_aliases (
+      id BIGSERIAL PRIMARY KEY,
+      store VARCHAR(200) NOT NULL DEFAULT '*',
+      biz_type VARCHAR(20) NOT NULL DEFAULT '*',
+      alias_name VARCHAR(255) NOT NULL,
+      canonical_name VARCHAR(255) NOT NULL,
+      enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      created_by VARCHAR(120),
+      updated_by VARCHAR(120),
+      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      CONSTRAINT uq_dish_name_aliases_scope UNIQUE (store, biz_type, alias_name)
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_dish_name_aliases_lookup ON dish_name_aliases (store, biz_type, alias_name) WHERE enabled = TRUE`);
+  try {
+    await pool.query(`ALTER TABLE sales_raw ADD COLUMN IF NOT EXISTS dish_code VARCHAR(120)`);
+  } catch (e) {
+    const msg = String(e?.message || e);
+    if (/must be owner|permission denied|not owner/i.test(msg)) {
+      console.warn('[governance] skip schema alter for sales_raw.dish_code:', msg);
+      return;
+    }
+    throw e;
+  }
+}
+
 function estimateGrossMarginByHistory({ historyRows, profiles, startDate, endDate, bizType, storeScope, aliasLookup }) {
 const list = Array.isArray(historyRows) ? historyRows : [];
 const profileList = Array.isArray(profiles) ? profiles : [];
@@ -1561,6 +1598,29 @@ app.get('/api/approvals', authRequired, async (req, res) => {
       params
     );
     return res.json({ items: r.rows || [] });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+// 手动触发 BI 周报 / 月报（仅管理员，用于测试）
+app.post('/api/reports/bi/trigger-weekly', authRequired, async (req, res) => {
+  try {
+    const role = String(req.user?.role || '').trim();
+    if (role !== 'admin') return res.status(403).json({ error: 'admin_only' });
+    await sendWeeklyReports();
+    return res.json({ ok: true, triggered: 'weekly' });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+app.post('/api/reports/bi/trigger-monthly', authRequired, async (req, res) => {
+  try {
+    const role = String(req.user?.role || '').trim();
+    if (role !== 'admin') return res.status(403).json({ error: 'admin_only' });
+    await sendMonthlyReports();
+    return res.json({ ok: true, triggered: 'monthly' });
   } catch (e) {
     return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
   }
@@ -7336,13 +7396,155 @@ app.post('/api/reports/sales-raw/upload', authRequired, upload.single('file'), a
     }
     if (!parsed.length) return res.status(400).json({ error: 'no_valid_rows', message: '未识别到有效销售明细，请确保包含菜品名称、销售数量等列' });
     parsed.forEach(r => { r.biz_type = selBiz; r.store = qStore; });
+
+    const quality = await evaluateSalesRawUploadQuality(parsed, qStore, selBiz);
+    const qualityWarnings = [];
+    if (Number(quality?.skuCompletenessPct || 0) < Number(quality?.skuCompletenessWarnPct || 70)) {
+      qualityWarnings.push(`SKU编码完整率 ${Number(quality?.skuCompletenessPct || 0).toFixed(1)}%，低于建议门槛 ${Number(quality?.skuCompletenessWarnPct || 70)}%。建议在原始表增加SKU编码列以提升主数据稳定性。`);
+    }
+    if (!quality.pass) {
+      return res.status(422).json({
+        error: 'low_cost_coverage',
+        message: `成本覆盖率 ${Number(quality?.salesCoveragePct || 0).toFixed(1)}% 低于门槛 ${Number(quality?.thresholdPct || 0)}%，已阻止导入。请先补齐成本库或菜名别名。`,
+        quality,
+        qualityWarnings
+      });
+    }
+
     const dates = [...new Set(parsed.map(r => r.date).filter(Boolean))].sort();
     const ret = await insertSalesRawRows(parsed, qStore, selBiz, dates[0], dates[dates.length - 1]);
-    return res.json({ ok: true, store: qStore, bizType: selBiz, dateRange: `${dates[0]}~${dates[dates.length-1]}`, rows: parsed.length, ...ret });
+    return res.json({ ok: true, store: qStore, bizType: selBiz, dateRange: `${dates[0]}~${dates[dates.length-1]}`, rows: parsed.length, quality, qualityWarnings, ...ret });
   } catch (e) {
     return res.status(500).json({ error: 'server_error', message: String(e?.message || e).slice(0, 300) });
   } finally {
     try { if (req.file?.path) fs.unlinkSync(req.file.path); } catch (e) {}
+  }
+});
+
+// ─── Sales Dish Alias Governance (DB persisted) ───
+app.get('/api/reports/sales-raw/dish-aliases', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const role = String(req.user?.role || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  if (!canManageGrossProfitProfiles(role)) return res.status(403).json({ error: 'forbidden', message: '仅管理员可查看菜名别名规则' });
+  try {
+    const store = String(req.query?.store || '*').trim() || '*';
+    const bizType = normalizeDishAliasBizType(req.query?.bizType || '*');
+    const where = ['enabled = TRUE'];
+    const params = [];
+    if (store !== '*') {
+      params.push(store);
+      where.push(`(store = $${params.length} OR store = '*')`);
+    }
+    if (bizType !== '*') {
+      params.push(bizType);
+      where.push(`(biz_type = $${params.length} OR biz_type = '*')`);
+    }
+    const r = await pool.query(
+      `SELECT id, store, biz_type, alias_name, canonical_name, enabled, updated_at
+       FROM dish_name_aliases
+       ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+       ORDER BY updated_at DESC, id DESC
+       LIMIT 2000`,
+      params
+    );
+    return res.json({ items: r.rows || [] });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+app.post('/api/reports/sales-raw/dish-aliases', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const role = String(req.user?.role || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  if (!canManageGrossProfitProfiles(role)) return res.status(403).json({ error: 'forbidden', message: '仅管理员可配置菜名别名规则' });
+  try {
+    const store = String(req.body?.store || '*').trim() || '*';
+    const bizType = normalizeDishAliasBizType(req.body?.bizType || '*');
+    const aliasName = String(req.body?.aliasName || '').trim();
+    const canonicalName = String(req.body?.canonicalName || '').trim();
+    if (!aliasName || !canonicalName) return res.status(400).json({ error: 'missing_params', message: 'aliasName/canonicalName 必填' });
+    const r = await pool.query(
+      `INSERT INTO dish_name_aliases (store, biz_type, alias_name, canonical_name, enabled, created_by, updated_by, updated_at)
+       VALUES ($1,$2,$3,$4,TRUE,$5,$5,NOW())
+       ON CONFLICT (store, biz_type, alias_name)
+       DO UPDATE SET canonical_name = EXCLUDED.canonical_name, enabled = TRUE, updated_by = EXCLUDED.updated_by, updated_at = NOW()
+       RETURNING id, store, biz_type, alias_name, canonical_name, enabled, updated_at`,
+      [store, bizType, aliasName, canonicalName, username]
+    );
+    return res.json({ ok: true, item: r.rows?.[0] || null });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+app.put('/api/reports/sales-raw/dish-aliases/:id', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const role = String(req.user?.role || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  if (!canManageGrossProfitProfiles(role)) return res.status(403).json({ error: 'forbidden', message: '仅管理员可修改菜名别名规则' });
+  try {
+    const id = Number(req.params?.id || 0);
+    if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: 'invalid_id' });
+
+    const aliasName = String(req.body?.aliasName || '').trim();
+    const canonicalName = String(req.body?.canonicalName || '').trim();
+    const enabled = req.body?.enabled === undefined ? null : !!req.body.enabled;
+    const sets = [];
+    const vals = [];
+
+    if (aliasName) {
+      vals.push(aliasName);
+      sets.push(`alias_name = $${vals.length}`);
+    }
+    if (canonicalName) {
+      vals.push(canonicalName);
+      sets.push(`canonical_name = $${vals.length}`);
+    }
+    if (enabled !== null) {
+      vals.push(enabled);
+      sets.push(`enabled = $${vals.length}`);
+    }
+    vals.push(username);
+    sets.push(`updated_by = $${vals.length}`);
+    sets.push(`updated_at = NOW()`);
+    vals.push(id);
+
+    if (!sets.length) return res.status(400).json({ error: 'nothing_to_update' });
+    const r = await pool.query(
+      `UPDATE dish_name_aliases
+       SET ${sets.join(', ')}
+       WHERE id = $${vals.length}
+       RETURNING id, store, biz_type, alias_name, canonical_name, enabled, updated_at`,
+      vals
+    );
+    if (!r.rows?.length) return res.status(404).json({ error: 'not_found' });
+    return res.json({ ok: true, item: r.rows[0] });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+app.delete('/api/reports/sales-raw/dish-aliases/:id', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const role = String(req.user?.role || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  if (!canManageGrossProfitProfiles(role)) return res.status(403).json({ error: 'forbidden', message: '仅管理员可删除菜名别名规则' });
+  try {
+    const id = Number(req.params?.id || 0);
+    if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: 'invalid_id' });
+    const r = await pool.query(
+      `UPDATE dish_name_aliases
+       SET enabled = FALSE, updated_by = $1, updated_at = NOW()
+       WHERE id = $2
+       RETURNING id`,
+      [username, id]
+    );
+    if (!r.rows?.length) return res.status(404).json({ error: 'not_found' });
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
   }
 });
 
@@ -10380,6 +10582,29 @@ app.post('/api/feishu/sync-manual', authRequired, async (req, res) => {
   }
 });
 
+// 手动触发菜品库成本同步（写入 dish_library_costs）
+app.post('/api/feishu/sync-dish-library', authRequired, async (req, res) => {
+  const role = String(req.user?.role || '').trim();
+  if (!['admin', 'hq_manager'].includes(role)) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
+
+  try {
+    const result = await syncDishLibraryCosts();
+    if (!result?.ok) {
+      return res.status(500).json({ error: 'server_error', message: result?.error || 'sync_failed' });
+    }
+    res.json({
+      message: 'Dish library sync completed',
+      records: Number(result.records || 0),
+      upserted: Number(result.upserted || 0)
+    });
+  } catch (error) {
+    console.error('[Dish Library Sync] Error:', error);
+    res.status(500).json({ error: 'server_error', message: error?.message || error });
+  }
+});
+
 // 测试飞书连接
 app.post('/api/feishu/test-connection', authRequired, async (req, res) => {
   const role = String(req.user?.role || '').trim();
@@ -10789,6 +11014,7 @@ app.listen(PORT, HOST, async () => {
     await pool.query(`ALTER TABLE daily_reports ADD COLUMN IF NOT EXISTS new_wechat_members INTEGER DEFAULT 0`);
     // Runtime migration: 知识库文件版本号
     await pool.query(`ALTER TABLE knowledge_base ADD COLUMN IF NOT EXISTS version VARCHAR(50) DEFAULT NULL`);
+    await ensureDataGovernanceTables();
     await ensureAgentTables();
     assertCriticalFunctions();
     startAgentScheduler();
