@@ -29,6 +29,7 @@
 import { AGENT_ISSUE_TYPES } from './agent-communication-system.js';
 import {
   sendLarkMessage,
+  sendLarkCard,
   lookupFeishuUserByUsername,
   getSharedState,
   getStoresFromState,
@@ -38,11 +39,21 @@ import {
   callVisionLLM,
   queryKnowledgeBase,
   prefixWithAgentName,
-  runDataAuditor
+  runDataAuditor,
+  writeTaskToBitable,
+  getTaskResponseFormUrl,
+  buildTaskDispatchCard,
+  pollTaskResponseBitable
 } from './agents.js';
 import { AgentCommunicationSystem } from './agent-communication-system.js';
 import { pool as masterPool, setPool as setUnifiedMasterPool } from './utils/database.js';
+import { extractAnomalyRelations, refreshEntityHealthSnapshots, ensureKnowledgeGraphTables, setKGPool } from './knowledge-graph.js';
+import { registerHqPlannerRoutes, setHqPlannerPool, setHqPlannerLLM } from './hq-planner-agent.js';
 import { safeExecute, safeErrorLog } from './utils/error-handler.js';
+
+function normalizeStoreKey(v) {
+  return String(v || '').trim().toLowerCase().replace(/\s+/g, '');
+}
 
 // ─────────────────────────────────────────────
 // 0. Pool & Config
@@ -52,6 +63,9 @@ let _pool = null;
 export function setMasterPool(p) { 
   _pool = p; 
   setUnifiedMasterPool(p); // 同时设置统一数据库连接
+  setKGPool(p);            // 知识图谱
+  setHqPlannerPool(p);     // HQ决策大脑
+  setHqPlannerLLM(callLLM); // 注入LLM调用能力
 }
 export function pool() { 
   if (!_pool) throw new Error('master-agent: pool not set'); 
@@ -204,6 +218,8 @@ export async function ensureMasterTables() {
   } finally {
     client.release();
   }
+  // 知识图谱 & 行动计划表
+  try { await ensureKnowledgeGraphTables(); } catch (e) { console.error('[master] ensureKGTables failed:', e?.message); }
 }
 
 // ─────────────────────────────────────────────
@@ -300,6 +316,8 @@ async function createTask({ source, sourceRef, category, severity, store, brand,
        store, brand, title, detail, JSON.stringify(sourceData || {})]
     );
     await emitEvent(taskId, 'task_created', 'data_auditor', 'master', null, 'pending_dispatch', { category, severity, store });
+    // 知识图谱: 写入异常→门店关系
+    try { await extractAnomalyRelations({ task_id: taskId, category, severity, store, brand, title, detail, created_at: new Date() }); } catch (e) {}
     console.log(`[master] Task created: ${taskId} [${category}] ${store}`);
     return taskId;
   } catch (e) {
@@ -317,6 +335,7 @@ async function resolveAssignee(category, store) {
   const state = await getSharedState();
   const roleMap = await getCategoryAssigneeRoleMap();
   const targetRole = roleMap[category] || 'store_manager';
+  const normalizedStore = normalizeStoreKey(store);
 
   const all = [
     ...(Array.isArray(state?.employees) ? state.employees : []),
@@ -325,14 +344,14 @@ async function resolveAssignee(category, store) {
 
   // 先按目标角色找
   let assignee = all.find(u =>
-    String(u?.store || '').trim() === store &&
+    normalizeStoreKey(u?.store) === normalizedStore &&
     String(u?.role || '').trim() === targetRole
   );
 
   // 如果找不到出品经理，降级到店长
   if (!assignee && targetRole === 'store_production_manager') {
     assignee = all.find(u =>
-      String(u?.store || '').trim() === store &&
+      normalizeStoreKey(u?.store) === normalizedStore &&
       String(u?.role || '').trim() === 'store_manager'
     );
   }
@@ -507,21 +526,34 @@ async function opsAgentListener() {
       `SELECT * FROM master_tasks WHERE status = 'dispatched' ORDER BY created_at ASC LIMIT 10`
     );
     for (const task of (r.rows || [])) {
+      // Always write task to Bitable first (even if Feishu lookup fails later)
+      await writeTaskToBitable(task);
+
       if (!task.assignee_username) continue;
 
       const fu = await lookupFeishuUserByUsername(task.assignee_username);
       if (!fu?.open_id) {
-        console.warn(`[master:ops] No Feishu user for ${task.assignee_username}`);
+        console.warn(`[master:ops] No Feishu user for ${task.assignee_username}, task already written to Bitable`);
         continue;
       }
 
-      const sev = task.severity === 'high' ? '🔴' : '🟡';
-      const roleLabel = task.assignee_role === 'store_production_manager' ? '出品经理' : '店长';
-      const msgText = `${sev} 异常通知 [${task.task_id}]\n\n${roleLabel}您好，系统检测到以下异常：\n\n📋 ${task.title}\n\n${task.detail || ''}\n\n⚠️ 请解释原因并上传整改措施\n（直接回复文字说明 + 整改照片）`;
-      const msg = prefixWithAgentName('ops_supervisor', msgText);
-      const sendResult = await sendLarkMessage(fu.open_id, msg);
+      // Build form URL with pre-filled task details
+      const formUrl = getTaskResponseFormUrl(task);
 
-      if (sendResult.ok) {
+      let sendResult;
+      if (formUrl) {
+        // Send interactive card with form link button
+        const card = buildTaskDispatchCard(task, formUrl);
+        sendResult = await sendLarkCard(fu.open_id, card);
+      } else {
+        // Fallback to plain text if form URL not available
+        const sev = task.severity === 'high' ? '🔴' : '🟡';
+        const roleLabel = task.assignee_role === 'store_production_manager' ? '出品经理' : '店长';
+        const msgText = `${sev} 异常通知 [${task.task_id}]\n\n${roleLabel}您好，系统检测到以下异常：\n\n📋 ${task.title}\n\n${task.detail || ''}\n\n⚠️ 请解释原因并上传整改措施\n（直接回复文字说明 + 整改照片）`;
+        sendResult = await sendLarkMessage(fu.open_id, prefixWithAgentName('ops_supervisor', msgText));
+      }
+
+      if (sendResult?.ok) {
         await transitionTask(task.task_id, 'pending_response', 'ops_supervisor', {
           feishu_msg_id: sendResult.data?.data?.message_id || ''
         });
@@ -530,8 +562,8 @@ async function opsAgentListener() {
         try {
           await pool().query(
             `INSERT INTO agent_messages (direction, channel, feishu_open_id, sender_username, sender_name, routed_to, content_type, content)
-             VALUES ('out','feishu',$1,'system','Master Agent','ops_supervisor','text',$2)`,
-            [fu.open_id, msg]
+             VALUES ('out','feishu',$1,'system','Master Agent','ops_supervisor','card',$2)`,
+            [fu.open_id, `异常通知卡片 [${task.task_id}] - 回复表单已发送`]
           );
         } catch (e) {}
         actions++;
@@ -561,7 +593,11 @@ async function opsAgentListener() {
       if (responseImages.length) {
         for (const imgUrl of responseImages) {
           const vr = await callVisionLLM(imgUrl,
-            `你是餐饮营运督导员。请审核这张整改照片，判断是否为真实有效的整改证据。回复JSON：{"valid":true/false,"reason":"判断理由"}`
+            `你是小年，年年有喜餐饮集团AI助理，正在审核员工提交的整改照片。
+任务：${task.title || '整改'}
+要求：判断照片是否为真实有效的整改证据。
+判断标准：1)照片内容与任务相关 2)能看到实际整改结果 3)非模糊/黑屏/无关图片
+请回复JSON：{"valid":true/false,"reason":"具体判断理由，说明照片中看到了什么"}`
           );
           try {
             const parsed = JSON.parse(vr.content.replace(/```json?\n?/g, '').replace(/```/g, '').trim());
@@ -589,11 +625,22 @@ async function opsAgentListener() {
         } catch (e) {}
 
         const llm = await callLLM([
-          { role: 'system', content: `你是餐饮营运督导员。请审核员工对异常问题的回复，判断是否真实且有效。
+          { role: 'system', content: `你是小年，年年有喜餐饮集团AI助理。请审核员工对异常问题的回复，仅判断回复是否包含了有效的事实描述和整改措施。
+
+审核标准：
+1. 回复是否包含对问题的具体调查结果（不能只说"不知道"或"好的"等无实质内容的回复）
+2. 回复是否包含具体的整改措施或解决方案
+3. 如有照片，是否与问题相关
+
+重要规则：
+- 你只负责判断回复是否有效，不要自己编造任何具体的调查建议或产品操作建议
+- 不要在reason或suggestion中提及具体产品名称、原料名称、制作流程等你无法确认的信息
+- suggestion只能是通用的格式要求，如"请提供具体的调查结果和整改措施"
+
 异常问题：${task.title}
 问题详情：${task.detail || ''}${sopContext}
 
-请回复JSON：{"valid":true/false,"reason":"判断理由","suggestion":"改进建议（如有）"}` },
+请回复JSON：{"valid":true/false,"reason":"判断理由（不要编造具体建议）","suggestion":"通用改进要求（如有）"}` },
           { role: 'user', content: `员工回复：${responseText}` }
         ], { skipCache: true, temperature: 0.05 });
 
@@ -623,14 +670,29 @@ async function opsAgentListener() {
       });
 
       if (result) {
-        // 通知责任人审核结果
+        // 通知责任人审核结果（专业格式，含判断依据）
         if (task.assignee_username) {
           const fu = await lookupFeishuUserByUsername(task.assignee_username);
           if (fu?.open_id) {
-            const statusEmoji = reviewDecision === 'resolved' ? '✅' : '❌';
-            const statusText = reviewDecision === 'resolved' ? '审核通过' : '审核未通过，请重新提交';
-            const notifyText = `${statusEmoji} [${task.task_id}] ${statusText}\n\n${reviewNotes || '整改措施已确认。'}`;
-            await sendLarkMessage(fu.open_id, prefixWithAgentName('ops_supervisor', notifyText));
+            const lines = [];
+            if (reviewDecision === 'resolved') {
+              lines.push(`📋 任务审核结果\n`);
+              lines.push(`任务编号：${task.task_id}`);
+              lines.push(`审核结论：✅ 通过`);
+              if (responseImages.length) lines.push(`照片审核：合格（${responseImages.length}张）`);
+              if (responseText) lines.push(`文字回复：已确认有效`);
+              lines.push(`\n${reviewNotes || '整改措施已确认，感谢配合。'}`);
+            } else {
+              lines.push(`📋 任务审核结果\n`);
+              lines.push(`任务编号：${task.task_id}`);
+              lines.push(`审核结论：❌ 未通过`);
+              lines.push(`\n未通过原因：`);
+              if (!imageReviewOk) lines.push(`· 照片不符合要求`);
+              if (!textReviewOk) lines.push(`· 文字回复不满足整改标准`);
+              if (reviewNotes) lines.push(`\n详细说明：${reviewNotes}`);
+              lines.push(`\n请根据以上反馈重新提交整改结果。`);
+            }
+            await sendLarkMessage(fu.open_id, prefixWithAgentName('ops_supervisor', lines.join('\n')));
           }
         }
         actions++;
@@ -1187,6 +1249,25 @@ export function startMasterAgent() {
     }
   };
 
+  // ── Tick 11: Task Response Bitable Polling (每60秒) ──
+  const taskResponseTick = async () => {
+    try {
+      await pollTaskResponseBitable();
+    } catch (e) {
+      console.error('[master:tick] task response poll error:', e?.message);
+    }
+  };
+
+  // ── Tick 12: Knowledge Graph Health Snapshot (每6小时刷新) ──
+  const kgHealthTick = async () => {
+    try {
+      const updated = await refreshEntityHealthSnapshots();
+      if (updated > 0) console.log(`[master:tick] KG health snapshots refreshed for ${updated} stores`);
+    } catch (e) {
+      console.error('[master:tick] KG health error:', e?.message);
+    }
+  };
+
   // 启动定时器
   setInterval(auditTick, 30 * 60 * 1000);   // 30min
   setInterval(dispatchTick, 15 * 1000);     // 15s
@@ -1198,6 +1279,8 @@ export function startMasterAgent() {
   setInterval(issuesTick, 30 * 1000);       // 30s
   setInterval(trainDispatchTick, 10 * 60 * 1000); // 10min
   setInterval(optimizationTick, 60 * 1000);   // 60s
+  setInterval(taskResponseTick, 60 * 1000);  // 60s
+  setInterval(kgHealthTick, 6 * 60 * 60 * 1000); // 6h
 
   // 首次启动延迟执行
   setTimeout(auditTick, 10 * 1000);
@@ -1210,8 +1293,10 @@ export function startMasterAgent() {
   setTimeout(issuesTick, 45 * 1000);
   setTimeout(trainDispatchTick, 50 * 1000);
   setTimeout(optimizationTick, 55 * 1000);
+  setTimeout(taskResponseTick, 60 * 1000);
+  setTimeout(kgHealthTick, 90 * 1000);      // 启动后90秒首次刷新
 
-  console.log('[master] All agent listeners started');
+  console.log('[master] All agent listeners started (including KG health tick)');
 }
 
 // ─────────────────────────────────────────────
@@ -1320,4 +1405,7 @@ export function registerMasterRoutes(app, authRequired) {
       return res.json({ ok: true, taskId });
     } catch (e) { return res.status(500).json({ error: String(e?.message || e) }); }
   });
+
+  // 注册 HQ Planner 路由 (行动计划/门店健康/因果链/算力统计)
+  registerHqPlannerRoutes(app, authRequired);
 }
