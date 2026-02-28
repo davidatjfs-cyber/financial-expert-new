@@ -8080,6 +8080,14 @@ app.post('/api/reports/inventory-forecast/revenue-estimate', authRequired, async
       })
       .slice(0, 1200);
 
+    // 补充 sales_raw 数据提高预测准确度
+    const nsk = String(store||'').trim().toLowerCase().replace(/\s+/g,'');
+    try {
+      const srR = await pool.query(`SELECT s.date::text AS date, ROUND(SUM(COALESCE(s.revenue,0))::numeric,2) AS day_revenue FROM sales_raw s WHERE lower(regexp_replace(coalesce(s.store,''),'\\s+','','g'))=$1 AND s.date<=$2::date AND s.date>=($2::date-INTERVAL '60 days') GROUP BY s.date ORDER BY s.date DESC LIMIT 60`,[nsk,date]);
+      const exD=new Set(historyRows.map(r=>safeDateOnly(r?.date)).filter(Boolean));
+      for(const sr of(srR.rows||[])){const d=safeDateOnly(sr.date),rev=Number(sr.day_revenue)||0;if(!d||rev<=0||exD.has(d))continue;historyRows.push({date:d,bizType:'dinein',slot:'lunch',expectedRevenue:rev});}
+    } catch(e){}
+
     const target = { date, weather, isHoliday };
     const estimate = estimateRevenueByHistory(historyRows, target);
     return res.json({ store, target, estimate });
