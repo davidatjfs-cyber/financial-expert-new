@@ -8739,6 +8739,10 @@ app.get('/api/points/my', authRequired, async (req, res) => {
   }
 });
 
+function normalizeStoreKey(v) {
+  return String(v || '').trim().toLowerCase().replace(/\s+/g, '');
+}
+
 function safeDateOnly(input) {
   const v = String(input || '').trim();
   if (!v) return null;
