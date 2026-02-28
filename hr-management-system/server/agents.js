@@ -1213,12 +1213,12 @@ function buildKpiRadarAlertJson(issue) {
 async function buildBiDeterministicTableVisitReply(store, text) {
   const q = String(text||'').trim(), s = String(store||'').trim();
   if (!s) return '';
-  if (!/(桌访|桌巡|巡台|不满意.*菜|菜品.*不满意|出品.*不满意|最不满意)/.test(q)) return '';
+  if (!/(桌访|桌巡|巡台|不满意.*菜|菜品.*不满意|出品.*不满意|最不满意|不满意在哪|主要不满意|不满意.*原因|哪里不满意|什么不满意)/.test(q)) return '';
   if (!isBiSourceEnabled('table_visit_records')) return '';
   const p = resolveDateRangeFromQuestion(q, 7);
   try {
     const r = await pool().query(
-      `SELECT dissatisfaction_dish, unsatisfied_items, date FROM table_visit_records WHERE lower(regexp_replace(coalesce(store,''),'\\s+','','g'))=$1 AND date>=$2 AND date<=$3 ORDER BY date DESC LIMIT 100`,
+      `SELECT dissatisfaction_dish, unsatisfied_items, date FROM table_visit_records WHERE lower(regexp_replace(coalesce(store,''),'\\s+','','g'))=$1 AND date>=$2 AND date<=$3 ORDER BY date DESC LIMIT 2000`,
       [normalizeStoreKey(s), p.start, p.end]
     );
     const rows = r.rows||[];
@@ -1240,6 +1240,22 @@ async function buildBiDeterministicTableVisitReply(store, text) {
       }
     }
     const fbSorted = Object.entries(fbMap).sort((a,b)=>b[1]-a[1]);
+    // dish-specific: detect if user asks about a specific dish (e.g. "叉烧主要不满意在哪里")
+    const dishNames = dishSorted.map(([d])=>d);
+    const mentionedDish = dishNames.find(d => q.includes(d));
+    if (mentionedDish) {
+      const dishRows = rows.filter(row => String(row.dissatisfaction_dish||'').includes(mentionedDish));
+      const dishFb = {};
+      for (const row of dishRows) {
+        const fb = String(row.unsatisfied_items||'').trim();
+        if (fb && !blockedFb.has(fb)) { fb.split(/[，,、]+/).map(x=>x.trim()).filter(Boolean).forEach(x => { dishFb[x] = (dishFb[x]||0) + 1; }); }
+      }
+      const dishFbSorted = Object.entries(dishFb).sort((a,b)=>b[1]-a[1]);
+      const dl = [`📋 「${mentionedDish}」桌访不满意详情（${s}·${p.label}）【数据来源：桌访巡台记录】`, `提及「${mentionedDish}」的桌访共${dishRows.length}条（总${rows.length}条中）`];
+      if (dishFbSorted.length) { dl.push('', '🔔 关联不满意反馈：'); dishFbSorted.slice(0,8).forEach(([d,c],i) => dl.push(`${i+1}. ${d}（${c}次）`)); }
+      else { dl.push('', '桌访记录中未记录该菜品的具体不满意原因，仅记录了菜品名称。'); }
+      return dl.join('\n');
+    }
     const lines = [`📋 桌访反馈（${s}·${p.label}）【数据来源：桌访巡台记录，非大众点评】`, `共${rows.length}条桌访记录`];
     if (fbSorted.length) {
       lines.push('', '🔔 桌访不满意反馈TOP：');

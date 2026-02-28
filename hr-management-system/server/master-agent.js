@@ -683,7 +683,7 @@ async function opsAgentListener() {
 
       let sendResult;
       // 直接发送交互卡片（不再使用表单链接）
-      const card = buildTaskDispatchCard(task, { isFirstDispatch });
+      const card = buildTaskDispatchCard(task, formUrl, { isFirstDispatch });
       sendResult = await sendLarkCard(fu.open_id, card);
 
       if (sendResult?.ok) {

@@ -15,6 +15,31 @@ description: HRMS 部署（rsync + systemd + 健康检查 + 常见排错）
 - **健康检查**：`curl -s http://127.0.0.1:3000/api/health`
 - **必须保留目录**：`/opt/hrms/hr-management-system/server/uploads`
 
+# 0. 本地一键部署命令（推荐）
+> 目标：在本地终端输入一个名字就完成部署。
+
+- **一键部署名字**：`hrms-deploy`
+- **脚本路径**：`.windsurf/workflows/hrms-deploy.sh`
+
+首次配置（只需一次）：
+
+```bash
+# 在本地终端执行（建议加入 ~/.zshrc）
+alias hrms-deploy='bash /Users/xieding/windsure/CascadeProjects/windsurf-project/.windsurf/workflows/hrms-deploy.sh'
+```
+
+立即使用：
+
+```bash
+hrms-deploy
+```
+
+不配 alias 也可直接运行：
+
+```bash
+bash /Users/xieding/windsure/CascadeProjects/windsurf-project/.windsurf/workflows/hrms-deploy.sh
+```
+
 # 1.（可选）服务器侧备份
 建议每次发布前先做一次备份（保留 uploads）。
 
@@ -166,6 +191,21 @@ ls -l /opt/hrms/hr-management-system/index.js /opt/hrms/hr-management-system/ser
 结论：
 - `systemd` 启动的是 `server/index.js`，所以必须同步到：
   `/opt/hrms/hr-management-system/server/index.js`
+
+## 6.2.1 一键脚本报错：`发现重复函数定义: {`
+现象：`hrms-deploy` 在“步骤2: 检查重复函数定义”直接失败，报：
+
+```text
+[ERROR] ❌ 发现重复函数定义: {
+```
+
+原因：旧版脚本使用 `awk` 按空格取字段，误把 `{` 当成函数名，产生误报。
+
+处理：已修复为正则提取真实函数名（`hrms-deploy.sh`）。直接重跑：
+
+```bash
+hrms-deploy
+```
 
 ## 6.3 npm install 权限问题（EACCES）
 一般是目录属主不对。

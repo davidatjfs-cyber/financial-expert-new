@@ -195,7 +195,7 @@ function normalizeOpsAgentConfig(cfg) {
       ? x.assigneeRoles.map((r) => String(r || '').trim()).filter(Boolean)
       : [];
     return {
-      type: String(x?.type || '').trim() || 'seafood_pool_temperature',
+      type: String(x?.type || '').trim() || '食安抽检',
       description: String(x?.description || '').trim() || '食安抽检',
       timeWindow: Math.max(1, Math.floor(Number(x?.timeWindow) || 15)),
       store,

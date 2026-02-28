@@ -80,7 +80,7 @@ const HQ_ONLY_TOOLS = [
 const SHARED_TOOLS = [
   'query_sales_ranking',          // 销售排行（限本店）
   'query_revenue_summary',        // 营收概览（限本店）
-  'query_complaint_ranking',      // 投诉排行（限本店）
+  'query_complaint_product_ranking', // 投诉排行（限本店）
   'query_sop_knowledge',          // SOP知识库查询
   'submit_checklist',             // 检查表提交
   'query_my_tasks',               // 我的任务
@@ -200,20 +200,23 @@ export function getMaxTokensForRole(role) {
 
 export function isToolAllowed(role, toolName) {
   const tier = getModelTier(role);
-  if (tier === 'hq_brain') return true; // HQ can access everything
-  // Store limb can only use shared tools
-  if (HQ_ONLY_TOOLS.includes(toolName)) return false;
+  const normalizedRole = String(role || '').trim();
+  
+  // 总部人事只能访问HR工具
+  if (normalizedRole === 'hr_manager') {
+    return HR_ONLY_TOOLS.includes(toolName) || ['query_my_tasks', 'query_my_score'].includes(toolName);
+  }
+  
+  // HQ Brain 全权限
+  if (tier === 'hq_brain') return true;
+  
+  // 门店角色只能使用SHARED_TOOLS
+  if (HQ_ONLY_TOOLS.includes(toolName) || HR_ONLY_TOOLS.includes(toolName)) return false;
   return true;
-}
-
-export function getAvailableTools(role) {
-  const tier = getModelTier(role);
-  if (tier === 'hq_brain') return [...SHARED_TOOLS, ...HQ_ONLY_TOOLS];
-  return [...SHARED_TOOLS];
 }
 
 export function isHqRole(role) {
   return getModelTier(role) === 'hq_brain';
 }
 
-export { trackLLMCall, getCostStats, isTierBudgetExceeded, MODEL_TIERS, ROLE_TIER_MAP, HQ_ONLY_TOOLS, SHARED_TOOLS };
+export { trackLLMCall, getCostStats, isTierBudgetExceeded, MODEL_TIERS, ROLE_TIER_MAP, HQ_ONLY_TOOLS, SHARED_TOOLS, getAvailableTools };

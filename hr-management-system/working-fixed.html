@@ -33816,7 +33816,11 @@ ${knowledgeContent.slice(0, 30000)}`;
                 { icon:'⚙️', label:'系统设置', page:'settings', roles:['admin'] },
             ];
             const role = currentUser?.role || '';
-            const visibleItems = allItems.filter(item => !item.roles || item.roles.includes(role));
+            const visibleItems = allItems.filter(item => {
+                if (item.href) return true; // external links always visible
+                if (item.page && !canAccessModulePage(item.page, role)) return false;
+                return true;
+            });
 
             const grid = document.getElementById('mobile-more-grid');
             if (grid) {
