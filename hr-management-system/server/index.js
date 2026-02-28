@@ -1171,13 +1171,20 @@ const profileList = Array.isArray(profiles) ? profiles : [];
 // Build avg price map for cost→gross conversion
 const priceMap = storeScope ? computeAvgPricePerProduct(list, storeScope, aliasLookup) : new Map();
 const profileMap = new Map();
+const costPerUnitMap = new Map();
   profileList.forEach((p) => {
     const item = normalizeGrossProfitProfileItem(p);
     if (!item) return;
     let gpu = item.grossPerUnit;
-    // If only costPerUnit is set, compute grossPerUnit from avg price
     const resolvedItem = resolveForecastProductName(item.product, aliasLookup);
-    if ((!Number.isFinite(gpu) || gpu === undefined) && Number.isFinite(item.costPerUnit)) {
+    const hasCost = Number.isFinite(item.costPerUnit) && item.costPerUnit >= 0;
+    // Store costPerUnit for direct cost-based calculation
+    if (hasCost) {
+      costPerUnitMap.set(`${item.bizType}||${resolvedItem.key}`, item.costPerUnit);
+      costPerUnitMap.set(`||${resolvedItem.key}`, item.costPerUnit);
+    }
+    // If only costPerUnit is set, compute grossPerUnit from avg price
+    if ((!Number.isFinite(gpu) || gpu === undefined) && hasCost) {
       const avgPrice = priceMap.get(resolvedItem.key) || 0;
       gpu = avgPrice > item.costPerUnit ? Number((avgPrice - item.costPerUnit).toFixed(4)) : 0;
     }
@@ -1229,7 +1236,20 @@ const profileMap = new Map();
         profileMap.has(keyNormFallback) ? profileMap.get(keyNormFallback) : NaN
       );
       const allocRevenue = rowTotalQty > 0 && rev > 0 ? (Number(it.qty || 0) / rowTotalQty) * rev : 0;
-      if (!Number.isFinite(gpu)) {
+      if (!Number.isFinite(gpu) || gpu === 0) {
+        // Fallback: if costPerUnit available but no avgPrice for gross, use cost-based
+        const cpuKey = costPerUnitMap.has(keyExact) ? keyExact : costPerUnitMap.has(keyFallback) ? keyFallback : null;
+        if (cpuKey) {
+          const cpu = costPerUnitMap.get(cpuKey);
+          const costEst = Number(it.qty || 0) * cpu;
+          const grossEst = Math.max(0, allocRevenue - costEst);
+          totalRevenue += allocRevenue;
+          totalGrossProfit += grossEst;
+          const p2 = productAgg.get(resolved.display) || { product: resolved.display, qty: 0, revenue: 0, grossProfit: 0 };
+          p2.qty += Number(it.qty || 0); p2.revenue += allocRevenue; p2.grossProfit += grossEst;
+          productAgg.set(resolved.display, p2);
+          return;
+        }
         const miss = uncovered.get(resolved.display) || { product: resolved.display, qty: 0 };
         miss.qty += Number(it.qty || 0);
         uncovered.set(resolved.display, miss);
