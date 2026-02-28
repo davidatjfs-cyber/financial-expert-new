@@ -161,6 +161,17 @@
         </div>
     </div>
 
+    <!-- 数据源概览 (all authorized roles) -->
+    <div class="card" id="dataSourceCard" style="display:none">
+        <div class="collapse-header" onclick="toggleDataSource()">
+            <div class="card-title" style="margin-bottom:0"><span class="icon">📦</span> 数据源概览</div>
+            <span class="arrow">▼</span>
+        </div>
+        <div id="dataSourceBody" style="display:none;margin-top:14px">
+            <div id="dataSourceGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px"></div>
+        </div>
+    </div>
+
     <!-- Shared: Upload (collapsible, admin/hq_manager only) -->
     <div class="card" id="uploadCard" style="display:none">
         <div class="collapse-header open" onclick="toggleUpload()">
@@ -473,6 +484,9 @@ let __ALL_BRANDS = [];
         document.querySelector('.container').innerHTML = '<div style="text-align:center;padding:60px 20px;"><div style="font-size:48px;margin-bottom:16px">🔒</div><h2 style="font-size:18px;font-weight:800;margin-bottom:8px">无访问权限</h2><p style="font-size:13px;color:rgba(226,232,240,0.5)">智能助手仅对出品经理、店长、总部营运、管理员开放</p><a href="/" style="display:inline-block;margin-top:20px;color:#38bdf8;font-size:13px">← 返回主页</a></div>';
         return;
     }
+    // Data source overview: all authorized roles
+    document.getElementById('dataSourceCard').style.display = 'block';
+    loadDataSourceOverview();
     // Upload + gross profit config: admin/hq_manager only
     if (USER_ROLE === 'admin' || USER_ROLE === 'hq_manager') {
         document.getElementById('uploadCard').style.display = 'block';
@@ -587,6 +601,25 @@ function switchFeature(panel) {
     ACTIVE_FEATURE = panel;
     document.querySelectorAll('.feature-tab').forEach(t => t.classList.toggle('active', t.dataset.panel === panel));
     document.querySelectorAll('.feature-panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + panel));
+}
+
+function toggleDataSource() {
+    const body = document.getElementById('dataSourceBody');
+    const header = document.querySelector('#dataSourceCard .collapse-header');
+    const isOpen = header.classList.contains('open');
+    header.classList.toggle('open');
+    body.style.display = isOpen ? 'none' : 'block';
+}
+async function loadDataSourceOverview() {
+    try {
+        const r = await fetch('/api/uploads/status', { headers: { 'Authorization': 'Bearer ' + TOKEN } });
+        if (!r.ok) return;
+        const d = await r.json();
+        const grid = document.getElementById('dataSourceGrid');
+        if (!grid || !d.sources) return;
+        const icons = { kb:'📚', fh:'📦', sr:'💰', dl:'🧾', dr:'📒', gp:'📊' };
+        grid.innerHTML = d.sources.map(s => `<div style="background:rgba(255,255,255,0.04);border-radius:10px;padding:12px;text-align:center"><div style="font-size:22px;margin-bottom:4px">${icons[s.key]||'📄'}</div><div style="font-size:12px;font-weight:600;color:rgba(226,232,240,0.9)">${esc(s.label)}</div><div style="font-size:18px;font-weight:800;color:#38bdf8;margin:4px 0">${s.count}</div>${s.latest?'<div style="font-size:10px;color:rgba(226,232,240,0.4)">'+new Date(s.latest).toLocaleDateString()+'</div>':''}</div>`).join('');
+    } catch(e) {}
 }
 
 function toggleUpload() {
