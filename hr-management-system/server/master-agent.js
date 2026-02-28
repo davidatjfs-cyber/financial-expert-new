@@ -72,7 +72,15 @@ export function setMasterPool(p) {
   setHqPlannerPool(p);     // HQ决策大脑
   setHqPlannerLLM(callLLM); // 注入LLM调用能力
   setAutoOpsPool(p);       // 自动化营运引擎
-  setAutoOpsDeps({ sendLarkMessage, sendLarkCard, lookupFeishuUserByUsername, findStoreManager, callLLM, prefixWithAgentName, inferBrandFromStoreName });
+  setAutoOpsDeps({
+    sendLarkMessage,
+    sendLarkCard,
+    lookupFeishuUserByUsername,
+    findStoreManager,
+    callLLM,
+    prefixWithAgentName,
+    inferBrandFromStoreName
+  });
 }
 export function pool() { 
   if (!_pool) throw new Error('master-agent: pool not set'); 
@@ -80,7 +88,7 @@ export function pool() {
 }
 
 // 责任人角色映射已移至 agent-config-manager.js 动态读取
-import { getCategoryAssigneeRoleMap, getIssueScoreRulesMap } from './agent-config-manager.js';
+import { getCategoryAssigneeRoleMap } from './agent-config-manager.js';
 
 // 状态机定义
 const STATUS_FLOW = {
@@ -216,8 +224,85 @@ export async function ensureMasterTables() {
     await client.query(`CREATE INDEX IF NOT EXISTS idx_training_tasks_assignee ON training_tasks (assignee_username, status)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_training_tasks_role ON training_tasks (target_role)`);
 
+    // Agent自主任务日志表
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS agent_autonomous_logs (
+        id SERIAL PRIMARY KEY,
+        task_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        result JSONB,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_autonomous_logs_task ON agent_autonomous_logs (task_id, created_at)`);
+
+    // Agent协作会话归档表
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS agent_collaboration_archives (
+        id SERIAL PRIMARY KEY,
+        session_id TEXT UNIQUE NOT NULL,
+        topic TEXT NOT NULL,
+        initiator TEXT NOT NULL,
+        participants JSONB NOT NULL,
+        messages JSONB DEFAULT '[]',
+        summary TEXT,
+        created_at TIMESTAMPTZ,
+        ended_at TIMESTAMPTZ
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_collaboration_session ON agent_collaboration_archives (session_id, created_at)`);
+
+    // 回归检查结果表
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS regression_check_results (
+        id SERIAL PRIMARY KEY,
+        check_data JSONB NOT NULL,
+        passed BOOLEAN NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_regression_check_time ON regression_check_results (created_at)`);
+
+    // 自动化测试结果表
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS automated_test_results (
+        id SERIAL PRIMARY KEY,
+        test_data JSONB NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_automated_test_time ON automated_test_results (created_at)`);
+
+    // Agent任务日志表（用于性能监控）
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS agent_task_logs (
+        id SERIAL PRIMARY KEY,
+        agent_id TEXT NOT NULL,
+        task_type TEXT NOT NULL,
+        status TEXT NOT NULL,
+        execution_time_ms INTEGER,
+        error_message TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_agent_task_logs_agent ON agent_task_logs (agent_id, created_at)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_agent_task_logs_type ON agent_task_logs (task_type, status)`);
+
+    // 数据质量日志表
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS data_quality_logs (
+        id SERIAL PRIMARY KEY,
+        data_source TEXT NOT NULL,
+        record_count INTEGER DEFAULT 0,
+        data_quality_score NUMERIC(3,2) DEFAULT 1.0,
+        issues JSONB DEFAULT '[]',
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_data_quality_source ON data_quality_logs (data_source, created_at)`);
+
     await client.query('COMMIT');
-    console.log('[master] Tables ensured');
+    console.log('[master] Tables ensured (including autonomous, regression, LLM monitoring)');
   } catch (e) {
     await client.query('ROLLBACK').catch(() => {});
     if (String(e?.code || '') === '23505') return;
@@ -338,7 +423,12 @@ async function createTask({ source, sourceRef, category, severity, store, brand,
 // ─────────────────────────────────────────────
 
 // 根据异常类型和门店找到责任人
-async function resolveAssignee(category, store) {
+async function resolveAssignee(category, store, existingAssignee) {
+  // 如果任务已有 assignee，直接使用
+  if (existingAssignee) {
+    return { username: existingAssignee, name: '', role: '', store };
+  }
+
   const state = await getSharedState();
   const roleMap = await getCategoryAssigneeRoleMap();
   const targetRole = roleMap[category] || 'store_manager';
@@ -349,18 +439,20 @@ async function resolveAssignee(category, store) {
     ...(Array.isArray(state?.users) ? state.users : [])
   ];
 
-  // 先按目标角色找
-  let assignee = all.find(u =>
-    normalizeStoreKey(u?.store) === normalizedStore &&
-    String(u?.role || '').trim() === targetRole
-  );
+  const storeMembers = all.filter(u => normalizeStoreKey(u?.store) === normalizedStore);
 
-  // 如果找不到出品经理，降级到店长
+  // 先按目标角色找
+  let assignee = storeMembers.find(u => String(u?.role || '').trim() === targetRole);
+
+  // 降级顺序: store_production_manager → store_manager → 任何门店成员
   if (!assignee && targetRole === 'store_production_manager') {
-    assignee = all.find(u =>
-      normalizeStoreKey(u?.store) === normalizedStore &&
-      String(u?.role || '').trim() === 'store_manager'
-    );
+    assignee = storeMembers.find(u => String(u?.role || '').trim() === 'store_manager');
+  }
+  if (!assignee && targetRole === 'store_manager') {
+    assignee = storeMembers.find(u => String(u?.role || '').trim() === 'store_production_manager');
+  }
+  if (!assignee) {
+    assignee = storeMembers.find(u => ['store_manager', 'store_production_manager'].includes(String(u?.role || '').trim()));
   }
 
   if (!assignee) return null;
@@ -499,8 +591,8 @@ async function masterDispatcher() {
 
     let dispatched = 0;
     for (const task of r.rows) {
-      // 解析责任人
-      const assignee = await resolveAssignee(task.category, task.store);
+      // 解析责任人 (优先使用已有的 assignee_username)
+      const assignee = await resolveAssignee(task.category, task.store, task.assignee_username);
       if (!assignee) {
         console.warn(`[master] No assignee found for ${task.task_id} (${task.category}, ${task.store})`);
         continue;
@@ -524,6 +616,9 @@ async function masterDispatcher() {
 // ── 5c. Ops Agent Listener ──
 // 1) 扫描 dispatched 任务 → 在飞书通知责任人
 // 2) 扫描 pending_review 任务 → 审核反馈
+const _bitableWrittenTaskIds = new Set();
+const _dispatchRetryCount = new Map(); // task_id → retry count
+
 async function opsAgentListener() {
   let actions = 0;
 
@@ -533,14 +628,43 @@ async function opsAgentListener() {
       `SELECT * FROM master_tasks WHERE status = 'dispatched' ORDER BY created_at ASC LIMIT 10`
     );
     for (const task of (r.rows || [])) {
-      // Always write task to Bitable first (even if Feishu lookup fails later)
-      await writeTaskToBitable(task);
+      // Write task to Bitable only once (prevent duplicate writes every cycle)
+      if (!_bitableWrittenTaskIds.has(task.task_id)) {
+        const bitableRecord = await writeTaskToBitable(task);
+        if (bitableRecord?.record_id) {
+          try {
+            await pool().query(
+              `UPDATE master_tasks
+               SET source_data = COALESCE(source_data, '{}'::jsonb) || $1::jsonb,
+                   updated_at = NOW()
+               WHERE task_id = $2`,
+              [JSON.stringify({ task_response_record_id: bitableRecord.record_id }), task.task_id]
+            );
+          } catch (e) {
+            console.error('[master:ops] persist task_response_record_id failed:', e?.message);
+          }
+        }
+        _bitableWrittenTaskIds.add(task.task_id);
+      }
 
       if (!task.assignee_username) continue;
 
       const fu = await lookupFeishuUserByUsername(task.assignee_username);
       if (!fu?.open_id) {
-        console.warn(`[master:ops] No Feishu user for ${task.assignee_username}, task already written to Bitable`);
+        const retries = (_dispatchRetryCount.get(task.task_id) || 0) + 1;
+        _dispatchRetryCount.set(task.task_id, retries);
+        if (retries <= 1) {
+          console.warn(`[master:ops] No Feishu user for ${task.assignee_username} (task ${task.task_id}), will auto-transition after 3 retries`);
+        }
+        // After 3 retries, force transition to pending_response so the task doesn't loop forever
+        if (retries >= 3) {
+          console.warn(`[master:ops] Forcing ${task.task_id} to pending_response (no Feishu user after ${retries} retries)`);
+          await transitionTask(task.task_id, 'pending_response', 'ops_supervisor', {
+            note: `Auto-transitioned: no Feishu user found for ${task.assignee_username}`
+          });
+          _dispatchRetryCount.delete(task.task_id);
+          actions++;
+        }
         continue;
       }
 
@@ -558,22 +682,17 @@ async function opsAgentListener() {
       } catch (e) {}
 
       let sendResult;
-      if (formUrl) {
-        // Send interactive card with form link button
-        const card = buildTaskDispatchCard(task, formUrl, { isFirstDispatch });
-        sendResult = await sendLarkCard(fu.open_id, card);
-      } else {
-        // Fallback to plain text if form URL not available
-        const sev = task.severity === 'high' ? '🔴' : '🟡';
-        const newBadge = isFirstDispatch ? '🆕 新任务 · ' : '🔄 追踪 · ';
-        const roleLabel = task.assignee_role === 'store_production_manager' ? '出品经理' : '店长';
-        const msgText = `${newBadge}${sev} 异常通知 [${task.task_id}]\n\n${roleLabel}您好，系统检测到以下异常：\n\n📋 ${task.title}\n\n${task.detail || ''}\n\n⚠️ 请解释原因并上传整改措施\n（直接回复文字说明 + 整改照片）`;
-        sendResult = await sendLarkMessage(fu.open_id, prefixWithAgentName('ops_supervisor', msgText));
-      }
+      // 直接发送交互卡片（不再使用表单链接）
+      const card = buildTaskDispatchCard(task, { isFirstDispatch });
+      sendResult = await sendLarkCard(fu.open_id, card);
 
       if (sendResult?.ok) {
+        // 调试日志：记录飞书返回的完整结构
+        console.log('[master:ops] sendLarkCard result:', JSON.stringify(sendResult.data));
+        const msgId = sendResult.data?.data?.message_id || sendResult.data?.message_id || '';
+        console.log('[master:ops] extracted message_id:', msgId);
         await transitionTask(task.task_id, 'pending_response', 'ops_supervisor', {
-          feishu_msg_id: sendResult.data?.data?.message_id || ''
+          feishu_msg_id: msgId
         });
 
         // 记录 outbound 消息
@@ -767,7 +886,7 @@ async function masterHandleRejected() {
 }
 
 // ── 5f. Chief Evaluator Listener ──
-// 扫描 pending_settlement 任务 → 计算绩效影响 → settled
+// 扫描 pending_settlement 任务 → 仅做结算归档（不再执行旧OP周积分扣分与培训触发）→ settled
 async function chiefEvaluatorListener() {
   try {
     const r = await pool().query(
@@ -777,61 +896,24 @@ async function chiefEvaluatorListener() {
 
     let count = 0;
     for (const task of r.rows) {
-      // 计算绩效影响（使用扣分规则）
-      let scoreImpact = 0;
-      let reason = '';
-
-      // 从agents.js导入的扣分规则（这里简化处理）
-      const deductMap = await getIssueScoreRulesMap();
-      const deduct = deductMap[task.category] || { normal: 5, major: 10 };
-      const scoreImpactVal = -(task.severity === 'high' ? deduct.major : deduct.normal);
-      scoreImpact = scoreImpactVal;
-      reason = `${task.category}异常(${task.severity})扣${Math.abs(scoreImpact)}分`;
-
-      // 检查响应时效
-      if (task.dispatched_at && task.responded_at) {
-        const responseHours = (new Date(task.responded_at) - new Date(task.dispatched_at)) / 3600000;
-        if (responseHours > 2) {
-          scoreImpact -= 2;
-          reason += `；超时响应(${responseHours.toFixed(1)}h)额外扣2分`;
-        }
-      }
+      const responseHours = (task.dispatched_at && task.responded_at)
+        ? ((new Date(task.responded_at) - new Date(task.dispatched_at)) / 3600000)
+        : null;
 
       const updated = await transitionTask(task.task_id, 'settled', 'chief_evaluator', {
         settlement_data: {
-          scoreImpact,
-          reason,
+          scoreImpact: 0,
+          reason: '旧OP周绩效扣分体系已停用；该任务仅完成闭环归档，不做积分扣减。',
           category: task.category,
           severity: task.severity,
-          responseTime: task.dispatched_at && task.responded_at
-            ? ((new Date(task.responded_at) - new Date(task.dispatched_at)) / 3600000).toFixed(1) + 'h'
-            : 'N/A',
+          responseTime: responseHours == null ? 'N/A' : `${responseHours.toFixed(1)}h`,
           settledAt: new Date().toISOString()
         },
-        score_impact: scoreImpact
+        score_impact: 0
       });
 
       if (updated) {
         count++;
-        
-        // 联动 Train Agent：如果扣分严重 (<= -10)，自动触发培训需求
-        if (scoreImpact <= -10 && task.assignee_username) {
-          const trainingTaskId = `TR-${Date.now().toString().slice(-6)}-${Math.random().toString(36).slice(2, 6)}`;
-          await pool().query(
-            `INSERT INTO training_tasks (task_id, type, title, target_role, assignee_username, store, brand, status)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 'draft_need')`,
-            [
-              trainingTaskId,
-              'skill_upgrade',
-              `专项提升：${task.category}改善`,
-              task.assignee_role || 'store_manager',
-              task.assignee_username,
-              task.store,
-              task.brand || ''
-            ]
-          );
-          console.log(`[master:evaluator] Generated training need ${trainingTaskId} for ${task.assignee_username} due to low score`);
-        }
       }
     }
     return count;
@@ -1027,13 +1109,7 @@ async function masterFinalNotification() {
       if (task.assignee_username) {
         const fu = await lookupFeishuUserByUsername(task.assignee_username);
         if (fu?.open_id) {
-          // 计算当前周绩效总分
-          const weekScore = await calculateWeeklyScore(task.assignee_username);
-          const settlement = task.settlement_data || {};
-          const impact = task.score_impact || 0;
-          const impactText = impact < 0 ? `扣${Math.abs(impact)}分` : '不扣分';
-
-          const msgText = `📋 任务完成通知 [${task.task_id}]\n\n✅ ${task.title}\n\n📊 绩效结算：\n• 处理结果：已解决\n• 绩效影响：${impactText}（${settlement.reason || ''}）\n• 本周当前绩效：${weekScore}分\n\n感谢配合处理！`;
+          const msgText = `📋 任务完成通知 [${task.task_id}]\n\n✅ ${task.title}\n\n该任务已完成闭环并归档。\n（旧OP周绩效积分已停用，本任务不做周积分扣减）\n\n感谢配合处理！`;
           await sendLarkMessage(fu.open_id, prefixWithAgentName('master', msgText));
         }
       }
@@ -1053,26 +1129,45 @@ async function masterFinalNotification() {
 // ─────────────────────────────────────────────
 
 // 当用户在飞书回复消息时，检查是否有待回复的任务
-export async function handleTaskResponse(username, text, imageUrls) {
+export async function handleTaskResponse(username, text, imageUrls, parentMessageId = null) {
   try {
-    // 查找该用户有没有 pending_response 的任务
-    const r = await pool().query(
-      `SELECT * FROM master_tasks
-       WHERE assignee_username = $1 AND status = 'pending_response'
-       ORDER BY dispatched_at ASC LIMIT 1`,
-      [username]
-    );
-    const task = r.rows?.[0];
+    let task = null;
+    
+    // 优先通过 parentMessageId 精确匹配任务
+    if (parentMessageId) {
+      const r = await pool().query(
+        `SELECT * FROM master_tasks
+         WHERE assignee_username = $1 AND status = 'pending_response'
+         AND feishu_msg_ids ? $2
+         ORDER BY dispatched_at ASC LIMIT 1`,
+        [username, parentMessageId]
+      );
+      task = r.rows?.[0];
+      console.log(`[master] Task lookup by parent_message_id: ${parentMessageId}, found: ${task?.task_id || 'none'}`);
+    }
+    
+    // 降级到老逻辑（最新一条）
+    if (!task) {
+      const r = await pool().query(
+        `SELECT * FROM master_tasks
+         WHERE assignee_username = $1 AND status = 'pending_response'
+         ORDER BY dispatched_at ASC LIMIT 1`,
+        [username]
+      );
+      task = r.rows?.[0];
+    }
+    
     if (!task) return null; // 不是任务回复，走正常agent路由
 
     // 记录反馈并推进状态
     const updated = await transitionTask(task.task_id, 'pending_review', 'master', {
       response_text: text || '',
-      response_images: Array.isArray(imageUrls) ? imageUrls : []
+      response_images: Array.isArray(imageUrls) ? imageUrls : [],
+      parent_message_id: parentMessageId // 记录关联关系
     });
 
     if (updated) {
-      console.log(`[master] Task ${task.task_id} response received from ${username}`);
+      console.log(`[master] Task ${task.task_id} response received from ${username} via reply`);
       return {
         handled: true,
         taskId: task.task_id,

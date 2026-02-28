@@ -5,7 +5,8 @@ Page({
     scanParams: null,
     showAuthModal: false,
     showLegacyMemberTip: false,
-    legacyMemberPoints: 0
+    legacyMemberPoints: 0,
+    inputPhone: ''
   },
 
   onLoad: function(options) {
@@ -41,7 +42,7 @@ Page({
       if (String(e.detail.errMsg).indexOf('no permission') >= 0) {
         wx.showModal({
           title: '无法获取手机号',
-          content: '请确认小程序后台已开启"获取手机号"接口权限',
+          content: '请确认小程序后台已开启"获取手机号"接口权限（个人主体或未完成微信认证的企业无法使用此接口）',
           showCancel: false
         });
         return;
@@ -90,10 +91,6 @@ Page({
         wx.showToast({ title: '入会失败，请重试', icon: 'none' });
       }
     });
-  },
-
-  onAuthTap: function() {
-    console.log('点击授权按钮');
   },
 
   navigateToKeruYun: function() {

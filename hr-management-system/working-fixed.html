@@ -10076,7 +10076,8 @@
     </div>
 
     <script src="/assets/vendor/pdfjs/pdf.min.js"></script>
-    <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <script>if(typeof XLSX==='undefined'){document.write('<scr'+'ipt src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"><\/scr'+'ipt>')}</script>
 
     <script>
         console.log('=== 年年有喜管理系统启动 ===');
@@ -12791,7 +12792,7 @@
         }
 
         function hrmsIsRoleCanSeeDailyReport(role) {
-            return role === ROLES.ADMIN || role === ROLES.HQ_MANAGER || role === ROLES.STORE_MANAGER || role === ROLES.PRODUCTION_MANAGER;
+            return canAccessModulePage('daily-report', role);
         }
 
         function hrmsIsRoleCanWriteDailyReport(role) {
@@ -12820,13 +12821,44 @@
         }
 
         function hrmsCanAccessPayments(role) {
-            const r = String(role || '').trim();
-            return r === ROLES.ADMIN || r === ROLES.HQ_MANAGER || r === ROLES.HR_MANAGER || r === ROLES.STORE_MANAGER || r === ROLES.CASHIER || r === ROLES.HR_MANAGER;
+            return canAccessModulePage('payment', role);
         }
 
         function hrmsCanCreatePayments(role) {
             const r = String(role || '').trim();
             return r === ROLES.ADMIN || r === ROLES.HQ_MANAGER || r === ROLES.HR_MANAGER || r === ROLES.STORE_MANAGER;
+        }
+
+        function getRoleModulePages(role) {
+            const r = String(role || '').trim();
+            if (r === ROLES.ADMIN) return null; // null means all modules
+            const byRole = {
+                [ROLES.EMPLOYEE]: ['profile', 'attendance', 'points', 'exam'],
+                [ROLES.STORE_MANAGER]: ['profile', 'attendance', 'employees', 'daily-report', 'approvals', 'payment', 'exam', 'rewards', 'points', 'reports', 'agents'],
+                [ROLES.PRODUCTION_MANAGER]: ['profile', 'attendance', 'reports', 'exam', 'points', 'agents'],
+                [ROLES.HQ_MANAGER]: ['profile', 'attendance', 'daily-report', 'approvals', 'employees', 'payment', 'exam', 'rewards', 'points', 'knowledge', 'reports', 'agents'],
+                [ROLES.HR_MANAGER]: ['profile', 'attendance', 'employees', 'approvals', 'payment', 'reports', 'exam'],
+                [ROLES.CASHIER]: ['profile', 'attendance', 'payment', 'exam']
+            };
+            return byRole[r] || byRole[ROLES.EMPLOYEE];
+        }
+
+        function canAccessModulePage(pageName, role) {
+            const page = String(pageName || '').trim();
+            const pages = getRoleModulePages(role == null ? currentUser?.role : role);
+            if (pages === null) return true;
+            return Array.isArray(pages) && pages.includes(page);
+        }
+
+        function getRoleBottomNavPages(role) {
+            const r = String(role || '').trim();
+            if (r === ROLES.ADMIN) return ['profile', 'daily-report', 'reports', 'agents'];
+            if (r === ROLES.STORE_MANAGER) return ['profile', 'attendance', 'daily-report', 'payment'];
+            if (r === ROLES.PRODUCTION_MANAGER) return ['profile', 'attendance', 'reports', 'agents'];
+            if (r === ROLES.HQ_MANAGER) return ['profile', 'daily-report', 'approvals', 'reports'];
+            if (r === ROLES.HR_MANAGER) return ['profile', 'attendance', 'approvals', 'reports'];
+            if (r === ROLES.CASHIER) return ['profile', 'attendance', 'payment', 'exam'];
+            return ['profile', 'attendance', 'points', 'exam'];
         }
 
         function getHomePageName() {
@@ -13028,39 +13060,14 @@
             const usersNav = document.querySelector('.nav-item[data-page="users"]');
             if (usersNav) usersNav.style.display = 'none';
 
-            const empNav = document.querySelector('.nav-item[data-page="employees"]');
-            const canSeeEmployeesNav = currentUser && (currentUser.role === ROLES.ADMIN || currentUser.role === ROLES.HQ_MANAGER || currentUser.role === ROLES.STORE_MANAGER || currentUser.role === ROLES.HR_MANAGER);
-            if (empNav) empNav.style.display = canSeeEmployeesNav ? '' : 'none';
-
-            const approvalsNav = document.querySelector('.nav-item[data-page="approvals"]');
-            const _appRole = String(currentUser?.role || '').trim();
-            const canSeeApprovalsNav = currentUser && (_appRole === ROLES.ADMIN || _appRole === ROLES.HQ_MANAGER || _appRole === ROLES.HR_MANAGER || _appRole === ROLES.STORE_MANAGER || _appRole === ROLES.CASHIER || _appRole === ROLES.HR_MANAGER || _appRole.startsWith('custom_'));
-            if (approvalsNav) approvalsNav.style.display = canSeeApprovalsNav ? '' : 'none';
-
-            const paymentNav = document.querySelector('.nav-item[data-page="payment"]');
-            if (paymentNav) paymentNav.style.display = hrmsCanAccessPayments(currentUser?.role) ? '' : 'none';
-
-            const rewardsNav = document.querySelector('.nav-item[data-page="rewards"]');
-            const canSeeRewards = currentUser && (currentUser.role === ROLES.ADMIN || currentUser.role === ROLES.HQ_MANAGER || currentUser.role === ROLES.STORE_MANAGER || currentUser.role === ROLES.HR_MANAGER);
-            if (rewardsNav) rewardsNav.style.display = canSeeRewards ? '' : 'none';
-
-            const pointsNav = document.querySelector('.nav-item[data-page="points"]');
-            const canSeePoints = currentUser && (
-                currentUser.role === ROLES.EMPLOYEE || currentUser.role === 'employee'
-                || currentUser.role === ROLES.ADMIN || currentUser.role === ROLES.HR_MANAGER || currentUser.role === ROLES.STORE_MANAGER
-            );
-            if (pointsNav) pointsNav.style.display = canSeePoints ? '' : 'none';
+            ['employees', 'approvals', 'payment', 'rewards', 'points', 'attendance', 'daily-report', 'reports', 'agents', 'exam', 'profile', 'knowledge']
+                .forEach((page) => {
+                    const nav = document.querySelector(`.nav-item[data-page="${page}"]`);
+                    if (nav) nav.style.display = canAccessModulePage(page) ? '' : 'none';
+                });
 
             const settingsNav = document.querySelector('.nav-item[data-page="settings"]');
             if (settingsNav) settingsNav.style.display = isAdminUser() ? '' : 'none';
-
-            const drNav = document.querySelector('.nav-item[data-page="daily-report"]');
-            const canSeeDaily = currentUser && hrmsIsRoleCanSeeDailyReport(currentUser.role);
-            if (drNav) drNav.style.display = canSeeDaily ? '' : 'none';
-
-            const repNav = document.querySelector('.nav-item[data-page="reports"]');
-            const canSeeReports = currentUser && repRoleCanSeeReports();
-            if (repNav) repNav.style.display = canSeeReports ? '' : 'none';
 
             const forecastNav = document.getElementById('nav-forecast');
             const canSeeForecast = !!currentUser;
@@ -13091,6 +13098,13 @@
             if (pageName === 'users') {
                 if (!isAdminUser()) {
                     showNotification('仅管理员可访问该模块', 'warning');
+                    pageName = getHomePageName();
+                }
+            }
+
+            if (['profile', 'attendance', 'daily-report', 'employees', 'approvals', 'payment', 'exam', 'rewards', 'points', 'reports', 'agents', 'knowledge'].includes(pageName)) {
+                if (!canAccessModulePage(pageName)) {
+                    showNotification('您没有该模块访问权限', 'warning');
                     pageName = getHomePageName();
                 }
             }
@@ -16965,9 +16979,10 @@ ${knowledgeContent.slice(0, 30000)}`;
         }
 
         function getOpRandomTypeSelectHtml(value, cls) {
-            const v = String(value || OP_RANDOM_TYPE_OPTIONS[0].key).trim();
-            const options = OP_RANDOM_TYPE_OPTIONS.map((x) => `<option value="${escapeHtml(x.key)}" ${x.key===v?'selected':''}>${escapeHtml(x.label)}</option>`).join('');
-            return `<select class="${cls}" style="width:100%; padding: 8px; border-radius: 6px; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.1); color: #fff;">${options}</select>`;
+            const v = String(value || '').trim();
+            const dlId = 'dl-rand-type-' + Math.random().toString(36).slice(2, 8);
+            const presetOpts = OP_RANDOM_TYPE_OPTIONS.map((x) => `<option value="${escapeHtml(x.label)}"></option>`).join('');
+            return `<input class="${cls}" list="${dlId}" value="${escapeHtml(v)}" placeholder="选择或输入自定义类型" style="width:100%; padding: 8px; border-radius: 6px; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.1); color: #fff; font-size:13px;"><datalist id="${dlId}">${presetOpts}</datalist>`;
         }
 
         function getOpStoreOptions(selectedStore = '', allowAll = false) {
@@ -17104,7 +17119,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
                             <div>
                                 <label style="font-size:11px;color:#94a3b8;display:block;margin-bottom:4px;font-weight:600;">类型</label>
-                                ${getOpRandomTypeSelectHtml(item.type || OP_RANDOM_TYPE_OPTIONS[0].key, 'op-random-type')}
+                                ${getOpRandomTypeSelectHtml((() => { const t = item.type || ''; const found = OP_RANDOM_TYPE_OPTIONS.find(x => x.key === t); return found ? found.label : t; })(), 'op-random-type')}
                             </div>
                             <div>
                                 <label style="font-size:11px;color:#94a3b8;display:block;margin-bottom:4px;font-weight:600;">指定门店</label>
@@ -17196,7 +17211,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
                         <div>
                             <label style="font-size:11px;color:#94a3b8;display:block;margin-bottom:4px;font-weight:600;">类型</label>
-                            ${getOpRandomTypeSelectHtml(OP_RANDOM_TYPE_OPTIONS[0].key, 'op-random-type')}
+                            ${getOpRandomTypeSelectHtml(OP_RANDOM_TYPE_OPTIONS[0].label, 'op-random-type')}
                         </div>
                         <div>
                             <label style="font-size:11px;color:#94a3b8;display:block;margin-bottom:4px;font-weight:600;">指定门店</label>
@@ -26658,72 +26673,120 @@ ${knowledgeContent.slice(0, 30000)}`;
         function hrmsNormalizeCsvHeaders(headers) {
             const alias = {
                 '员工编号': 'id',
+                '工号': 'id',
+                '编号': 'id',
+                '序号': 'id',
                 '账号': 'username',
                 '用户名': 'username',
+                '登录名': 'username',
+                '登录账号': 'username',
                 '密码': 'password',
+                '初始密码': 'password',
                 '姓名': 'name',
+                '员工姓名': 'name',
+                '名字': 'name',
+                '员工名': 'name',
                 '性别': 'gender',
                 '出生年月': 'birthday',
                 '生日': 'birthday',
+                '出生日期': 'birthday',
                 '身份证号码': 'idCardNumber',
+                '身份证': 'idCardNumber',
                 '身份证号': 'idCardNumber',
+                '证件号码': 'idCardNumber',
                 '籍贯': 'hometown',
-                '户籍所在地': 'registeredResidence',
+                '户籍地': 'registeredResidence',
+                '户口所在地': 'registeredResidence',
                 '户籍': 'registeredResidence',
                 '婚姻状况': 'maritalStatus',
-                '婚姻': 'maritalStatus',
-                '微信号': 'wechat',
+                '婚否': 'maritalStatus',
                 '微信': 'wechat',
+                '微信号': 'wechat',
                 '角色': 'role',
-                '所属门店': 'store',
+                '职位角色': 'role',
+                '职务': 'role',
                 '门店': 'store',
-                '直属上级账号': 'managerUsername',
+                '所属门店': 'store',
+                '店铺': 'store',
+                '工作门店': 'store',
                 '直属上级': 'managerUsername',
-                '上级账号': 'managerUsername',
+                '上级': 'managerUsername',
+                '上级领导': 'managerUsername',
+                '主管': 'managerUsername',
                 '部门': 'department',
-                '职位': 'position',
+                '所属部门': 'department',
                 '岗位': 'position',
+                '职位': 'position',
                 '级别': 'level',
                 '工资': 'salary',
+                '薪资': 'salary',
+                '月薪': 'salary',
+                '基本工资': 'salary',
                 '学历': 'education',
+                '最高学历': 'education',
                 '入职日期': 'joinDate',
+                '入职时间': 'joinDate',
+                '入职': 'joinDate',
                 '工资卡号公': 'bankCardCompany',
+                '公司卡号': 'bankCardCompany',
                 '工资银行公': 'bankNameCompany',
+                '公司开户行': 'bankNameCompany',
                 '工资卡号私': 'bankCardPersonal',
+                '个人卡号': 'bankCardPersonal',
                 '工资银行私': 'bankNamePersonal',
+                '个人开户行': 'bankNamePersonal',
                 '工资卡号': 'bankCardPersonal',
                 '银行卡号': 'bankCardPersonal',
+                '银行卡': 'bankCardPersonal',
+                '卡号': 'bankCardPersonal',
+                '开户行': 'bankNamePersonal',
                 '电话': 'phone',
                 '手机号': 'phone',
-                '邮箱': 'email',
-                '紧急联系人': 'emergencyContactName',
-                '联系人电话': 'emergencyContactPhone',
-                '联系人关系': 'emergencyContactRelation',
-                '状态': 'status',
-                '年龄': '__age',
-                '年龄段': '__age',
-                '工号': 'username',
-                '账号/工号': 'username',
-                '工号/账号': 'username',
-                '账号／工号': 'username',
-                '工号／账号': 'username',
-                '账号_工号': 'username',
-                '编号': 'id',
-                '员工编号': 'id',
-                '名字': 'name',
-                '名称': 'name',
                 '手机': 'phone',
                 '联系电话': 'phone',
-                '所属品牌': '__brand',
-                '品牌': '__brand'
+                '手机号码': 'phone',
+                '邮箱': 'email',
+                '电子邮箱': 'email',
+                '紧急联系人': 'emergencyContactName',
+                '联系人': 'emergencyContactName',
+                '联系人电话': 'emergencyContactPhone',
+                '联系人手机': 'emergencyContactPhone',
+                '紧急电话': 'emergencyContactPhone',
+                '联系人关系': 'emergencyContactRelation',
+                '关系': 'emergencyContactRelation',
+                '与本人关系': 'emergencyContactRelation',
+                '状态': 'status',
+                '员工状态': 'status',
+                '在职状态': 'status'
             };
+            
             return (headers || []).map(h => {
-                const key = String(h || '').trim().replace(/[\u200B-\u200D\uFEFF]/g, '').replace(/\(.*\)$/, '').replace(/（.*）$/, '').replace(/\s+/g, '').trim();
+                // 清理表头：去除BOM、空格、括号内容
+                let key = String(h || '').trim()
+                    .replace(/[\u200B-\u200D\uFEFF]/g, '')  // 去除零宽字符/BOM
+                    .replace(/\(.*\)$/, '')               // 去除英文括号及内容
+                    .replace(/（.*）$/, '')                 // 去除中文括号及内容
+                    .replace(/\s+/g, '')                   // 去除所有空格
+                    .trim();
+                
+                // 直接匹配
                 if (alias[key]) return alias[key];
-                // 尝试用/分割的第一部分匹配
-                const parts = key.split(/[\/\\|／]/);
-                for (const p of parts) { if (alias[p.trim()]) return alias[p.trim()]; }
-                return alias[key] || key;
+                
+                // 尝试用多种分隔符分割后匹配第一部分
+                const delimiters = /[\/\\|／\-_]/;
+                const parts = key.split(delimiters);
+                for (const p of parts) {
+                    const trimmed = p.trim();
+                    if (alias[trimmed]) return alias[trimmed];
+                }
+                
+                // 尝试模糊匹配：包含关键词
+                for (const [cnKey, enKey] of Object.entries(alias)) {
+                    if (key.includes(cnKey)) return enKey;
+                }
+                
+                // 都没匹配到，返回原始值（小写化）
+                return key.toLowerCase();
             });
         }
 
@@ -26742,8 +26805,12 @@ ${knowledgeContent.slice(0, 30000)}`;
             const templateHeaders = ['username', 'password', 'name', 'gender', 'birthday', 'idCardNumber', 'hometown', 'registeredResidence', 'maritalStatus', 'wechat', 'role', 'store', 'managerUsername', 'department', 'position', 'level', 'salary', 'education', 'joinDate', 'bankCardCompany', 'bankNameCompany', 'bankCardPersonal', 'bankNamePersonal', 'bankCard', 'phone', 'email', 'emergencyContactName', 'emergencyContactPhone', 'emergencyContactRelation', 'status', 'id'];
             const employees = HRMS_STORE.getEmployees();
             const byUsername = new Map((employees || []).map(e => [String(e?.username || ''), e]));
+            const nameToUser = new Map();
+            (employees || []).forEach(e => { const n = String(e?.name || '').trim(); if (n) nameToUser.set(n, String(e?.username || '')); });
             let added = 0;
             let updated = 0;
+            let skipped = 0;
+            const skippedNames = [];
 
             (objs || []).forEach(o => {
                 let username = String(o.username ?? '').trim();
@@ -26754,6 +26821,13 @@ ${knowledgeContent.slice(0, 30000)}`;
                     if (nm) username = ph ? (nm + '_' + ph.slice(-4)) : nm;
                 }
                 if (!username) return;
+                const importName = String(o.name || '').trim();
+                // Dedup: if name exists under a DIFFERENT username, skip to prevent cross-person overwrite
+                if (importName && nameToUser.has(importName) && nameToUser.get(importName) !== username) {
+                    skipped += 1;
+                    skippedNames.push(importName + '(已有账号' + nameToUser.get(importName) + ')');
+                    return;
+                }
                 const next = {};
                 templateHeaders.forEach(k => {
                     next[k] = Object.prototype.hasOwnProperty.call(o, k) ? String(o[k] ?? '') : '';
@@ -26775,17 +26849,26 @@ ${knowledgeContent.slice(0, 30000)}`;
 
                 if (byUsername.has(username)) {
                     const old = byUsername.get(username) || {};
-                    byUsername.set(username, { ...old, ...next, id: old.id || next.id, username });
+                    // Only overwrite fields that have non-empty values from the import
+                    const merged = { ...old };
+                    Object.keys(next).forEach(k => {
+                        if (k === 'id') return; // never overwrite id
+                        if (next[k] !== '' && next[k] != null) merged[k] = next[k];
+                    });
+                    merged.username = username;
+                    merged.id = old.id || next.id;
+                    byUsername.set(username, merged);
                     updated += 1;
                 } else {
                     byUsername.set(username, next);
+                    nameToUser.set(importName, username);
                     added += 1;
                 }
             });
 
             HRMS_STORE.setEmployees(Array.from(byUsername.values()));
             loadEmployeesData();
-            return { added, updated };
+            return { added, updated, skipped, skippedNames };
         }
 
         function hrmsImportUsersFromCsvObjects(objs) {
@@ -26838,26 +26921,85 @@ ${knowledgeContent.slice(0, 30000)}`;
                 try {
                     const file = await hrmsPickCsvFile();
                     if (!file) return;
+                    console.log('[batch-import] file:', file.name, 'size:', file.size, 'type:', file.type);
                     const rows = await hrmsReadImportRows(file);
+                    console.log('[batch-import] parsed rows:', rows.length);
                     if (!rows.length) {
                         showNotification('导入文件为空或格式不正确（请检查表头与内容）', 'warning');
                         return;
                     }
-                    const headers = rows[0];
-                    const objs = hrmsCsvRowsToObjects(headers, rows.slice(1));
-                    const { added, updated } = hrmsImportEmployeesFromCsvObjects(objs);
+                    if (rows.length < 2) {
+                        showNotification('导入文件只有表头没有数据行', 'warning');
+                        return;
+                    }
+                    // 自动检测标题行：如果第一行不像表头（关键列匹配数<2），尝试第2行作为表头
+                    let headerRowIdx = 0;
+                    const _testHeaders = (idx) => {
+                        const nh = hrmsNormalizeCsvHeaders(rows[idx] || []);
+                        let score = 0;
+                        if (nh.includes('name')) score++;
+                        if (nh.includes('username')) score++;
+                        if (nh.includes('id')) score++;
+                        if (nh.includes('phone')) score++;
+                        if (nh.includes('store')) score++;
+                        if (nh.includes('role')) score++;
+                        if (nh.includes('gender')) score++;
+                        return score;
+                    };
+                    const row0Score = _testHeaders(0);
+                    console.log('[batch-import] row0 header score:', row0Score, 'row0:', JSON.stringify((rows[0]||[]).slice(0,5)));
+                    if (row0Score < 2 && rows.length > 2) {
+                        const row1Score = _testHeaders(1);
+                        console.log('[batch-import] row1 header score:', row1Score, 'row1:', JSON.stringify((rows[1]||[]).slice(0,5)));
+                        if (row1Score > row0Score) {
+                            headerRowIdx = 1;
+                            console.log('[batch-import] detected title row, using row 1 as header');
+                        }
+                        // 继续尝试第3行（某些模版有2行标题）
+                        if (row1Score < 2 && rows.length > 3) {
+                            const row2Score = _testHeaders(2);
+                            if (row2Score > row1Score) {
+                                headerRowIdx = 2;
+                                console.log('[batch-import] detected 2 title rows, using row 2 as header');
+                            }
+                        }
+                    }
+                    const headers = rows[headerRowIdx];
+                    const normalizedHeaders = hrmsNormalizeCsvHeaders(headers);
+                    console.log('[batch-import] headerRowIdx:', headerRowIdx, 'original headers:', JSON.stringify(headers));
+                    console.log('[batch-import] normalized headers:', JSON.stringify(normalizedHeaders));
+                    const dataRows = rows.slice(headerRowIdx + 1);
+                    const objs = hrmsCsvRowsToObjects(headers, dataRows);
+                    console.log('[batch-import] parsed objects:', objs.length, 'sample:', JSON.stringify(objs[0] || {}));
+                    if (!objs.length) {
+                        showNotification('导入文件解析后无有效数据行', 'warning');
+                        return;
+                    }
+                    // 检查是否能识别到关键字段
+                    const hasName = normalizedHeaders.includes('name');
+                    const hasUsername = normalizedHeaders.includes('username');
+                    const hasId = normalizedHeaders.includes('id');
+                    if (!hasName && !hasUsername && !hasId) {
+                        showNotification('导入失败：未识别到 姓名/账号/员工编号 列，请检查表头（支持：姓名、员工姓名、账号、用户名、工号、员工编号）', 'error');
+                        return;
+                    }
+                    const { added, updated, skipped, skippedNames } = hrmsImportEmployeesFromCsvObjects(objs);
+                    console.log('[batch-import] result: added=', added, 'updated=', updated, 'skipped=', skipped, 'skippedNames=', skippedNames);
                     const synced = await hrmsFlushStateSave();
-                    showNotification(`导入完成：新增 ${added}，覆盖 ${updated}`, 'success');
+                    let msg = `导入完成：新增 ${added}，更新 ${updated}`;
+                    if (skipped > 0) msg += `，跳过重名 ${skipped} 条（${skippedNames.slice(0,5).join('、')}${skippedNames.length > 5 ? '等' : ''}）`;
+                    showNotification(msg, skipped > 0 ? 'warning' : 'success');
+                    loadEmployeesData();
                     if (!synced) {
                         showNotification('导入已写入本地，但同步到服务器失败（请稍后重试或刷新后检查）', 'warning');
                     }
                 } catch (e) {
-                    console.error(e);
+                    console.error('[batch-import] error:', e);
                     if (String(e?.message || '').includes('xlsx_library_missing')) {
-                        showNotification('当前环境缺少 Excel 解析能力，请改为 CSV 导入', 'error');
+                        showNotification('Excel解析库未加载成功，请改用 CSV 格式导入（将Excel另存为CSV后重试）', 'error');
                         return;
                     }
-                    showNotification('导入失败：请检查文件格式（支持 CSV/XLSX）和表头字段', 'error');
+                    showNotification('导入失败：' + String(e?.message || '请检查文件格式'), 'error');
                 }
             })();
         }
@@ -29360,6 +29502,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                 const store = escapeHtml(rawStore);
                 const weather = escapeHtml(String(r?.data?.weather || '').trim());
                 const submittedAt = String(r?.submittedAt || r?.submitted_at || '').trim();
+                const submitterName = escapeHtml(String(r?.submitterName || '').trim());
                 const submittedBadge = submittedAt ? '<span style="margin-left:6px; font-size:10px; padding:2px 7px; border-radius:99px; background:rgba(34,197,94,0.15); color:#22c55e; font-weight:800;">已提交</span>' : '<span style="margin-left:6px; font-size:10px; padding:2px 7px; border-radius:99px; background:rgba(245,158,11,0.15); color:#f59e0b; font-weight:800;">草稿</span>';
                 const actual = Number(r?.data?.actual || 0);
                 const budget = Number(r?.data?.budget || 0);
@@ -29383,6 +29526,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                         </div>
                         <div class="dr-report-sub">
                             <span style="color:#60a5fa; font-weight:800;">🏬 ${store}</span>
+                            ${submitterName ? `<span style="color:rgba(200,215,230,0.7);">·</span><span style="color:rgba(200,215,230,0.7);">👤 ${submitterName}</span>` : ''}
                             ${weather ? `<span style="color:rgba(200,215,230,0.7);">·</span><span style="color:rgba(200,215,230,0.7);">${weather}</span>` : ''}
                         </div>
 
@@ -29556,8 +29700,7 @@ ${knowledgeContent.slice(0, 30000)}`;
         }
 
         function repRoleCanSeeReports() {
-            const r = String(currentUser?.role || '').trim();
-            return !!currentUser && (r === ROLES.ADMIN || r === ROLES.HQ_MANAGER || r === ROLES.STORE_MANAGER || r === ROLES.HR_MANAGER || r === ROLES.PRODUCTION_MANAGER || r === ROLES.CASHIER || r.startsWith('custom_'));
+            return !!currentUser && canAccessModulePage('reports', currentUser?.role);
         }
 
         function repRoleCanSeeBusinessReport() {
@@ -30120,6 +30263,7 @@ ${knowledgeContent.slice(0, 30000)}`;
 
         async function repInventoryForecastUpload() {
             if (!currentUser) return;
+            if (!isAdminUser()) { showNotification('仅管理员可上传销售数据', 'warning'); return; }
             const state = repCollectInventoryForecastState();
             const bizLabelLocal = (b) => (b === 'dinein' ? '堂食' : '外卖');
             const slotLabelLocal = (s) => (s === 'dinner' ? '晚市' : (s === 'afternoon' ? '下午茶' : '午市'));
@@ -30473,7 +30617,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                     </table>
                 </div>
 
-                <div style="margin-top:12px; background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.08); border-radius:12px; padding:12px;">
+                ${isAdminUser() ? `<div style="margin-top:12px; background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.08); border-radius:12px; padding:12px;">
                     <div style="font-size:12px; font-weight:800; color:rgba(226,232,240,0.92); margin-bottom:8px;">历史销售数据上传（持续更新）</div>
                     <div style="display:grid; grid-template-columns:1fr; gap:8px; margin-bottom:8px;">
                         <select id="rep-inv-history-biz" style="width:100%; padding:9px 10px; border-radius:8px; border:1px solid rgba(255,255,255,0.16); background:rgba(255,255,255,0.08); color:#fff;">
@@ -30487,7 +30631,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                         <button class="btn btn-secondary" type="button" onclick="repInventoryForecastRun()" style="padding:8px 12px; border-radius:8px;">刷新历史</button>
                     </div>
                     <div style="margin-top:8px; font-size:11px; color:rgba(200,215,230,0.62);">支持 CSV/Excel/PDF，可一次选择多个同类型文件（全Excel/CSV或全PDF），并按所选门店和业务类型上传校验</div>
-                </div>
+                </div>` : ''}
 
                 <div style="margin-top:12px; font-size:12px; font-weight:800; color:rgba(226,232,240,0.92);">历史样本（${bizLabel(historyBizType)}）</div>
                 <div class="rep-table" style="margin-top:8px; overflow-x:auto;">
@@ -33793,6 +33937,7 @@ ${knowledgeContent.slice(0, 30000)}`;
 
             const pageMeta = {
                 dashboard: { icon: '🏠', label: '首页' },
+                profile: { icon: '👤', label: '档案' },
                 attendance: { icon: '👤', label: '打卡' },
                 knowledge: { icon: '📚', label: '知识库' },
                 agents: { icon: '🤖', label: 'Agent' },
@@ -33801,21 +33946,12 @@ ${knowledgeContent.slice(0, 30000)}`;
                 payment: { icon: '💰', label: '请款' },
                 approvals: { icon: '📋', label: '审批' },
                 reports: { icon: '📈', label: '报表' },
-                employees: { icon: '👥', label: '员工' }
+                employees: { icon: '👥', label: '员工' },
+                points: { icon: '💎', label: '积分' }
             };
 
-            let roleMenu = ['dashboard', 'attendance', 'knowledge', 'exam']; // 默认员工
-            if (role === ROLES.STORE_MANAGER) {
-                roleMenu = ['dashboard', 'attendance', 'daily-report', 'payment'];
-            } else if (role === ROLES.HR_MANAGER) {
-                roleMenu = ['dashboard', 'employees', 'approvals', 'payment'];
-            } else if (role === ROLES.CASHIER) {
-                roleMenu = ['dashboard', 'attendance', 'payment', 'approvals'];
-            } else if (role === ROLES.HQ_MANAGER) {
-                roleMenu = ['dashboard', 'attendance', 'daily-report', 'reports'];
-            } else if (role === ROLES.ADMIN) {
-                roleMenu = ['dashboard', 'employees', 'daily-report', 'reports'];
-            }
+            let roleMenu = getRoleBottomNavPages(role).slice(0, 4);
+            while (roleMenu.length < 4) roleMenu.push('profile');
 
             const slots = [
                 document.getElementById('mobile-nav-slot-1'),
@@ -34411,8 +34547,8 @@ ${knowledgeContent.slice(0, 30000)}`;
             try {
                 if ('serviceWorker' in navigator) {
                     // NUCLEAR OPTION: Force unregister ALL service workers and clear ALL caches
-                    const forceVersion = 'hrms-pwa-v153';
-                    const needsNuke = !sessionStorage.getItem('hrms-cache-nuked-v153');
+                    const forceVersion = 'hrms-pwa-v154';
+                    const needsNuke = !sessionStorage.getItem('hrms-cache-nuked-v154');
                     
                     if (needsNuke) {
                         console.log('[HRMS] Nuclear cache clear initiated...');

@@ -17,7 +17,7 @@ import { Readable } from 'stream';
 import zlib from 'zlib';
 import XLSX from 'xlsx';
 import axios from 'axios';
-import { setPool as setAgentPool, ensureAgentTables, registerAgentRoutes, startAgentScheduler, setTaskResponseHook, startBitablePolling, startScheduledTasks, assertCriticalFunctions, getAgentHealthStatus, startWeeklyReportScheduler, sendWeeklyReports, sendMonthlyReports } from './agents.js';
+import { setPool as setAgentPool, ensureAgentTables, registerAgentRoutes, startAgentScheduler, setTaskResponseHook, startBitablePolling, startScheduledTasks, assertCriticalFunctions, verifyLLMHealth, getAgentHealthStatus, startWeeklyReportScheduler, sendWeeklyReports, sendMonthlyReports, sendTestReportsToUser } from './agents.js';
 import { ensureAgentConfigTables, registerAgentConfigRoutes } from "./agent-config-manager.js";
 
 import { setMasterPool, ensureMasterTables, startMasterAgent, registerMasterRoutes, handleTaskResponse } from './master-agent.js';
@@ -27,6 +27,7 @@ import { startDailyFeishuSync, syncDishLibraryCosts } from './feishu-sync.js';
 import { calculateStoreRating, calculateEmployeeScore } from './new-scoring-model.js';
 import { registerNewScoringRoutes } from './new-scoring-api.js';
 import { handleMarginMessage } from './margin-message-handler.js';
+import { registerUploadStatusRoute } from './upload-status.js';
 import { ensureRAGSchema, ragQuery, ragMultiQuery, ragUpdateScope, ragStats } from './rag-tool.js';
 import { ensureTaskBoardSchema, checkTimeoutsAndEscalate, registerTaskBoardRoutes } from './task-board-api.js';
 import { ensureHRMSApiSchema, registerHRMSApiRoutes } from './hrms-api-tools.js';
@@ -241,6 +242,38 @@ function normalizeKnowledgeTags(rawTags, feedAgent, brandScope) {
   return uniq.length ? uniq : null;
 }
 
+import { FEISHU_TABLE_CONFIG } from './feishu-sync.js';
+
+// 根据 appToken 和 tableId 查找对应的 configKey
+function findConfigKeyByTableInfo(appToken, tableId) {
+  if (!appToken || !tableId) return null;
+  const appTokenNorm = String(appToken).trim();
+  const tableIdNorm = String(tableId).trim();
+  
+  for (const [key, config] of Object.entries(FEISHU_TABLE_CONFIG)) {
+    if (typeof config === 'object' && config !== null) {
+      // 处理嵌套配置（如 material_reports.majixian）
+      if (config.app_token && config.table_id) {
+        if (String(config.app_token).trim() === appTokenNorm && 
+            String(config.table_id).trim() === tableIdNorm) {
+          return key;
+        }
+      }
+      // 处理嵌套的品牌配置
+      for (const [subKey, subConfig] of Object.entries(config)) {
+        if (typeof subConfig === 'object' && subConfig !== null && 
+            subConfig.app_token && subConfig.table_id) {
+          if (String(subConfig.app_token).trim() === appTokenNorm && 
+              String(subConfig.table_id).trim() === tableIdNorm) {
+            return `${key}_${subKey}`;
+          }
+        }
+      }
+    }
+  }
+  return null;
+}
+
 async function ensureFeishuGenericRecordsTable() {
   try {
     await pool.query('create extension if not exists pgcrypto');
@@ -250,6 +283,7 @@ async function ensureFeishuGenericRecordsTable() {
         app_token varchar(100) not null,
         table_id varchar(100) not null,
         record_id varchar(100) not null,
+        config_key varchar(60),
         fields jsonb,
         raw jsonb,
         created_at timestamp default current_timestamp,
@@ -257,10 +291,11 @@ async function ensureFeishuGenericRecordsTable() {
         unique (app_token, table_id, record_id)
       )`
     );
+    await pool.query('alter table feishu_generic_records add column if not exists config_key varchar(60)');
     await pool.query('create index if not exists idx_feishu_generic_table on feishu_generic_records (app_token, table_id, updated_at desc)');
     await pool.query('create index if not exists idx_feishu_generic_record on feishu_generic_records (record_id)');
+    await pool.query('create index if not exists idx_feishu_generic_config on feishu_generic_records (config_key, updated_at desc)');
   } catch (e) {
-    if (String(e?.message || e).includes('already exists')) return;
     console.error('[ensureFeishuGenericRecordsTable] Error:', e?.message || e);
     throw e;
   }
@@ -278,7 +313,7 @@ function stripAttachmentLikeFields(fields) {
   return out;
 }
 
-async function upsertFeishuGenericRecord({ appToken, tableId, record }) {
+async function upsertFeishuGenericRecord({ appToken, tableId, record, configKey = null }) {
   if (!appToken || !tableId || !record) return;
   const recordId = String(record?.record_id || '').trim();
   if (!recordId) return;
@@ -286,11 +321,11 @@ async function upsertFeishuGenericRecord({ appToken, tableId, record }) {
   const cleanedFields = stripAttachmentLikeFields(rawFields);
 
   await pool.query(
-    `insert into feishu_generic_records (app_token, table_id, record_id, fields, raw, updated_at)
-     values ($1, $2, $3, $4, $5, now())
+    `insert into feishu_generic_records (app_token, table_id, record_id, config_key, fields, raw, updated_at)
+     values ($1, $2, $3, $4, $5, $6, now())
      on conflict (app_token, table_id, record_id)
-     do update set fields = excluded.fields, raw = excluded.raw, updated_at = now()`,
-    [appToken, tableId, recordId, cleanedFields, record]
+     do update set config_key = excluded.config_key, fields = excluded.fields, raw = excluded.raw, updated_at = now()`,
+    [appToken, tableId, recordId, configKey, cleanedFields, record]
   );
 }
 
@@ -1626,6 +1661,19 @@ app.post('/api/reports/bi/trigger-monthly', authRequired, async (req, res) => {
   }
 });
 
+app.post('/api/reports/bi/test-send', authRequired, async (req, res) => {
+  try {
+    const role = String(req.user?.role || '').trim();
+    if (role !== 'admin') return res.status(403).json({ error: 'admin_only' });
+    const targetUsername = String(req.body?.username || '').trim();
+    if (!targetUsername) return res.status(400).json({ error: 'missing_username' });
+    const result = await sendTestReportsToUser(targetUsername);
+    return res.json(result);
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
 // Bitable Management API
 app.get('/api/bitable/stats', authRequired, async (req, res) => {
   const role = String(req.user?.role || '').trim();
@@ -1765,7 +1813,7 @@ app.get('/api/points/records', authRequired, async (req, res) => {
   const username = String(req.user?.username || '').trim();
   const role = String(req.user?.role || '').trim();
   if (!username) return res.status(400).json({ error: 'missing_user' });
-  if (!(role === 'admin' || role === 'hr_manager' || role === 'store_manager')) return res.status(403).json({ error: 'forbidden' });
+  if (!(role === 'admin' || role === 'hq_manager' || role === 'hr_manager' || role === 'store_manager')) return res.status(403).json({ error: 'forbidden' });
 
   const store = String(req.query?.store || '').trim();
   const name = String(req.query?.name || '').trim().toLowerCase();
@@ -4525,6 +4573,16 @@ app.get('/api/daily-reports', authRequired, async (req, res) => {
     const me = stateFindUserRecord(state0, username) || {};
     const myStore = String(me?.store || '').trim();
 
+    // 构建 username→真名 映射表
+    const allPeople = [...(Array.isArray(state0.employees) ? state0.employees : []), ...(Array.isArray(state0.users) ? state0.users : [])];
+    const nameMap = new Map();
+    allPeople.forEach(p => {
+      const u = String(p?.username || '').trim().toLowerCase();
+      const n = String(p?.name || '').trim();
+      if (u && n && !nameMap.has(u)) nameMap.set(u, n);
+    });
+    const resolveRealName = (uname) => { const k = String(uname || '').trim().toLowerCase(); return nameMap.get(k) || String(uname || '').trim() || ''; };
+
     const store = (role === 'store_manager' || role === 'store_production_manager') ? myStore : storeQ;
     let items = Array.isArray(state0.dailyReports) ? state0.dailyReports.slice() : [];
     if (store) items = items.filter(r => String(r?.store || '').trim() === String(store).trim());
@@ -4565,11 +4623,11 @@ app.get('/api/daily-reports', authRequired, async (req, res) => {
         
         return {
           ...item,
+          submitterName: resolveRealName(item?.submittedBy || item?.submitted_by || ''),
+          updaterName: resolveRealName(item?.updatedBy || item?.updated_by || ''),
           data: {
             ...(item.data || {}),
-            // 目标值从系统设置读取（只有毛利率目标，营业额目标使用本月目标实收营业额）
             target_margin: targetConfig?.targets?.margin || null,
-            // 点评星级从日报表读取
             dianping_rating: dbData?.dianping_rating || null
           }
         };
@@ -5517,6 +5575,32 @@ function constrainPredictionsToHistory(predictions, historyRows, topN) {
     .slice(0, Math.max(5, Math.min(80, Number(topN || 20) || 20)));
 }
 
+// Compute slot's share of total biz-type revenue from historical data.
+// Returns { slotRevenue, slotShare, splitMode } where slotRevenue is the
+// revenue this specific slot should expect given a total biz-type revenue.
+function computeSlotRevenueShare(allHistoryRows, store, bizType, slot, date) {
+  const rows = (Array.isArray(allHistoryRows) ? allHistoryRows : [])
+    .filter((x) => String(x?.store || '').trim() === String(store || '').trim())
+    .filter((x) => normalizeForecastBizType(x?.bizType) === normalizeForecastBizType(bizType))
+    .filter((x) => { const d = safeDateOnly(x?.date); return !date || !d || d <= date; });
+  const bySlot = { lunch: 0, afternoon: 0, dinner: 0 };
+  rows.forEach((row) => {
+    const s = normalizeForecastSlot(row?.slot);
+    if (s && Object.prototype.hasOwnProperty.call(bySlot, s)) {
+      bySlot[s] += Math.max(0, Number(row?.expectedRevenue || 0));
+    }
+  });
+  const total = Object.values(bySlot).reduce((a, b) => a + b, 0);
+  // Fallback shares if no history: typical restaurant pattern
+  const fallback = { lunch: 0.45, afternoon: 0.10, dinner: 0.45 };
+  const normalizedSlot = normalizeForecastSlot(slot);
+  if (total > 0) {
+    const share = Number((bySlot[normalizedSlot] || 0) / total);
+    return { slotShare: Number(Math.max(0.05, share).toFixed(4)), splitMode: 'history' };
+  }
+  return { slotShare: fallback[normalizedSlot] || 0.33, splitMode: 'fallback' };
+}
+
 async function buildForecastByAI({ historyRows, target, topN, state0 }) {
   const cfg = resolveForecastArkConfig(state0 || {}, { preferVision: false });
   const apiKey = cfg.apiKey;
@@ -5535,7 +5619,7 @@ async function buildForecastByAI({ historyRows, target, topN, state0 }) {
     '',
     '规则：',
     '1) predictions 只包含具体菜品产品，qty 为预测销售数量（非负数字），按 qty 降序排列；',
-    '2) 【最重要】预计营收金额是核心参数：营收越高则各菜品销量越大，营收翻倍则销量应接近翻倍。必须对比目标营收与历史营收，按比例调整每个菜品的预测销量；',
+    '2) 【最重要】目标条件中的 expectedRevenue 是该时段（非全天）的预计营收。对比目标营收与历史同时段营收，按比例调整每个菜品的预测销量；',
     '3) 同时分析：目标日期是星期几、天气状况、是否假日，与历史同类条件下的销售数据对比；天气不能直接做固定比例加减，销量应主要由目标营收和历史样本决定；',
     `4) 只输出销量排名前 ${Math.min(topN || 20, 20)} 名的产品；`,
     '5) qty 必须是合理的整数或一位小数，不能为0；',
@@ -8022,6 +8106,25 @@ app.get('/api/reports/inventory-forecast/gross-profit-profiles', authRequired, a
       return rid === scope.brandId;
     });
     if (qBizType) items = items.filter((x) => String(x?.bizType || '').trim() === qBizType || !String(x?.bizType || '').trim());
+
+    // 合并飞书菜品库成本数据（dish_library_costs）
+    try {
+      const storeKeys = scope.storeScope.map(s => normalizeStoreKey(s));
+      const dlR = await pool.query(`SELECT biz_type,dish_name,dish_price,unit_cost FROM dish_library_costs WHERE enabled=TRUE AND (lower(regexp_replace(coalesce(store,''),'\\s+','','g'))=ANY($1) OR store='*')`, [storeKeys]);
+      const existingKeys = new Set(items.map(x => `${normalizeForecastBizType(x?.bizType)||''}||${String(x?.product||'').trim().toLowerCase()}`));
+      for (const r of (dlR.rows||[])) {
+        const biz = normalizeForecastBizType(r.biz_type) || '';
+        const name = String(r.dish_name||'').trim();
+        const cost = safeNumber(r.unit_cost);
+        if (!name || !Number.isFinite(cost) || cost < 0) continue;
+        const ek = `${biz}||${name.toLowerCase()}`;
+        if (!existingKeys.has(ek)) {
+          items.push({ product: name, bizType: biz, costPerUnit: Number(cost.toFixed(4)), source: 'feishu_bitable' });
+          existingKeys.add(ek);
+        }
+      }
+    } catch(e) { console.error('[profiles] dish_library_costs merge error:', e?.message||e); }
+
     items.sort((a, b) => String(a?.product || '').localeCompare(String(b?.product || ''), 'zh-Hans-CN'));
 
     // Enrich with avg price from history for margin rate computation
@@ -8224,9 +8327,16 @@ app.post('/api/reports/inventory-forecast/gross-margin-estimate', authRequired, 
     const historyRows = (Array.isArray(state0.inventoryForecastHistory) ? state0.inventoryForecastHistory : [])
       .filter((x) => scope.storeScope.includes(String(x?.store || '').trim()))
       .slice(0, 5000);
-    const profiles = (Array.isArray(state0.forecastGrossProfitProfiles) ? state0.forecastGrossProfitProfiles : [])
+    let profiles = (Array.isArray(state0.forecastGrossProfitProfiles) ? state0.forecastGrossProfitProfiles : [])
       .filter((x) => normalizeBrandId(x?.brandId || resolveStoreBrandContext(state0, String(x?.store || '').trim()).brandId) === scope.brandId)
       .slice(0, 5000);
+    // 合并飞书菜品库成本
+    try {
+      const sk = scope.storeScope.map(s => normalizeStoreKey(s));
+      const dlR = await pool.query(`SELECT biz_type,dish_name,unit_cost FROM dish_library_costs WHERE enabled=TRUE AND (lower(regexp_replace(coalesce(store,''),'\\s+','','g'))=ANY($1) OR store='*')`, [sk]);
+      const ek = new Set(profiles.map(x => `${normalizeForecastBizType(x?.bizType)||''}||${String(x?.product||'').trim().toLowerCase()}`));
+      for (const r of (dlR.rows||[])) { const b=normalizeForecastBizType(r.biz_type)||''; const n=String(r.dish_name||'').trim(); const c=safeNumber(r.unit_cost); if(!n||!Number.isFinite(c)||c<0) continue; const k=`${b}||${n.toLowerCase()}`; if(!ek.has(k)){profiles.push({product:n,bizType:b,costPerUnit:Number(c.toFixed(4))});ek.add(k);} }
+    } catch(e) { console.error('[margin-est] dish_library_costs merge error:', e?.message||e); }
     const aliasLookup = buildForecastProductAliasLookup(state0, { store: scope.store, brandId: scope.brandId });
 
     const estimate = estimateGrossMarginByHistory({
@@ -8326,6 +8436,12 @@ app.post('/api/reports/inventory-forecast/predict', authRequired, async (req, re
       .slice(0, 400);
     const historyRows = canonicalizeForecastRows(historyRowsRaw, aliasLookup);
 
+    // ── Slot revenue split: frontend sends total biz-type revenue for the whole day.
+    // Historical rows are per-slot, so we must split the incoming revenue by slot share
+    // to avoid each slot thinking it owns the full day's revenue (which inflates qty ~3x).
+    const slotSplit = computeSlotRevenueShare(all, store, bizType, slot, date);
+    const slotExpectedRevenue = Number((expectedRevenue * slotSplit.slotShare).toFixed(2));
+
     const target = {
       store,
       bizType,
@@ -8333,7 +8449,7 @@ app.post('/api/reports/inventory-forecast/predict', authRequired, async (req, re
       date,
       weather,
       isHoliday,
-      expectedRevenue: Number(expectedRevenue.toFixed(2))
+      expectedRevenue: slotExpectedRevenue
     };
 
     const evaluations = Array.isArray(state0.inventoryForecastEvaluations) ? state0.inventoryForecastEvaluations : [];
@@ -8464,6 +8580,7 @@ app.post('/api/reports/inventory-forecast/predict', authRequired, async (req, re
       bizType,
       slot,
       target,
+      slotSplit: { inputRevenue: Number(expectedRevenue.toFixed(2)), slotShare: slotSplit.slotShare, slotRevenue: slotExpectedRevenue, splitMode: slotSplit.splitMode },
       historyCount: historyRows.length,
       source,
       confidence: Number(out?.confidence || 0),
@@ -9270,8 +9387,10 @@ app.get('/api/version', async (req, res) => {
   try {
     const out = {
       startedAt: STARTED_AT,
+      buildVersion: 'v176',
       server: {
-        indexMtime: null
+        indexMtime: null,
+        agentsMtime: null
       },
       frontend: {
         workingFixedMtime: null,
@@ -9283,6 +9402,11 @@ app.get('/api/version', async (req, res) => {
     try {
       const st = fs.statSync(__filename);
       out.server.indexMtime = st?.mtime ? st.mtime.toISOString() : null;
+    } catch (e) {}
+    try {
+      const agentsPath = path.resolve(__dirname, 'agents.js');
+      const ast = fs.statSync(agentsPath);
+      out.server.agentsMtime = ast?.mtime ? ast.mtime.toISOString() : null;
     } catch (e) {}
 
     try {
@@ -10208,9 +10332,10 @@ async function processFeishuDataChange(event, logId) {
       throw new Error('Record not found in Feishu');
     }
 
-    // Always upsert raw record into generic storage
+    // Always upsert raw record into generic storage with configKey
     try {
-      await upsertFeishuGenericRecord({ appToken, tableId, record });
+      const configKey = findConfigKeyByTableInfo(appToken, tableId);
+      await upsertFeishuGenericRecord({ appToken, tableId, record, configKey });
     } catch (e) {
       console.log('[processFeishuDataChange] generic upsert failed:', e?.message || e);
     }
@@ -10425,7 +10550,8 @@ app.post('/api/feishu/sync-manual', authRequired, async (req, res) => {
     
     for (const record of data.items || []) {
       try {
-        await upsertFeishuGenericRecord({ appToken, tableId, record });
+        const configKey = findConfigKeyByTableInfo(appToken, tableId);
+        await upsertFeishuGenericRecord({ appToken, tableId, record, configKey });
         genericUpserted++;
 
         if (!isTableVisit) {
@@ -10675,7 +10801,8 @@ app.post('/api/agent/feishu-table-write', authRequired, async (req, res) => {
 
         try {
           if (created) {
-            await upsertFeishuGenericRecord({ appToken, tableId, record: created });
+            const configKey = findConfigKeyByTableInfo(appToken, tableId);
+            await upsertFeishuGenericRecord({ appToken, tableId, record: created, configKey });
           }
         } catch (e) {
           // best effort local mirror; should not fail write call
@@ -11004,6 +11131,7 @@ registerNewScoringRoutes(app, authRequired);
 registerTaskBoardRoutes(app, authRequired);
 registerHRMSApiRoutes(app, authRequired);
 registerSOPDistributionRoutes(app, authRequired);
+registerUploadStatusRoute(app, { pool, getSharedState, authRequired });
 
 app.listen(PORT, HOST, async () => {
   console.log(`hrms-server listening on ${HOST}:${PORT}`);
@@ -11017,6 +11145,11 @@ app.listen(PORT, HOST, async () => {
     await ensureDataGovernanceTables();
     await ensureAgentTables();
     assertCriticalFunctions();
+    // LLM健康检查 — 启动时验证所有大模型API可用，失败时飞书通知管理员
+    verifyLLMHealth().then(h => {
+      if (!h.allOk) console.error('[STARTUP] ⚠️ LLM health check FAILED — agents may be brainless!');
+      else console.log('[STARTUP] ✅ All LLM providers healthy');
+    }).catch(e => console.error('[STARTUP] LLM health check error:', e?.message));
     startAgentScheduler();
     console.log('[agents] Multi-agent system initialized');
 
@@ -11033,6 +11166,33 @@ app.listen(PORT, HOST, async () => {
     await ensureMasterTables();
     startMasterAgent();
     console.log('[master] Master Agent orchestration initialized');
+
+    // Initialize enhanced autonomous agent systems
+    try {
+      const { initializeAutonomousTasks } = await import('./agent-autonomous.js');
+      initializeAutonomousTasks();
+      console.log('[autonomous] Agent autonomous capabilities initialized');
+    } catch (e) {
+      console.error('[autonomous] Failed to initialize:', e?.message);
+    }
+
+    // Initialize regression protection
+    try {
+      const { initializeRegressionProtection } = await import('./regression-protection.js');
+      await initializeRegressionProtection();
+      console.log('[regression] Regression protection initialized');
+    } catch (e) {
+      console.error('[regression] Failed to initialize:', e?.message);
+    }
+
+    // Initialize enhanced LLM configuration
+    try {
+      const { initializeEnhancedLLMConfig } = await import('./llm-config-enhanced.js');
+      initializeEnhancedLLMConfig();
+      console.log('[llm] Enhanced LLM configuration initialized');
+    } catch (e) {
+      console.error('[llm] Failed to initialize:', e?.message);
+    }
 
     // Initialize new modules (RAG, TaskBoard, HRMS API, SOP Distribution)
     await ensureRAGSchema();

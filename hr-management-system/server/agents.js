@@ -1,5 +1,6 @@
 /**
  * HRMS Multi-Agent System — Feishu-First Architecture
+ * BUILD_VERSION: 2026-02-27T19:00-v176
  *
  * HRMS = 大脑 + 数据处理中心
  * 飞书 = 唯一交互通道（单聊推送 / 接收回复）
@@ -331,6 +332,19 @@ const BI_FUNCTION_TOOLS = [
         }
       }
     }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'query_table_visit',
+      description: '查询门店桌访记录（不满意菜品、桌巡记录等）',
+      parameters: {
+        type: 'object',
+        properties: {
+          period_days: { type: 'integer', description: '统计天数，建议7-30', minimum: 1, maximum: 90 }
+        }
+      }
+    }
   }
 ];
 
@@ -544,24 +558,46 @@ async function execBiToolRevenueSummary(store, args = {}, originalQuery = '') {
       [normalizeStoreKey(targetStore), period.start, period.end]
     );
     const rows = r.rows || [];
-    if (!rows.length) {
-      return { ok: true, source: 'daily_reports', text: `📊 ${period.label}营业数据（${targetStore}）：暂无营业日报数据。` };
+    if (rows.length) {
+      const totalRevenue = rows.reduce((s, x) => s + (parseFloat(x.actual_revenue) || 0), 0);
+      const totalTarget = rows.reduce((s, x) => s + (parseFloat(x.target_revenue) || 0), 0);
+      const achieveRate = totalTarget > 0 ? (totalRevenue / totalTarget * 100).toFixed(1) : null;
+      const avgMarginRows = rows.filter((x) => x.actual_margin != null);
+      const avgMargin = avgMarginRows.length
+        ? (avgMarginRows.reduce((s, x) => s + (parseFloat(x.actual_margin) || 0), 0) / avgMarginRows.length).toFixed(1)
+        : null;
+
+      const lines = [`📊 营业汇总（${targetStore}·${period.label}）`, `- 统计天数：${rows.length}天`, `- 累计营收：¥${totalRevenue.toFixed(0)}`];
+      if (totalTarget > 0) lines.push(`- 目标营收：¥${totalTarget.toFixed(0)}（达成率 ${achieveRate}%）`);
+      lines.push(`- 日均营收：¥${(totalRevenue / rows.length).toFixed(0)}`);
+      if (avgMargin != null) lines.push(`- 平均毛利率：${avgMargin}%`);
+      lines.push('> 数据源：daily_reports（营业日报）');
+      return { ok: true, source: 'daily_reports', text: lines.join('\n') };
     }
 
-    const totalRevenue = rows.reduce((s, x) => s + (parseFloat(x.actual_revenue) || 0), 0);
-    const totalTarget = rows.reduce((s, x) => s + (parseFloat(x.target_revenue) || 0), 0);
-    const achieveRate = totalTarget > 0 ? (totalRevenue / totalTarget * 100).toFixed(1) : null;
-    const avgMarginRows = rows.filter((x) => x.actual_margin != null);
-    const avgMargin = avgMarginRows.length
-      ? (avgMarginRows.reduce((s, x) => s + (parseFloat(x.actual_margin) || 0), 0) / avgMarginRows.length).toFixed(1)
-      : null;
-
-    const lines = [`📊 营业汇总（${targetStore}·${period.label}）`, `- 统计天数：${rows.length}天`, `- 累计营收：¥${totalRevenue.toFixed(0)}`];
-    if (totalTarget > 0) lines.push(`- 目标营收：¥${totalTarget.toFixed(0)}（达成率 ${achieveRate}%）`);
-    lines.push(`- 日均营收：¥${(totalRevenue / rows.length).toFixed(0)}`);
-    if (avgMargin != null) lines.push(`- 平均毛利率：${avgMargin}%`);
-    lines.push('> 数据源：daily_reports（营业日报）');
-    return { ok: true, source: 'daily_reports', text: lines.join('\n') };
+    // Fallback: daily_reports 无数据时从 sales_raw 按日汇总
+    const salesR = await pool().query(
+      `SELECT s.date::text AS date, ROUND(SUM(COALESCE(s.revenue,0))::numeric, 2) AS day_revenue,
+              ROUND(SUM(COALESCE(s.sales_amount,0))::numeric, 2) AS day_sales
+       FROM sales_raw s
+       WHERE lower(regexp_replace(coalesce(s.store,''), '\\s+', '', 'g')) = $1
+         AND s.date BETWEEN $2 AND $3
+       GROUP BY s.date
+       ORDER BY s.date DESC
+       LIMIT 90`,
+      [normalizeStoreKey(targetStore), period.start, period.end]
+    );
+    const salesRows = salesR.rows || [];
+    if (!salesRows.length) {
+      return { ok: true, source: 'daily_reports', text: `📊 ${period.label}营业数据（${targetStore}）：暂无营业数据（日报和销售明细均无记录）。` };
+    }
+    const totalSalesRevenue = salesRows.reduce((s, x) => s + (parseFloat(x.day_revenue) || 0), 0);
+    const totalSalesAmount = salesRows.reduce((s, x) => s + (parseFloat(x.day_sales) || 0), 0);
+    const sLines = [`📊 营业汇总（${targetStore}·${period.label}）`, `- 统计天数：${salesRows.length}天`, `- 累计实收：¥${totalSalesRevenue.toFixed(0)}`];
+    if (totalSalesAmount > 0) sLines.push(`- 累计折前：¥${totalSalesAmount.toFixed(0)}`);
+    sLines.push(`- 日均实收：¥${(totalSalesRevenue / salesRows.length).toFixed(0)}`);
+    sLines.push('> 数据源：sales_raw（销售明细按日汇总，营业日报暂无数据）');
+    return { ok: true, source: 'sales_raw', text: sLines.join('\n') };
   } catch (e) {
     return { ok: false, source: 'daily_reports', text: `营业汇总查询失败：${e?.message || '未知错误'}` };
   }
@@ -571,7 +607,7 @@ async function execBiToolRevenueForecastNextDay(store, args = {}) {
   const targetStore = String(store || '').trim();
   if (!targetStore) return { ok: false, text: '当前账号未绑定门店，无法预测营业额。', source: 'daily_reports' };
 
-  const lookbackDays = clampInt(args.lookback_days, 3, 60, 14);
+  const lookbackDays = Math.max(28, clampInt(args.lookback_days, 14, 90, 60));
   const end = new Date();
   const start = new Date(end);
   start.setDate(start.getDate() - (lookbackDays - 1));
@@ -580,19 +616,27 @@ async function execBiToolRevenueForecastNextDay(store, args = {}) {
   const tomorrow = new Date(end);
   tomorrow.setDate(tomorrow.getDate() + 1);
   const tomorrowText = formatDate(tomorrow);
+  const tomorrowDow = tomorrow.getDay();
 
-  const weightedMean = (arr) => {
-    if (!arr.length) return 0;
-    let weight = arr.length;
-    let sumW = 0;
-    let sum = 0;
-    for (const x of arr) {
-      const v = Number(x) || 0;
-      sum += v * weight;
-      sumW += weight;
-      weight -= 1;
+  const scoredForecast = (rows, revKey) => {
+    if (!rows.length) return { pred: 0, min: 0, max: 0, sameDow: 0 };
+    let sW = 0, sV = 0, lo = Infinity, hi = 0, sameDow = 0;
+    for (const r of rows) {
+      const v = Number(r[revKey]) || 0;
+      if (v <= 0) continue;
+      const d = new Date(String(r.date) + 'T00:00:00');
+      if (!Number.isFinite(d.getTime())) continue;
+      const dow = d.getDay();
+      let sc = 1;
+      if (dow === tomorrowDow) { sc += 3.0; sameDow++; }
+      else { const adj = Math.min(Math.abs(dow - tomorrowDow), 7 - Math.abs(dow - tomorrowDow)); if (adj === 1) sc += 0.4; }
+      const dd = Math.abs(Math.round((tomorrow.getTime() - d.getTime()) / 86400000));
+      sc += Math.max(0, 1.0 - Math.min(1.0, dd / 60));
+      sW += sc; sV += v * sc;
+      if (v < lo) lo = v; if (v > hi) hi = v;
     }
-    return sumW > 0 ? (sum / sumW) : 0;
+    if (sW <= 0) return { pred: 0, min: 0, max: 0, sameDow: 0 };
+    return { pred: sV / sW, min: lo, max: hi, sameDow };
   };
 
   try {
@@ -608,14 +652,14 @@ async function execBiToolRevenueForecastNextDay(store, args = {}) {
     );
     const dailyRows = dailyR.rows || [];
     if (dailyRows.length >= 3) {
-      const values = dailyRows.map((x) => Number(x.actual_revenue) || 0).filter((x) => x >= 0);
-      const pred = weightedMean(values);
-      const minV = Math.min(...values);
-      const maxV = Math.max(...values);
+      const f = scoredForecast(dailyRows, 'actual_revenue');
+      const pred = f.pred;
+      const minV = f.min;
+      const maxV = f.max;
       return {
         ok: true,
         source: 'daily_reports',
-        text: `📈 明日营业额预测（${targetStore}）\n- 预测日期：${tomorrowText}\n- 预测值：¥${pred.toFixed(0)}\n- 参考区间：¥${minV.toFixed(0)} ~ ¥${maxV.toFixed(0)}\n- 依据样本：近${lookbackDays}天营业日报（${dailyRows.length}天有效样本）\n> 数据源：daily_reports（营业日报）`
+        text: `📈 明日营业额预测（${targetStore}）\n- 预测日期：${tomorrowText}（${'日一二三四五六'[tomorrowDow]}）\n- 预测值：¥${pred.toFixed(0)}\n- 参考区间：¥${minV.toFixed(0)} ~ ¥${maxV.toFixed(0)}\n- 同星期样本：${f.sameDow}天（权重×4）\n- 依据样本：近${lookbackDays}天营业日报（${dailyRows.length}天有效样本）\n> 算法：星期相似度加权+时间衰减，数据源：daily_reports`
       };
     }
 
@@ -647,27 +691,74 @@ async function execBiToolRevenueForecastNextDay(store, args = {}) {
       if (longRows.length < 3) {
         return { ok: true, source: 'daily_reports', text: `📈 明日营业额预测（${targetStore}）：样本不足（近${lookbackDays}天有效样本少于3天，近60天也不足3天），暂无法给出可信预测。` };
       }
-      const longValues = longRows.map((x) => Number(x.day_revenue) || 0).filter((x) => x >= 0);
-      const longPred = weightedMean(longValues);
-      const longMin = Math.min(...longValues);
-      const longMax = Math.max(...longValues);
+      const lf = scoredForecast(longRows, 'day_revenue');
+      const longPred = lf.pred;
+      const longMin = lf.min;
+      const longMax = lf.max;
       return {
         ok: true,
         source: 'sales_raw',
-        text: `📈 明日营业额预测（${targetStore}）\n- 预测日期：${tomorrowText}\n- 预测值：¥${longPred.toFixed(0)}\n- 参考区间：¥${longMin.toFixed(0)} ~ ¥${longMax.toFixed(0)}\n- 依据样本：近60天销售明细按日汇总（${longRows.length}天有效样本）\n- 置信度：较低（近期样本不足，已启用长窗口兜底）\n> 数据源：sales_raw（门店销售明细）`
+        text: `📈 明日营业额预测（${targetStore}）\n- 预测日期：${tomorrowText}（${'日一二三四五六'[tomorrowDow]}）\n- 预测值：¥${longPred.toFixed(0)}\n- 参考区间：¥${longMin.toFixed(0)} ~ ¥${longMax.toFixed(0)}\n- 同星期样本：${lf.sameDow}天（权重×4）\n- 依据样本：近60天销售明细按日汇总（${longRows.length}天有效样本）\n- 置信度：较低（近期样本不足，已启用长窗口兜底）\n> 算法：星期相似度加权+时间衰减，数据源：sales_raw`
       };
     }
-    const values = salesRows.map((x) => Number(x.day_revenue) || 0).filter((x) => x >= 0);
-    const pred = weightedMean(values);
-    const minV = Math.min(...values);
-    const maxV = Math.max(...values);
+    const sf = scoredForecast(salesRows, 'day_revenue');
+    const pred = sf.pred;
+    const minV = sf.min;
+    const maxV = sf.max;
     return {
       ok: true,
       source: 'sales_raw',
-      text: `📈 明日营业额预测（${targetStore}）\n- 预测日期：${tomorrowText}\n- 预测值：¥${pred.toFixed(0)}\n- 参考区间：¥${minV.toFixed(0)} ~ ¥${maxV.toFixed(0)}\n- 依据样本：近${lookbackDays}天销售明细按日汇总（${salesRows.length}天有效样本）\n> 数据源：sales_raw（门店销售明细）`
+      text: `📈 明日营业额预测（${targetStore}）\n- 预测日期：${tomorrowText}（${'日一二三四五六'[tomorrowDow]}）\n- 预测值：¥${pred.toFixed(0)}\n- 参考区间：¥${minV.toFixed(0)} ~ ¥${maxV.toFixed(0)}\n- 同星期样本：${sf.sameDow}天（权重×4）\n- 依据样本：近${lookbackDays}天销售明细按日汇总（${salesRows.length}天有效样本）\n> 算法：星期相似度加权+时间衰减，数据源：sales_raw`
     };
   } catch (e) {
     return { ok: false, source: 'daily_reports', text: `营业额预测查询失败：${e?.message || '未知错误'}` };
+  }
+}
+
+async function execBiToolTableVisit(store, args = {}, originalQuery = '') {
+  const targetStore = String(store || '').trim();
+  if (!targetStore) return { ok: false, text: '当前账号未绑定门店，无法查询桌访记录。', source: 'table_visit_records' };
+
+  const period = resolveToolPeriod(args, 7, originalQuery);
+  try {
+    const rows = await loadUnifiedTableVisitRowsByStore(targetStore, period.start, period.end);
+    if (!rows.length) {
+      return { ok: true, source: 'table_visit_records', text: `📋 ${period.label}桌访记录（${targetStore}）：暂无桌访数据。` };
+    }
+    // 维度1：不满意菜品（dissatisfaction_dish）
+    const dishMap = {};
+    for (const row of rows) {
+      const items = String(row.dissatisfaction_dish || '').split(/[，,、]+/).map(x => x.trim()).filter(x => x && !/卤鹅/.test(x));
+      for (const item of items) { dishMap[item] = (dishMap[item] || 0) + 1; }
+    }
+    const dishSorted = Object.entries(dishMap).sort((a, b) => b[1] - a[1]);
+    // 维度2：顾客反馈/不满意原因（unsatisfied_items）— 这是桌访现场反馈，非大众点评差评
+    const feedbackMap = {};
+    const blockedFb = new Set(['无', '没有', '暂无', '不清楚', '未知', '其他', '']);
+    for (const row of rows) {
+      const fb = String(row.unsatisfied_items || '').trim();
+      if (fb && !blockedFb.has(fb)) {
+        fb.split(/[，,、]+/).map(x => x.trim()).filter(Boolean).forEach(x => { feedbackMap[x] = (feedbackMap[x] || 0) + 1; });
+      }
+    }
+    const fbSorted = Object.entries(feedbackMap).sort((a, b) => b[1] - a[1]);
+
+    const lines = [`📋 桌访反馈（${targetStore}·${period.label}）【注意：此数据来源于门店桌访巡台，非大众点评差评】`, `共${rows.length}条桌访记录`];
+    if (fbSorted.length) {
+      lines.push('', '🔔 桌访不满意反馈TOP：');
+      fbSorted.slice(0, 8).forEach(([d, c], i) => lines.push(`${i + 1}. ${d}（${c}次）`));
+    }
+    if (dishSorted.length) {
+      lines.push('', '🍽 桌访不满意菜品TOP：');
+      dishSorted.slice(0, 8).forEach(([d, c], i) => lines.push(`${i + 1}. ${d}（${c}次）`));
+    }
+    if (!fbSorted.length && !dishSorted.length) {
+      lines.push('', '该时段桌访未记录明确不满意内容。');
+    }
+    lines.push('', '> 数据源：table_visit_records（桌访巡台记录，非大众点评）');
+    return { ok: true, source: 'table_visit_records', text: lines.join('\n') };
+  } catch (e) {
+    return { ok: false, source: 'table_visit_records', text: `桌访数据查询失败：${e?.message || '未知错误'}` };
   }
 }
 
@@ -676,6 +767,7 @@ async function runBiFunctionTool(toolName, store, args = {}, originalQuery = '')
   if (toolName === 'query_complaint_product_ranking') return execBiToolComplaintRanking(store, args, originalQuery);
   if (toolName === 'query_revenue_summary') return execBiToolRevenueSummary(store, args, originalQuery);
   if (toolName === 'query_revenue_forecast_next_day') return execBiToolRevenueForecastNextDay(store, args);
+  if (toolName === 'query_table_visit') return execBiToolTableVisit(store, args, originalQuery);
   return { ok: false, source: 'unknown', text: `不支持的工具：${toolName}` };
 }
 
@@ -705,7 +797,7 @@ async function buildBiIntentPlan(text, safeStore, conversationHistory = [], send
     [
       {
         role: 'system',
-        content: `你是BI意图识别器。\n仅输出JSON，不要额外文字。\n候选intent：query_sales_ranking、query_complaint_product_ranking、query_revenue_summary、query_revenue_forecast_next_day、other。\n输出格式：{"intent":"...","confidence":0-1,"params":{...}}\nparams仅允许：period_days,lookback_days,limit,sort_order,metric,biz_type。\n若用户问"最差/倒数/垫底"则sort_order=asc；问"最好/最多/TOP"则sort_order=desc。\n当前门店：${safeStore}（只用于理解上下文，最终权限以后端为准）。\n\n重要：用户可能在追问上一轮的结果（比如"给我10样""排前10呢""具体投诉什么"），请结合对话记录理解真实意图。若追问内容明显关联上一轮工具，复用同一intent并调整params（如limit/sort_order）。${historyHint}`
+        content: `你是BI意图识别器。\n仅输出JSON，不要额外文字。\n候选intent：query_sales_ranking、query_complaint_product_ranking、query_revenue_summary、query_revenue_forecast_next_day、query_table_visit、other。\n输出格式：{"intent":"...","confidence":0-1,"params":{...}}\nparams仅允许：period_days,lookback_days,limit,sort_order,metric,biz_type。\n若用户问"最差/倒数/垫底"则sort_order=asc；问"最好/最多/TOP"则sort_order=desc。\n当前门店：${safeStore}（只用于理解上下文，最终权限以后端为准）。\n\n重要：用户可能在追问上一轮的结果（比如"给我10样""排前10呢""具体投诉什么"），请结合对话记录理解真实意图。若追问内容明显关联上一轮工具，复用同一intent并调整params（如limit/sort_order）。${historyHint}`
       },
       { role: 'user', content: String(text || '') }
     ],
@@ -728,7 +820,7 @@ async function narrateBiToolResult(userText, toolText, store, senderRole = '') {
     [
       {
         role: 'system',
-        content: `你是门店BI助手。请把工具查询结果转成简洁可执行的中文回答。\n严格要求：\n1) 只能使用“工具结果”中出现的事实，不得新增数字\n2) 结论先行，最多200字\n3) 保留关键口径（例如TOP/倒数、近N天）\n4) 若工具结果提示样本不足/暂无数据，直接如实说明，不要猜测。`
+        content: `你是门店BI助手。请把工具查询结果转成简洁可执行的中文回答。\n严格要求：\n1) 只能使用"工具结果"中出现的事实，不得新增数字\n2) 结论先行，最多200字\n3) 保留关键口径（例如TOP/倒数、近N天）\n4) 若工具结果提示样本不足/暂无数据，直接如实说明，不要猜测\n5) 严格区分数据来源：桌访（table_visit_records）是门店服务员巡台记录，差评（bad_reviews）是大众点评/美团线上评价，不能混用"投诉""差评"等词描述桌访数据\n6) 桌访数据请用"桌访反馈""桌访不满意"等表述，差评数据才用"投诉""差评"等表述`
       },
       {
         role: 'user',
@@ -829,7 +921,8 @@ async function tryHandleBiByFunctionCalling({ text, store, brand, senderRole, se
     query_sales_ranking: 'query_sales_ranking',
     query_complaint_product_ranking: 'query_complaint_product_ranking',
     query_revenue_summary: 'query_revenue_summary',
-    query_revenue_forecast_next_day: 'query_revenue_forecast_next_day'
+    query_revenue_forecast_next_day: 'query_revenue_forecast_next_day',
+    query_table_visit: 'query_table_visit'
   };
   const preferredTool = intentToolMap[intentPlan.intent] || '';
   if (!preferredTool) { console.log('[bi-fc] skip: no tool for intent', intentPlan.intent); return null; }
@@ -1130,14 +1223,36 @@ async function buildBiDeterministicTableVisitReply(store, text) {
     );
     const rows = r.rows||[];
     if (!rows.length) return `📋 ${p.label}桌访记录（${s}）：暂无桌访数据。`;
+    // 维度1：不满意菜品
     const dishMap = {};
     for (const row of rows) {
       const items = String(row.dissatisfaction_dish||'').split(/[，,、]+/).map(x=>x.trim()).filter(x=>x&&!/卤鹅/.test(x));
       for (const d of items) { dishMap[d] = (dishMap[d]||0) + 1; }
     }
-    const sorted = Object.entries(dishMap).sort((a,b)=>b[1]-a[1]);
-    const top = sorted.slice(0,10).map(([d,c],i)=>`${i+1}. ${d}（${c}次）`).join('\n');
-    return `📋 ${p.label}桌访不满意菜品（${s}）\n共${rows.length}条桌访记录\n\n${top||'无不满意菜品记录'}`;
+    const dishSorted = Object.entries(dishMap).sort((a,b)=>b[1]-a[1]);
+    // 维度2：桌访反馈原因（unsatisfied_items）
+    const fbMap = {};
+    const blockedFb = new Set(['无','没有','暂无','不清楚','未知','其他','']);
+    for (const row of rows) {
+      const fb = String(row.unsatisfied_items||'').trim();
+      if (fb && !blockedFb.has(fb)) {
+        fb.split(/[，,、]+/).map(x=>x.trim()).filter(Boolean).forEach(x => { fbMap[x] = (fbMap[x]||0) + 1; });
+      }
+    }
+    const fbSorted = Object.entries(fbMap).sort((a,b)=>b[1]-a[1]);
+    const lines = [`📋 桌访反馈（${s}·${p.label}）【数据来源：桌访巡台记录，非大众点评】`, `共${rows.length}条桌访记录`];
+    if (fbSorted.length) {
+      lines.push('', '🔔 桌访不满意反馈TOP：');
+      fbSorted.slice(0,8).forEach(([d,c],i) => lines.push(`${i+1}. ${d}（${c}次）`));
+    }
+    if (dishSorted.length) {
+      lines.push('', '🍽 桌访不满意菜品TOP：');
+      dishSorted.slice(0,8).forEach(([d,c],i) => lines.push(`${i+1}. ${d}（${c}次）`));
+    }
+    if (!fbSorted.length && !dishSorted.length) {
+      lines.push('', '该时段桌访未记录明确不满意内容。');
+    }
+    return lines.join('\n');
   } catch(e) { return `桌访数据查询失败：${e?.message||'未知错误'}`; }
 }
 
@@ -1430,7 +1545,33 @@ async function buildBiDeterministicDailyReportReply(store, text) {
     sql += ' ORDER BY date DESC LIMIT 60';
     const r = await pool().query(sql, params);
     const rows = r.rows || [];
-    if (!rows.length) return `📊 ${period.label}营业数据（${targetStore}）：暂无营业日报数据。请确认营业日报是否已录入。`;
+    if (!rows.length) {
+      // Fallback: 从 sales_raw 按日汇总
+      try {
+        const salesR = await pool().query(
+          `SELECT s.date::text AS date, ROUND(SUM(COALESCE(s.revenue,0))::numeric, 2) AS day_revenue,
+                  ROUND(SUM(COALESCE(s.sales_amount,0))::numeric, 2) AS day_sales
+           FROM sales_raw s
+           WHERE lower(regexp_replace(coalesce(s.store,''), '\\s+', '', 'g')) = $1
+             AND s.date BETWEEN $2 AND $3
+           GROUP BY s.date ORDER BY s.date DESC LIMIT 60`,
+          [normalizeStoreKey(targetStore), period.start, period.end]
+        );
+        const sRows = salesR.rows || [];
+        if (sRows.length) {
+          const tRev = sRows.reduce((s, x) => s + (parseFloat(x.day_revenue) || 0), 0);
+          const tSales = sRows.reduce((s, x) => s + (parseFloat(x.day_sales) || 0), 0);
+          const sLines = [`📊 营业数据（${targetStore}·${period.label}）`];
+          sLines.push(`- 统计天数：${sRows.length}天`);
+          sLines.push(`- 累计实收：¥${tRev.toFixed(0)}`);
+          if (tSales > 0) sLines.push(`- 累计折前：¥${tSales.toFixed(0)}`);
+          sLines.push(`- 日均实收：¥${(tRev / sRows.length).toFixed(0)}`);
+          sLines.push('> 数据源：sales_raw（销售明细按日汇总）');
+          return sLines.join('\n');
+        }
+      } catch (_e) {}
+      return `📊 ${period.label}营业数据（${targetStore}）：暂无营业数据。`;
+    }
     const totalRevenue = rows.reduce((s, r) => s + (parseFloat(r.actual_revenue) || 0), 0);
     const totalTarget = rows.reduce((s, r) => s + (parseFloat(r.target_revenue) || 0), 0);
     const avgMargin = rows.filter(r => r.actual_margin != null);
@@ -3297,13 +3438,17 @@ function buildGrossProfileMap(profiles, store) {
   return map;
 }
 
-function estimateMarginMetricsForRange({ state, store, startDate, endDate }) {
+async function estimateMarginMetricsForRange({ state, store, startDate, endDate }) {
   const normalizedStore = normalizeStoreKey(store);
   const historyRows = (Array.isArray(state?.inventoryForecastHistory) ? state.inventoryForecastHistory : [])
     .filter((x) => normalizeStoreKey(x?.store) === normalizedStore)
     .filter((x) => inDateRangeInclusive(x?.date, startDate, endDate));
   const profiles = Array.isArray(state?.forecastGrossProfitProfiles) ? state.forecastGrossProfitProfiles : [];
   const profileMap = buildGrossProfileMap(profiles, store);
+  try {
+    const dlR = await pool().query(`SELECT biz_type,dish_name,unit_cost FROM dish_library_costs WHERE enabled=TRUE AND (lower(regexp_replace(coalesce(store,''),'\\s+','','g'))=$1 OR store='*')`, [normalizeStoreKey(store)]);
+    for (const r of (dlR.rows||[])) { const biz=String(r.biz_type||'').trim().toLowerCase(); const pk=normProductKey(r.dish_name); const c=toNum(r.unit_cost,NaN); if(!pk||!Number.isFinite(c)||c<0) continue; if(!profileMap.has(`${biz}||${pk}`)) profileMap.set(`${biz}||${pk}`,{costPerUnit:c,grossPerUnit:NaN}); if(!profileMap.has(`||${pk}`)) profileMap.set(`||${pk}`,{costPerUnit:c,grossPerUnit:NaN}); }
+  } catch(e) { console.error('[margin] dish_library_costs query error:', e?.message||e); }
 
   const out = {
     takeaway: { actualRevenue: 0, estimatedCost: 0, marginRate: 0 },
@@ -4910,10 +5055,16 @@ function scheduleRandomTask(taskKey, config) {
   const [minHours, maxHours] = config.interval;
   
   const scheduleNext = () => {
-    // 随机间隔：2-4小时
-    const intervalHours = Math.floor(Math.random() * (maxHours - minHours + 1)) + minHours;
-    const intervalMs = intervalHours * 60 * 60 * 1000;
-    const nextExecution = new Date(Date.now() + intervalMs);
+    const intervalHours = minHours + Math.random() * (maxHours - minHours);
+    let nextExecution = new Date(Date.now() + intervalHours * 3600000);
+    // 确保在工作时间10:00-20:00 CST内执行，否则推到次日10:00+随机偏移
+    const cstH = Number(nextExecution.toLocaleString('en-US',{timeZone:'Asia/Shanghai',hour:'numeric',hour12:false}));
+    if (cstH < 10 || cstH >= 20) {
+      const adj = new Date(nextExecution); adj.setMinutes(0); adj.setSeconds(0);
+      adj.setHours(adj.getHours() + (cstH >= 20 ? (24 - cstH + 10) : (10 - cstH)));
+      nextExecution = new Date(adj.getTime() + Math.random() * 6 * 3600000);
+    }
+    const intervalMs = nextExecution.getTime() - Date.now();
     const status = _scheduledTaskRuntimeStatus.get(taskKey);
     if (status) {
       status.nextExecutionAt = nextExecution.toISOString();
@@ -5096,22 +5247,22 @@ async function sendSafetyCheck(config) {
   );
   const usernames = [...new Set(assignees.map((u) => String(u?.username || '').trim()).filter(Boolean))];
 
-  const taskText = String(config?.description || '').trim() || '请完成本次食安抽检';
+  const taskDesc = String(config?.description || '').trim() || '请完成本次食安抽检';
   const timeWindow = Math.max(1, Math.floor(Number(config?.timeWindow) || 15));
-  const taskType = String(config?.type || '').trim() || 'food_safety';
+  const taskType = String(config?.type || '').trim() || '食安抽检';
   const timeNow = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
   const deadlineAt = new Date(Date.now() + timeWindow * 60 * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
-  const message = `🔔 食安抽检通知\n\n门店：${pickedStore?.name || '-'}\n任务：${taskText}\n时间：${timeNow}\n时限：${timeWindow}分钟内完成\n截止：${deadlineAt}\n\n请拍照发送至本对话。`;
+  const message = `🔔 随机抽检通知\n\n门店：${pickedStore?.name || '-'}\n类型：${taskType}\n任务：${taskDesc}\n时间：${timeNow}\n时限：${timeWindow}分钟内完成\n截止：${deadlineAt}\n\n请拍照发送至本对话。`;
   const safetyCard = {
     config: { wide_screen_mode: true },
-    header: { title: { tag: 'plain_text', content: '🔔 食安抽检通知' }, template: 'yellow' },
+    header: { title: { tag: 'plain_text', content: `🔔 随机抽检 · ${taskType}` }, template: 'yellow' },
     elements: [
-      { tag: 'div', text: { tag: 'lark_md', content: `**门店**：${pickedStore?.name || '-'}\n**任务**：${taskText}` } },
+      { tag: 'div', text: { tag: 'lark_md', content: `**门店**：${pickedStore?.name || '-'}\n**类型**：${taskType}\n**任务**：${taskDesc}` } },
       { tag: 'hr' },
       { tag: 'div', text: { tag: 'lark_md', content: `**时间**：${timeNow}\n**时限**：${timeWindow}分钟内完成\n**截止**：${deadlineAt}` } },
       { tag: 'hr' },
       { tag: 'div', text: { tag: 'lark_md', content: '📸 请拍照发送至本对话。' } },
-      { tag: 'note', elements: [{ tag: 'plain_text', content: '小年 · 食安抽检' }] }
+      { tag: 'note', elements: [{ tag: 'plain_text', content: `小年 · ${taskType}` }] }
     ]
   };
 
@@ -5123,7 +5274,7 @@ async function sendSafetyCheck(config) {
     }
     let r = await sendLarkCard(fallbackUser.open_id, safetyCard);
     if (!r.ok) await sendLarkMessage(fallbackUser.open_id, prefixWithAgentName('ops_supervisor', message));
-    console.log(`[ops] sent safety check to fallback manager of ${pickedStore?.name || '-'}: ${taskText}`);
+    console.log(`[ops] sent safety check to fallback manager of ${pickedStore?.name || '-'}: ${taskType} - ${taskDesc}`);
     return;
   }
 
@@ -5133,7 +5284,7 @@ async function sendSafetyCheck(config) {
     let r = await sendLarkCard(feishuUser.open_id, safetyCard);
     if (!r.ok) await sendLarkMessage(feishuUser.open_id, prefixWithAgentName('ops_supervisor', message));
   }
-  console.log(`[ops] sent safety check to ${pickedStore?.name || '-'} (${usernames.join(',')}): ${taskText}`);
+  console.log(`[ops] sent safety check to ${pickedStore?.name || '-'} (${usernames.join(',')}): ${taskType} - ${taskDesc}`);
 }
 
 // 辅助函数：从AI回复中提取分数
@@ -5818,7 +5969,7 @@ export async function runDataAuditor() {
     // 6) 总实收毛利率异常 - 阈值从配置中心读取，支持门店级别覆盖
     const marginMedium = getStoreThreshold(storeName, 'marginMedium', 0.69);
     const marginHigh = getStoreThreshold(storeName, 'marginHigh', 0.68);
-    const marginMetrics = estimateMarginMetricsForRange({
+    const marginMetrics = await estimateMarginMetricsForRange({
       state,
       store: storeName,
       startDate: weekAgoDate,
@@ -7852,7 +8003,7 @@ export async function onFeishuEvent(body) {
   }
   if (eventId) markEventProcessed(eventId);
 
-  console.log('[feishu] event:', eventType, 'id:', eventId);
+  console.log('[feishu] event:', eventType, 'id:', eventId, 'build:v176');
 
   if (eventType === 'card.action.trigger') {
     return await handleOpsChecklistCardAction(event);
@@ -7863,8 +8014,8 @@ export async function onFeishuEvent(body) {
     const sender = event?.sender || {};
     const msgType = String(msg?.message_type || '').trim();
     const messageId = String(msg?.message_id || '').trim();
-    const parentMessageId = String(msg?.parent_message_id || '').trim();
-    const rootMessageId = String(msg?.root_message_id || '').trim();
+    const parentMessageId = String(msg?.parent_id || msg?.parent_message_id || '').trim();
+    const rootMessageId = String(msg?.root_id || msg?.root_message_id || '').trim();
     const chatType = String(msg?.chat_type || '').trim();
     const openId = String(sender?.sender_id?.open_id || '').trim();
 
@@ -8047,14 +8198,17 @@ export async function onFeishuEvent(body) {
       msgDbId = r.rows?.[0]?.id;
     } catch (e) {}
 
-    // ── Master Agent: 仅当消息明确是任务反馈时才拦截 ──
-    // 只有以下情况视为任务回复：1)含图片(拍照证据) 2)明确提及任务编号 3)明确回复类关键词
-    const _isLikelyTaskResponse = (imageUrls.length > 0) ||
-      /^(TASK|OPS|BI|EVAL)-/i.test(String(text || '').trim()) ||
-      /^(已处理|已完成|已整改|已解决|收到|好的|处理完|整改完毕|情况说明|原因如下)/.test(String(text || '').trim());
+    // ── Master Agent: 任务反馈拦截 ──
+    console.log('[feishu] task-reply-debug: parentMessageId=', JSON.stringify(parentMessageId), 'rootMessageId=', JSON.stringify(rootMessageId), 'text=', JSON.stringify(String(text||'').slice(0,60)), 'msgKeys=', JSON.stringify(Object.keys(msg)));
+    // 以下情况视为任务回复：1)回复了任务消息(parentMessageId/rootMessageId非空) 2)含图片(拍照证据) 3)明确提及任务编号 4)明确回复类关键词
+    const _effectiveParentId = parentMessageId || rootMessageId || '';
+    const _isLikelyTaskResponse = !!_effectiveParentId ||
+      (imageUrls.length > 0) ||
+      /^(TASK|OPS|BI|EVAL|MT)-/i.test(String(text || '').trim()) ||
+      /(已处理|已完成|已整改|已解决|处理完|整改完毕|情况说明|原因如下|回复你|测试)/.test(String(text || '').trim());
     if (_taskResponseHook && _isLikelyTaskResponse) {
       try {
-        const taskResult = await _taskResponseHook(feishuUser.username, text, imageUrls, parentMessageId);
+        const taskResult = await _taskResponseHook(feishuUser.username, text, imageUrls, _effectiveParentId);
         if (taskResult?.handled) {
           const reply = prefixWithAgentName('master', taskResult.response);
           await sendLarkMessage(openId, reply);
@@ -9317,6 +9471,54 @@ export async function sendMonthlyReports() {
       console.log(`[bi-report] sent ${store} monthly report to ${admins.length} admins`);
     } catch (e) { console.error(`[bi-report] ${store} monthly failed:`, e?.message); }
   }
+}
+
+export async function sendTestReportsToUser(targetUsername) {
+  console.log('[bi-report] test send to user:', targetUsername);
+  const fu = await lookupFeishuUserByUsername(targetUsername);
+  if (!fu?.open_id) {
+    console.error('[bi-report] user not found or not bound to Feishu:', targetUsername);
+    return { ok: false, error: 'user_not_found_or_not_bound', username: targetUsername };
+  }
+  const testAdmins = [{ username: targetUsername }];
+  const now = new Date();
+  const results = [];
+
+  // 周报：上周
+  const we = new Date(now); we.setDate(now.getDate() - now.getDay());
+  const ws = new Date(we); ws.setDate(we.getDate() - 6);
+  const wsS = ws.toISOString().slice(0, 10), weS = we.toISOString().slice(0, 10);
+  for (const store of REPORT_STORES) {
+    try {
+      const r = await generateWeeklyReport(store, wsS, weS);
+      const md = formatReportMarkdown(r);
+      await sendBiReportToAdmins({ admins: testAdmins, title: `📊 ${store} 周报`, note: `小年·BI周报·${wsS}~${weS}`, md, cardTemplate: 'blue' });
+      results.push({ type: 'weekly', store, ok: true });
+      console.log(`[bi-report] test weekly sent: ${store} → ${targetUsername}`);
+    } catch (e) {
+      results.push({ type: 'weekly', store, ok: false, error: e?.message });
+      console.error(`[bi-report] test weekly failed: ${store}`, e?.message);
+    }
+  }
+
+  // 月报：上月
+  const monthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  const monthEnd = new Date(now.getFullYear(), now.getMonth(), 0);
+  const msS = monthStart.toISOString().slice(0, 10), meS = monthEnd.toISOString().slice(0, 10);
+  for (const store of REPORT_STORES) {
+    try {
+      const r = await generateMonthlyReport(store, msS, meS);
+      const md = formatReportMarkdown(r);
+      await sendBiReportToAdmins({ admins: testAdmins, title: `📈 ${store} 月报`, note: `小年·BI月报·${msS}~${meS}`, md, cardTemplate: 'turquoise' });
+      results.push({ type: 'monthly', store, ok: true });
+      console.log(`[bi-report] test monthly sent: ${store} → ${targetUsername}`);
+    } catch (e) {
+      results.push({ type: 'monthly', store, ok: false, error: e?.message });
+      console.error(`[bi-report] test monthly failed: ${store}`, e?.message);
+    }
+  }
+
+  return { ok: true, results, targetUsername };
 }
 
 export function startWeeklyReportScheduler() {

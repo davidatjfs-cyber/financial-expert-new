@@ -22,6 +22,40 @@ function pool() {
 }
 
 // ─────────────────────────────────────────────
+// 门店名称规范化映射（解决不同数据源名称不一致问题）
+// ─────────────────────────────────────────────
+const STORE_NAME_ALIASES = {
+  // 洪潮：master_tasks 用 "洪潮大宁久光店"，Bitable 用 "洪潮久光店"
+  '洪潮大宁久光店': ['洪潮大宁久光店', '洪潮久光店', '洪潮'],
+  '洪潮久光店': ['洪潮大宁久光店', '洪潮久光店', '洪潮'],
+  // 马己仙：master_tasks 用 "马己仙上海音乐广场店"，Bitable 用 "马己仙大宁店"
+  '马己仙上海音乐广场店': ['马己仙上海音乐广场店', '马己仙大宁店', '马己仙'],
+  '马己仙大宁店': ['马己仙上海音乐广场店', '马己仙大宁店', '马己仙'],
+};
+
+// 规范化门店名称，返回所有可能的别名（用于 LIKE 匹配）
+function getStoreAliases(storeName) {
+  if (!storeName) return [];
+  const key = String(storeName).trim();
+  // 直接匹配别名表
+  if (STORE_NAME_ALIASES[key]) {
+    return STORE_NAME_ALIASES[key].map(s => s.toLowerCase().replace(/\s+/g, ''));
+  }
+  // 模糊匹配：检查是否包含品牌关键词
+  const lowerKey = key.toLowerCase().replace(/\s+/g, '');
+  for (const [canonical, aliases] of Object.entries(STORE_NAME_ALIASES)) {
+    if (lowerKey.includes('洪潮') && canonical.includes('洪潮')) {
+      return aliases.map(s => s.toLowerCase().replace(/\s+/g, ''));
+    }
+    if (lowerKey.includes('马己仙') && canonical.includes('马己仙')) {
+      return aliases.map(s => s.toLowerCase().replace(/\s+/g, ''));
+    }
+  }
+  // 兜底：返回原名称
+  return [lowerKey];
+}
+
+// ─────────────────────────────────────────────
 // 1. Database Schema
 // ─────────────────────────────────────────────
 
@@ -368,59 +402,114 @@ export async function getStoreHealthOverview(store, daysBack = 30) {
   const since = new Date();
   since.setDate(since.getDate() - daysBack);
   const sinceStr = since.toISOString().slice(0, 10);
+  
+  // 使用门店别名进行模糊匹配
+  const aliases = getStoreAliases(store);
+  const storeKey = String(store || '').toLowerCase().replace(/\s+/g, '');
+  
+  // 构建 LIKE 模式：匹配任意别名
+  const likePatterns = aliases.map(a => '%' + a.replace(/%/g, '') + '%');
+  const likeClause = likePatterns.map((_, i) => `$${i + 2}`).join(' OR ');
 
-  const [anomalies, complaints, materialIssues, inspections] = await Promise.all([
+  // 从 master_tasks 获取真实异常数据
+  const [taskAnomalies, materialR, closingR, tableVisitR, salesR] = await Promise.all([
     pool().query(
-      `SELECT source_id as category, COUNT(*) as cnt, AVG(weight) as avg_weight
-       FROM business_entity_relations
-       WHERE target_type='store' AND target_id=$1 AND relation='ANOMALY_AT' AND date>=$2::date
-       GROUP BY source_id ORDER BY cnt DESC`,
-      [store, sinceStr]
+      `SELECT category, severity, COUNT(*) as cnt
+       FROM master_tasks
+       WHERE lower(regexp_replace(coalesce(store,''), '\\s+', '', 'g')) = $1
+         AND created_at >= $2::date
+       GROUP BY category, severity ORDER BY cnt DESC`,
+      [storeKey, sinceStr]
     ),
     pool().query(
-      `SELECT source_id as item, COUNT(*) as cnt, AVG(weight) as avg_weight
-       FROM business_entity_relations
-       WHERE target_type='store' AND target_id=$1 AND relation IN ('HAS_COMPLAINT','DISSATISFIED_AT') AND date>=$2::date
-       GROUP BY source_id ORDER BY cnt DESC`,
-      [store, sinceStr]
-    ),
+      `SELECT fields->>'异常原料名称' as material, fields->>'严重情况' as severity, COUNT(*) as cnt
+       FROM feishu_generic_records
+       WHERE config_key IN ('material_hongchao','material_majixian')
+         AND (${likeClause.split(' OR ').map(c => `lower(regexp_replace(coalesce(fields->>'所属门店', fields->>'门店', fields->>'store', ''), '\\s+', '', 'g')) LIKE ${c}`).join(' OR ')})
+         AND created_at >= $1::date
+         AND (fields->>'异常原料名称') IS NOT NULL AND (fields->>'异常原料名称') != ''
+       GROUP BY material, severity ORDER BY cnt DESC LIMIT 20`,
+      [sinceStr, ...likePatterns]
+    ).catch(() => ({ rows: [] })),
     pool().query(
-      `SELECT source_id as material, COUNT(*) as cnt, AVG(weight) as avg_weight
-       FROM business_entity_relations
-       WHERE target_type='store' AND target_id=$1 AND relation='MATERIAL_ISSUE' AND date>=$2::date
-       GROUP BY source_id ORDER BY cnt DESC`,
-      [store, sinceStr]
-    ),
+      `SELECT COUNT(*) as total,
+              SUM(CASE WHEN (fields->>'是否合格') = '合格' THEN 1 ELSE 0 END) as passed,
+              AVG(CASE WHEN (fields->>'档口收档平均得分') ~ '^[0-9.]+$' THEN (fields->>'档口收档平均得分')::numeric ELSE NULL END) as avg_score
+       FROM feishu_generic_records
+       WHERE config_key = 'closing_reports'
+         AND (${likeClause.split(' OR ').map(c => `lower(regexp_replace(coalesce(fields->>'门店',''), '\\s+', '', 'g')) LIKE ${c}`).join(' OR ')})
+         AND created_at >= $1::date`,
+      [sinceStr, ...likePatterns]
+    ).catch(() => ({ rows: [{ total: 0, passed: 0, avg_score: null }] })),
     pool().query(
-      `SELECT date, weight, metadata FROM business_entity_relations
-       WHERE target_type='store' AND target_id=$1 AND relation='INSPECTION_AT' AND date>=$2::date
-       ORDER BY date DESC LIMIT 30`,
-      [store, sinceStr]
-    )
+      `SELECT COUNT(*) as total,
+              SUM(CASE WHEN coalesce(fields->>'unsatisfied_items', '') != '' THEN 1 ELSE 0 END) as with_complaints,
+              COUNT(DISTINCT coalesce(fields->>'unsatisfied_items', fields->>'今天 不满意菜品', fields->>'今日不满意菜品', fields->>'不满意菜品', '')) as unique_complaints
+       FROM feishu_generic_records
+       WHERE config_key = 'table_visit'
+         AND (${likeClause.split(' OR ').map(c => `lower(regexp_replace(coalesce(fields->>'所属门店', fields->>'门店', fields->>'store', ''), '\\s+', '', 'g')) LIKE ${c}`).join(' OR ')})
+         AND created_at >= $1::date`,
+      [sinceStr, ...likePatterns]
+    ).catch(() => ({ rows: [{ total: 0, with_complaints: 0, unique_complaints: 0 }] })),
+    pool().query(
+      `SELECT COUNT(DISTINCT date) as days, ROUND(SUM(revenue)::numeric, 0) as total_rev,
+              ROUND(AVG(revenue)::numeric, 0) as avg_daily_rev
+       FROM (SELECT date, SUM(COALESCE(revenue,0)) as revenue FROM sales_raw
+             WHERE lower(regexp_replace(coalesce(store,''), '\\s+', '', 'g')) = $1
+               AND date >= $2::date GROUP BY date) sub`,
+      [storeKey, sinceStr]
+    ).catch(() => ({ rows: [{ days: 0, total_rev: 0 }] }))
   ]);
 
-  // 计算综合健康分 (100分制)
-  const anomalyDeduct = (anomalies.rows || []).reduce((s, r) => s + Number(r.cnt) * Number(r.avg_weight), 0);
-  const complaintDeduct = (complaints.rows || []).reduce((s, r) => s + Number(r.cnt) * 0.5, 0);
-  const materialDeduct = (materialIssues.rows || []).reduce((s, r) => s + Number(r.cnt) * Number(r.avg_weight) * 0.3, 0);
-  const failedInspections = (inspections.rows || []).filter(r => Number(r.weight) > 1.5).length;
-  const inspectionDeduct = failedInspections * 2;
-  const healthScore = Math.max(0, Math.min(100, 100 - anomalyDeduct - complaintDeduct - materialDeduct - inspectionDeduct));
+  // 计算综合健康分 (100分制, 基于真实数据)
+  const anomalies = (taskAnomalies.rows || []);
+  const highSeverityCount = anomalies.filter(r => r.severity === 'high').reduce((s, r) => s + Number(r.cnt), 0);
+  const mediumSeverityCount = anomalies.filter(r => r.severity === 'medium').reduce((s, r) => s + Number(r.cnt), 0);
+  const anomalyDeduct = highSeverityCount * 5 + mediumSeverityCount * 2;
+
+  const materialIssues = (materialR.rows || []);
+  const materialDeduct = materialIssues.reduce((s, r) => s + Number(r.cnt) * (r.severity === '严重' ? 3 : 1), 0);
+
+  const closingData = closingR.rows?.[0] || {};
+  const closingTotal = Number(closingData.total || 0);
+  const closingPassed = Number(closingData.passed || 0);
+  const closingFailRate = closingTotal > 0 ? (closingTotal - closingPassed) / closingTotal : 0;
+  const closingDeduct = Math.round(closingFailRate * 15);
+
+  const tvData = tableVisitR.rows?.[0] || {};
+  const tvTotal = Number(tvData.total || 0);
+  const tvComplaints = Number(tvData.with_complaints || 0);
+  const complaintRate = tvTotal > 0 ? tvComplaints / tvTotal : 0;
+  const complaintDeduct = Math.round(complaintRate * 20);
+
+  const healthScore = Math.max(0, Math.min(100, 100 - anomalyDeduct - materialDeduct - closingDeduct - complaintDeduct));
+
+  const salesData = salesR.rows?.[0] || {};
 
   return {
     store,
     period: `${sinceStr} ~ ${new Date().toISOString().slice(0, 10)}`,
     healthScore: Math.round(healthScore * 10) / 10,
-    anomalies: (anomalies.rows || []).map(r => ({ category: r.category, count: Number(r.cnt), severity: Number(r.avg_weight) })),
-    complaints: (complaints.rows || []).map(r => ({ item: r.item, count: Number(r.cnt) })),
-    materialIssues: (materialIssues.rows || []).map(r => ({ material: r.material, count: Number(r.cnt), severity: Number(r.avg_weight) })),
+    anomalies: anomalies.map(r => ({ category: r.category, severity: r.severity, count: Number(r.cnt) })),
+    complaints: {
+      tableVisitTotal: tvTotal,
+      withComplaints: tvComplaints,
+      complaintRate: tvTotal > 0 ? `${(complaintRate * 100).toFixed(1)}%` : 'N/A'
+    },
+    materialIssues: materialIssues.map(r => ({ material: r.material, severity: r.severity, count: Number(r.cnt) })),
     inspections: {
-      total: (inspections.rows || []).length,
-      failed: failedInspections,
-      recentRecords: (inspections.rows || []).slice(0, 5).map(r => ({
-        date: r.date, qualified: Number(r.weight) <= 1.5,
-        score: r.metadata?.score
-      }))
+      closingTotal,
+      closingPassed,
+      closingAvgScore: closingData.avg_score ? Number(closingData.avg_score).toFixed(1) : 'N/A',
+      closingPassRate: closingTotal > 0 ? `${((closingPassed / closingTotal) * 100).toFixed(1)}%` : 'N/A'
+    },
+    sales: {
+      daysWithData: Number(salesData.days || 0),
+      totalRevenue: Number(salesData.total_rev || 0),
+      avgDailyRevenue: Number(salesData.avg_daily_rev || 0)
+    },
+    scoreBreakdown: {
+      anomalyDeduct, materialDeduct, closingDeduct, complaintDeduct
     }
   };
 }

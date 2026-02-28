@@ -18,7 +18,7 @@ const MODEL_TIERS = {
   hq_brain: {
     label: '总部决策大脑',
     reasoningModel: 'deepseek-chat',         // 深度推理 (策略生成/因果分析)
-    analysisModel: 'deepseek-v3.2',         // 通用分析 (数据解读/报表)
+    analysisModel: 'deepseek-chat',         // 通用分析 (数据解读/报表)
     temperature: 0.3,                        // 较低温度保证稳定性
     maxTokens: 8192,                         // 允许长输出 (行动计划书)
     costBudgetDaily: 100,                    // 日预算上限 (元)
@@ -28,8 +28,8 @@ const MODEL_TIERS = {
   // 门店执行四肢 — 快速响应与流程执行
   store_limb: {
     label: '门店执行端',
-    reasoningModel: 'deepseek-v3.2',        // 快速推理 (SOP问答/任务确认)
-    analysisModel: 'deepseek-v3.2',         // 同上
+    reasoningModel: 'deepseek-chat',        // 快速推理 (SOP问答/任务确认)
+    analysisModel: 'deepseek-chat',         // 同上
     temperature: 0.1,                        // 极低温度保证确定性
     maxTokens: 2048,                         // 短输出 (确认/通知)
     costBudgetDaily: 50,                     // 日预算上限 (元)
@@ -39,8 +39,8 @@ const MODEL_TIERS = {
   // 合规审查 — 零容忍审查
   compliance: {
     label: '合规审查',
-    reasoningModel: 'deepseek-v3.2',
-    analysisModel: 'deepseek-v3.2',
+    reasoningModel: 'deepseek-chat',
+    analysisModel: 'deepseek-chat',
     temperature: 0,                          // 零温度: 确定性审查
     maxTokens: 4096,
     costBudgetDaily: 20,
@@ -72,19 +72,50 @@ const HQ_ONLY_TOOLS = [
   'benchmark_analysis',           // 行业基准对比
   'employee_performance_deep',    // 员工深度绩效分析
   'cost_optimization_suggest',    // 成本优化建议
-  'supply_chain_analysis'         // 供应链分析
+  'supply_chain_analysis',        // 供应链分析
+  'view_other_store_data'         // 查看其他门店数据权限
 ];
 
-// 所有角色可用的基础工具
+// 门店角色可用的基础工具（不能跨店，不能访问HQ独有工具）
 const SHARED_TOOLS = [
-  'query_sales_ranking',          // 销售排行
-  'query_revenue_summary',        // 营收概览
-  'query_complaint_ranking',      // 投诉排行
+  'query_sales_ranking',          // 销售排行（限本店）
+  'query_revenue_summary',        // 营收概览（限本店）
+  'query_complaint_ranking',      // 投诉排行（限本店）
   'query_sop_knowledge',          // SOP知识库查询
   'submit_checklist',             // 检查表提交
   'query_my_tasks',               // 我的任务
-  'query_my_score'                // 我的绩效
+  'query_my_score',               // 我的绩效
+  'query_table_visit',            // 桌访查询（限本店）
+  'query_table_visit_count'       // 桌访记录数（限本店）
 ];
+
+// ── 4. 角色特定工具限制 ──
+// hr_manager 只能访问 HR 相关工具
+const HR_ONLY_TOOLS = [
+  'query_employee_info',
+  'manage_employee_records',
+  'process_onboarding',
+  'process_resignation',
+  'view_hr_reports'
+];
+
+function getAvailableTools(role) {
+  const tier = getModelTier(role);
+  const normalizedRole = String(role || '').trim();
+  
+  // 总部人事只能访问HR工具
+  if (normalizedRole === 'hr_manager') {
+    return [...HR_ONLY_TOOLS, 'query_my_tasks', 'query_my_score'];
+  }
+  
+  // HQ Brain 全权限
+  if (tier === 'hq_brain') {
+    return [...SHARED_TOOLS, ...HQ_ONLY_TOOLS, ...HR_ONLY_TOOLS];
+  }
+  
+  // 门店角色只能使用SHARED_TOOLS，且数据会被过滤到本店
+  return [...SHARED_TOOLS];
+}
 
 // ── 4. 算力追踪器 ──
 

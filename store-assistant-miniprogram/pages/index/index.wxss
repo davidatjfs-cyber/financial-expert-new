@@ -47,6 +47,16 @@
   margin-bottom: 40rpx;
 }
 
+.modal-input {
+  border: 2rpx solid #ddd;
+  border-radius: 10rpx;
+  height: 80rpx;
+  padding: 0 20rpx;
+  margin-bottom: 30rpx;
+  font-size: 32rpx;
+  text-align: center;
+}
+
 .modal-btn {
   background: #FF6A00;
   color: white;

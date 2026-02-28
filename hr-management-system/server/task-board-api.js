@@ -111,42 +111,57 @@ export async function updateTask(taskId, updates) {
   } catch (e) { return { success: false, error: e?.message }; }
 }
 
-// ─── 超时检测 + 升级 ───
+// ─── 超时检测 + 标记（停用人工升级） ───
 export async function checkTimeoutsAndEscalate(notifyFn) {
   const p = pool();
   try {
     const r = await p.query(
       `SELECT * FROM master_tasks WHERE timeout_at < NOW() AND status NOT IN ('resolved','closed','settled','rejected') ORDER BY timeout_at ASC LIMIT 20`
     );
-    const escalated = [];
+    const timedOut = [];
     for (const task of r.rows || []) {
-      const level = (task.escalation_level || 0) + 1;
-      const escalateTo = ESCALATION_CHAIN[Math.min(level, ESCALATION_CHAIN.length - 1)];
+      const level = Number(task.escalation_level || 0);
       const history = Array.isArray(task.escalation_history) ? task.escalation_history : [];
-      history.push({ level, escalatedTo: escalateTo, at: new Date().toISOString(), previousAssignee: task.assignee_username, status: task.status });
+      history.push({
+        level,
+        escalatedTo: task.escalated_to || null,
+        at: new Date().toISOString(),
+        previousAssignee: task.assignee_username,
+        status: task.status,
+        mode: 'timeout_mark_only'
+      });
 
       const newTimeout = new Date(Date.now() + (TIMEOUT_CONFIG[task.status] || 60) * 60000).toISOString();
       await p.query(
-        `UPDATE master_tasks SET escalation_level=$1, escalated_to=$2, escalation_history=$3, timeout_at=$4, updated_at=NOW() WHERE id=$5`,
-        [level, escalateTo, JSON.stringify(history), newTimeout, task.id]
+        `UPDATE master_tasks
+         SET escalation_level = $1,
+             escalated_to = NULL,
+             escalation_history = $2,
+             timeout_at = $3,
+             source_data = COALESCE(source_data, '{}'::jsonb) || $4::jsonb,
+             updated_at = NOW()
+         WHERE id = $5`,
+        [
+          level,
+          JSON.stringify(history),
+          newTimeout,
+          JSON.stringify({
+            timed_out: true,
+            timeout_marked_at: new Date().toISOString(),
+            timeout_status: task.status
+          }),
+          task.id
+        ]
       );
 
-      // 如果升级到最高级别(admin)且仍超时，标记需要人工介入
-      if (level >= ESCALATION_CHAIN.length) {
-        await p.query(
-          `UPDATE master_tasks SET detail = detail || E'\n\n⚠️ [系统] 该任务已多次超时升级，需要人工介入处理。', updated_at=NOW() WHERE id=$1`,
-          [task.id]
-        );
-      }
+      timedOut.push({ taskId: task.task_id, level, title: task.title, store: task.store, status: task.status });
 
-      escalated.push({ taskId: task.task_id, level, escalateTo, title: task.title, store: task.store });
-
-      // 通知升级目标
+      // 保持通知回调兼容，但不再升级到任何人工角色
       if (notifyFn) {
-        try { await notifyFn({ type: 'escalation', task, level, escalateTo }); } catch (e) {}
+        try { await notifyFn({ type: 'timeout_marked', task, level, escalateTo: null }); } catch (e) {}
       }
     }
-    return { escalated, count: escalated.length };
+    return { escalated: timedOut, count: timedOut.length };
   } catch (e) { console.error('[TaskBoard] checkTimeouts error:', e?.message); return { escalated: [], count: 0 }; }
 }
 

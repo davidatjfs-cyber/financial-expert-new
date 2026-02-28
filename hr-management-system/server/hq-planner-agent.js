@@ -44,6 +44,166 @@ function pool() {
   return getUnifiedPool();
 }
 
+function extractFirstJsonObject(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return null;
+  const cleaned = raw.replace(/```json\s*/gi, '').replace(/```/g, '').trim();
+  try {
+    const parsed = JSON.parse(cleaned);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+  } catch (e) {}
+  const m = cleaned.match(/\{[\s\S]*\}/);
+  if (!m) return null;
+  try {
+    const parsed = JSON.parse(m[0]);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function normalizeTextArray(input, maxCount = 6) {
+  const arr = Array.isArray(input) ? input : [];
+  const out = [];
+  for (const item of arr) {
+    const v = String(item || '').replace(/\s+/g, ' ').trim();
+    if (!v) continue;
+    if (out.includes(v)) continue;
+    out.push(v.slice(0, 120));
+    if (out.length >= maxCount) break;
+  }
+  return out;
+}
+
+function buildRuleBasedActions(storeHealth = {}) {
+  const bd = storeHealth.scoreBreakdown || {};
+  const scored = [
+    { key: 'anomalyDeduct', label: '异常任务闭环', role: 'store_manager', deadline: '3天', kpi: '近7天异常任务响应时效<2小时，逾期任务清零', verify: '复核master_tasks响应时长与状态流转' },
+    { key: 'materialDeduct', label: '原料异常处置', role: 'store_production_manager', deadline: '7天', kpi: '原料异常重复发生率下降30%', verify: '复核原料日报异常字段与整改记录' },
+    { key: 'closingDeduct', label: '收档标准执行', role: 'store_production_manager', deadline: '7天', kpi: '收档合格率≥95%，平均分提升至90+', verify: '复核收档表通过率与均分' },
+    { key: 'complaintDeduct', label: '桌访投诉治理', role: 'store_manager', deadline: '7天', kpi: '投诉率较近30天下降20%', verify: '复核桌访投诉率趋势' }
+  ].sort((a, b) => Number(bd[b.key] || 0) - Number(bd[a.key] || 0));
+  const actions = [];
+  for (const item of scored) {
+    if (Number(bd[item.key] || 0) <= 0) continue;
+    actions.push({
+      priority: actions.length + 1,
+      action: `针对${item.label}制定周执行清单并每日复盘，明确责任人与完成时限。`,
+      responsibleRole: item.role,
+      deadline: item.deadline,
+      kpiTarget: item.kpi,
+      verificationMethod: item.verify
+    });
+    if (actions.length >= 4) break;
+  }
+  if (!actions.length) {
+    actions.push({
+      priority: 1,
+      action: '建立门店周度经营复盘机制，固定追踪异常、投诉与巡检通过率。',
+      responsibleRole: 'store_manager',
+      deadline: '7天',
+      kpiTarget: '健康分较当前提升5分以上',
+      verificationMethod: '复核下周期健康分与扣分结构'
+    });
+  }
+  return actions;
+}
+
+function normalizePlanData(planData, { store, goal, storeHealth, rawContent }) {
+  const src = planData && typeof planData === 'object' ? planData : {};
+  const title = String(src.title || `${store} 改善行动计划`).trim() || `${store} 改善行动计划`;
+  const summaryBase = String(src.summary || '').replace(/\s+/g, ' ').trim();
+  const summary = (summaryBase || `围绕“${goal || '综合提升门店运营表现'}”聚焦主要扣分项进行分阶段改善。`).slice(0, 120);
+
+  const rootCauses = normalizeTextArray(src.rootCauses, 5);
+  const rawActions = Array.isArray(src.actions) ? src.actions : [];
+  const actions = rawActions
+    .map((a, idx) => ({
+      priority: Math.max(1, Math.min(10, Number(a?.priority) || idx + 1)),
+      action: String(a?.action || '').replace(/\s+/g, ' ').trim(),
+      responsibleRole: /store_production_manager|出品/.test(String(a?.responsibleRole || '')) ? 'store_production_manager' : 'store_manager',
+      deadline: String(a?.deadline || '').replace(/\s+/g, ' ').trim() || '7天',
+      kpiTarget: String(a?.kpiTarget || '').replace(/\s+/g, ' ').trim() || '关键指标连续7天改善',
+      verificationMethod: String(a?.verificationMethod || '').replace(/\s+/g, ' ').trim() || '由总部按周复核关键数据'
+    }))
+    .filter((a) => !!a.action)
+    .sort((a, b) => a.priority - b.priority)
+    .slice(0, 6);
+
+  const safeActions = actions.length ? actions : buildRuleBasedActions(storeHealth);
+  const expectedOutcome = String(src.expectedOutcome || '').replace(/\s+/g, ' ').trim() || '预计2-4周内健康分回升，异常闭环与投诉率明显改善。';
+  const dataGaps = normalizeTextArray(src.dataGaps, 4);
+
+  const normalized = {
+    title,
+    summary,
+    rootCauses,
+    actions: safeActions,
+    expectedOutcome,
+    dataGaps
+  };
+  if (rawContent && !src.actions?.length) normalized.rawContent = String(rawContent || '').slice(0, 800);
+  return normalized;
+}
+
+async function repairPlanJson(rawContent, role) {
+  const parsed = extractFirstJsonObject(rawContent);
+  if (parsed) return parsed;
+  const repaired = await callLLMTiered([
+    {
+      role: 'system',
+      content: '你是JSON修复器。把输入内容转换成合法JSON对象。仅返回JSON，不要任何解释。JSON键必须是:title,summary,rootCauses,actions,expectedOutcome,dataGaps。'
+    },
+    { role: 'user', content: String(rawContent || '') }
+  ], role, { purpose: 'analysis', temperature: 0, maxTokens: 1800, skipCache: true });
+  if (!repaired?.ok) return null;
+  return extractFirstJsonObject(repaired.content || '');
+}
+
+function formatPlanReply(result, targetStore) {
+  const planData = result.plan || {};
+  const lines = [];
+  lines.push(`📋 行动计划 [${result.planId}]`);
+  lines.push(`门店：${targetStore} ｜ 健康分：${result.healthScore}/100`);
+  lines.push('');
+  lines.push(`📌 计划主题：${planData.title || '改善计划'}`);
+  lines.push(`摘要：${planData.summary || '-'}`);
+  if (Array.isArray(planData.rootCauses) && planData.rootCauses.length) {
+    lines.push('');
+    lines.push('🔍 核心根因');
+    planData.rootCauses.slice(0, 5).forEach((c, i) => lines.push(`${i + 1}. ${c}`));
+  }
+  if (Array.isArray(planData.actions) && planData.actions.length) {
+    lines.push('');
+    lines.push('📝 行动清单');
+    planData.actions.slice(0, 6).forEach((a, i) => {
+      lines.push(`${i + 1}) ${a.action}`);
+      lines.push(`   负责人: ${a.responsibleRole || '-'} ｜ 时限: ${a.deadline || '-'} ｜ KPI: ${a.kpiTarget || '-'}`);
+      lines.push(`   验收: ${a.verificationMethod || '-'}`);
+    });
+  }
+  if (planData.expectedOutcome) {
+    lines.push('');
+    lines.push(`🎯 预期结果：${planData.expectedOutcome}`);
+  }
+  if (Array.isArray(planData.dataGaps) && planData.dataGaps.length) {
+    lines.push(`💡 数据补充：${planData.dataGaps.join('；')}`);
+  }
+  if (result.compliance?.passed === false) {
+    const issues = [];
+    const checks = result.compliance?.checks || {};
+    for (const [, v] of Object.entries(checks)) {
+      if (!v?.passed && Array.isArray(v?.issues)) issues.push(...v.issues);
+    }
+    if (issues.length) lines.push(`⚠️ 合规提示：${issues.join('；')}`);
+  }
+  if (result.status === 'pending_review') {
+    lines.push('');
+    lines.push(`回复“审批通过 ${result.planId}”可下发执行。`);
+  }
+  return lines.filter(Boolean).join('\n');
+}
+
 async function callLLMTiered(messages, role, options = {}) {
   if (!_callLLM) throw new Error('HQ Planner: callLLM not set');
   const model = getModelForRole(role, options.purpose || 'reasoning');
@@ -66,18 +226,19 @@ async function callLLMTiered(messages, role, options = {}) {
 // 1. Strategy Planner (策略生成)
 // ─────────────────────────────────────────────
 
-export async function generateActionPlan({ store, goal, role, createdBy }) {
+export async function generateActionPlan({ store, goal, role, createdBy, daysBack = 30 }) {
   if (!isHqRole(role)) {
     return { ok: false, error: 'forbidden', message: '仅总部角色可生成行动计划' };
   }
 
   const planId = `AP-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+  const windowDays = Math.max(7, Math.min(90, Number(daysBack) || 30));
 
   try {
     // Step 1: 收集图谱上下文
     const [storeHealth, causalChain] = await Promise.all([
-      getStoreHealthOverview(store, 30),
-      traceCausalChain('store', store, 2, 30)
+      getStoreHealthOverview(store, windowDays),
+      traceCausalChain('store', store, 2, windowDays)
     ]);
 
     const graphContext = formatGraphContextForLLM(causalChain, 40);
@@ -85,9 +246,9 @@ export async function generateActionPlan({ store, goal, role, createdBy }) {
     // Step 2: 收集最近异常任务
     const recentTasks = await pool().query(
       `SELECT task_id, category, severity, title, status, score_impact, created_at
-       FROM master_tasks WHERE store = $1 AND created_at > NOW() - INTERVAL '30 days'
+       FROM master_tasks WHERE store = $1 AND created_at > NOW() - ($2::int * INTERVAL '1 day')
        ORDER BY created_at DESC LIMIT 20`,
-      [store]
+      [store, windowDays]
     );
 
     const tasksSummary = (recentTasks.rows || []).map(t =>
@@ -97,9 +258,9 @@ export async function generateActionPlan({ store, goal, role, createdBy }) {
     // Step 3: 收集最近绩效数据
     const recentScores = await pool().query(
       `SELECT username, role, total_score, period, summary
-       FROM agent_scores WHERE store = $1 AND created_at > NOW() - INTERVAL '60 days'
+       FROM agent_scores WHERE store = $1 AND created_at > NOW() - ($2::int * INTERVAL '1 day')
        ORDER BY created_at DESC LIMIT 10`,
-      [store]
+      [store, Math.max(windowDays, 60)]
     );
 
     const scoresSummary = (recentScores.rows || []).map(s =>
@@ -107,13 +268,13 @@ export async function generateActionPlan({ store, goal, role, createdBy }) {
     ).join('\n');
 
     // Step 4: LLM 生成策略 (使用 HQ Brain 高级模型)
+    const healthBreakdown = storeHealth.scoreBreakdown || {};
     const plannerPrompt = `你是年年有喜餐饮集团的总部策略规划AI。你的任务是基于真实数据为门店生成可执行的改善行动计划。
 
-## 严格规则
-1. 你引用的所有数据必须来自下方提供的"数据上下文"，不得编造任何数字或事实
-2. 行动计划必须具体可执行，包含：责任人角色、时间节点、验收标准
-3. 每项行动必须对应一个可量化的KPI改善目标
-4. 如果数据不足以支撑某项建议，必须明确标注"[数据不足]"
+## 绝对禁止
+1. 不得编造任何数字或事实——所有引用的数据必须来自下方"数据上下文"
+2. 不得凭空提及菜品名（如"卤鹅"等），除非数据上下文中明确出现
+3. 如果某方面数据为空或为0，直接说明"该维度暂无数据"，不得猜测
 
 ## 目标门店
 ${store}
@@ -121,19 +282,27 @@ ${store}
 ## 改善目标
 ${goal || '综合提升门店运营表现'}
 
-## 数据上下文
+## 数据上下文 (近${windowDays}天)
 
-### 门店健康度 (近30天)
-健康分: ${storeHealth.healthScore}/100
-异常分布: ${JSON.stringify(storeHealth.anomalies)}
-投诉分布: ${JSON.stringify(storeHealth.complaints)}
-原料问题: ${JSON.stringify(storeHealth.materialIssues)}
-检查情况: 总${storeHealth.inspections.total}次, 不合格${storeHealth.inspections.failed}次
+### 健康分: ${storeHealth.healthScore}/100
+扣分明细: 异常任务扣${healthBreakdown.anomalyDeduct || 0}分, 原料扣${healthBreakdown.materialDeduct || 0}分, 收档不合格扣${healthBreakdown.closingDeduct || 0}分, 桌访投诉扣${healthBreakdown.complaintDeduct || 0}分
 
-### 业务关系图谱
-${graphContext || '(暂无图谱数据)'}
+### 异常任务(来自系统派发)
+${storeHealth.anomalies?.length ? storeHealth.anomalies.map(a => `· ${a.category} ${a.severity}级 ${a.count}次`).join('\n') : '(无异常任务记录)'}
 
-### 近期异常任务
+### 原料问题
+${storeHealth.materialIssues?.length ? storeHealth.materialIssues.map(m => `· ${m.material} ${m.severity || ''} ${m.count}次`).join('\n') : '(无原料异常)'}
+
+### 收档检查
+总${storeHealth.inspections?.closingTotal || 0}次, 通过${storeHealth.inspections?.closingPassed || 0}次, 通过率${storeHealth.inspections?.closingPassRate || 'N/A'}, 平均分${storeHealth.inspections?.closingAvgScore || 'N/A'}
+
+### 桌访反馈
+总桌访${storeHealth.complaints?.tableVisitTotal || 0}次, 有投诉${storeHealth.complaints?.withComplaints || 0}次, 投诉率${storeHealth.complaints?.complaintRate || 'N/A'}
+
+### 销售概况
+有数据${storeHealth.sales?.daysWithData || 0}天, 日均营收￥${storeHealth.sales?.avgDailyRevenue || 0}
+
+### 近期异常任务明细
 ${tasksSummary || '(无近期异常)'}
 
 ### 绩效数据
@@ -143,13 +312,13 @@ ${scoresSummary || '(无绩效数据)'}
 请以JSON格式返回行动计划:
 {
   "title": "计划标题",
-  "summary": "100字以内的计划摘要",
-  "rootCauses": ["根因1", "根因2"],
+  "summary": "100字以内的计划摘要，概述主要问题和改善方向",
+  "rootCauses": ["根因1（必须有数据支撑）", "根因2"],
   "actions": [
     {
       "priority": 1,
       "action": "具体行动描述",
-      "responsibleRole": "store_manager/store_production_manager",
+      "responsibleRole": "store_manager 或 store_production_manager",
       "deadline": "相对天数，如7天",
       "kpiTarget": "可量化的目标",
       "verificationMethod": "验收方式"
@@ -168,19 +337,14 @@ ${scoresSummary || '(无绩效数据)'}
       return { ok: false, error: 'llm_failed', message: planResult.error };
     }
 
-    // 解析 LLM 输出
-    let planData;
-    try {
-      const cleaned = planResult.content.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
-      planData = JSON.parse(cleaned);
-    } catch (e) {
-      planData = {
-        title: `${store} 改善计划`,
-        summary: planResult.content.slice(0, 200),
-        actions: [],
-        rawContent: planResult.content
-      };
-    }
+    // 解析/修复并归一化 LLM 输出，确保产出结构稳定可用
+    const repaired = await repairPlanJson(planResult.content, role);
+    const planData = normalizePlanData(repaired || {}, {
+      store,
+      goal,
+      storeHealth,
+      rawContent: planResult.content
+    });
 
     // Step 5: 合规审查
     const complianceResult = await runComplianceCheck(planData, {
@@ -439,41 +603,20 @@ export async function handleHqBrainMessage({ text, role, username, store }) {
       return { handled: true, response: '请指定目标门店（如：为洪潮大宁久光店生成行动计划）' };
     }
 
-    const result = await generateActionPlan({ store: targetStore, goal, role, createdBy: username });
+    const daysBackMatch = t.match(/近\s*(\d{1,3})\s*天/);
+    const requestedDays = daysBackMatch ? Number(daysBackMatch[1]) : 30;
+    const result = await generateActionPlan({
+      store: targetStore,
+      goal,
+      role,
+      createdBy: username,
+      daysBack: Math.max(7, Math.min(90, requestedDays || 30))
+    });
     if (!result.ok) {
       return { handled: true, response: `行动计划生成失败: ${result.message || result.error}` };
     }
 
-    const planData = result.plan || {};
-    const complianceTag = result.compliance?.passed ? '✅ 合规通过' : '❌ 合规未通过';
-    let responseText = `📋 行动计划已生成 [${result.planId}]\n\n`;
-    responseText += `门店: ${targetStore}\n`;
-    responseText += `健康分: ${result.healthScore}/100\n`;
-    responseText += `合规审查: ${complianceTag}\n\n`;
-    responseText += `📌 ${planData.title || '改善计划'}\n`;
-    responseText += `${planData.summary || ''}\n\n`;
-
-    if (planData.rootCauses?.length) {
-      responseText += `🔍 根因分析:\n${planData.rootCauses.map((c, i) => `${i + 1}. ${c}`).join('\n')}\n\n`;
-    }
-
-    if (planData.actions?.length) {
-      responseText += `📝 行动项:\n`;
-      planData.actions.forEach((a, i) => {
-        responseText += `${i + 1}. [优先级${a.priority || '-'}] ${a.action}\n`;
-        responseText += `   责任: ${a.responsibleRole || '-'} | 期限: ${a.deadline || '-'} | KPI: ${a.kpiTarget || '-'}\n`;
-      });
-    }
-
-    if (planData.dataGaps?.length) {
-      responseText += `\n⚠️ 数据不足: ${planData.dataGaps.join('; ')}`;
-    }
-
-    if (result.status === 'pending_review') {
-      responseText += `\n\n该计划已进入待审批状态。回复"审批通过 ${result.planId}"可批准执行。`;
-    }
-
-    return { handled: true, response: responseText };
+    return { handled: true, response: formatPlanReply(result, targetStore) };
   }
 
   // 意图识别: 门店健康度查询
@@ -487,20 +630,29 @@ export async function handleHqBrainMessage({ text, role, username, store }) {
     }
 
     const overview = await getStoreHealthOverview(targetStore, 30);
-    let resp = `🏥 门店健康诊断: ${targetStore}\n\n`;
-    resp += `综合健康分: ${overview.healthScore}/100\n`;
-    resp += `统计区间: ${overview.period}\n\n`;
+    const bd = overview.scoreBreakdown || {};
+    let resp = `🏥 ${targetStore} 健康诊断\n`;
+    resp += `综合健康分: ${overview.healthScore}/100 | ${overview.period}\n`;
+    resp += `扣分: 异常${bd.anomalyDeduct || 0} 原料${bd.materialDeduct || 0} 收档${bd.closingDeduct || 0} 投诉${bd.complaintDeduct || 0}\n`;
 
-    if (overview.anomalies.length) {
-      resp += `⚠️ 异常分布:\n${overview.anomalies.map(a => `  · ${a.category}: ${a.count}次 (严重度${a.severity.toFixed(1)})`).join('\n')}\n\n`;
+    if (overview.anomalies?.length) {
+      resp += `\n⚠️ 异常任务:\n${overview.anomalies.map(a => `  · ${a.category}(${a.severity}): ${a.count}次`).join('\n')}\n`;
     }
-    if (overview.complaints.length) {
-      resp += `📢 投诉分布:\n${overview.complaints.map(c => `  · ${c.item}: ${c.count}次`).join('\n')}\n\n`;
+    if (overview.materialIssues?.length) {
+      resp += `\n🥬 原料问题:\n${overview.materialIssues.map(m => `  · ${m.material}${m.severity ? '(' + m.severity + ')' : ''}: ${m.count}次`).join('\n')}\n`;
     }
-    if (overview.materialIssues.length) {
-      resp += `🥬 原料问题:\n${overview.materialIssues.map(m => `  · ${m.material}: ${m.count}次`).join('\n')}\n\n`;
+    const insp = overview.inspections || {};
+    if (insp.closingTotal > 0) {
+      resp += `\n📋 收档检查: ${insp.closingTotal}次, 通过率${insp.closingPassRate}, 平均分${insp.closingAvgScore}\n`;
     }
-    resp += `📋 检查: ${overview.inspections.total}次, 不合格${overview.inspections.failed}次`;
+    const tv = overview.complaints || {};
+    if (tv.tableVisitTotal > 0) {
+      resp += `\n📢 桌访: ${tv.tableVisitTotal}次, 投诉${tv.withComplaints}次(${tv.complaintRate})\n`;
+    }
+    const sales = overview.sales || {};
+    if (sales.daysWithData > 0) {
+      resp += `\n💰 销售: ${sales.daysWithData}天数据, 日均￥${sales.avgDailyRevenue}\n`;
+    }
 
     return { handled: true, response: resp };
   }
@@ -539,7 +691,9 @@ export async function handleHqBrainMessage({ text, role, username, store }) {
       const comparison = await crossStoreComparison(storeMatches, 30);
       let resp = `📊 门店对比分析:\n\n`;
       for (const [s, data] of Object.entries(comparison)) {
-        resp += `【${s}】健康分: ${data.healthScore}/100 | 异常${data.anomalies.length}类 | 投诉${data.complaints.length}项\n`;
+        const anomalyCnt = Array.isArray(data?.anomalies) ? data.anomalies.length : 0;
+        const complaintCnt = Number(data?.complaints?.withComplaints || 0);
+        resp += `【${s}】健康分: ${data.healthScore}/100 | 异常${anomalyCnt}类 | 投诉${complaintCnt}次\n`;
       }
       return { handled: true, response: resp };
     }
