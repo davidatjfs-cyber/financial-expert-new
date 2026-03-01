@@ -33,7 +33,7 @@ import { pool as agentPool, setPool as setUnifiedAgentPool } from './utils/datab
 import { safeExecute, safeErrorLog } from './utils/error-handler.js';
 import { handleMarginMessage } from './margin-message-handler.js';
 import { deduplicateMessage } from './message-deduplication.js';
-import { getOpsAgentConfig, getBiAgentConfig, getCategoryAssigneeRoleMap } from './agent-config-manager.js';
+import { getOpsAgentConfig, getBiAgentConfig, getCategoryAssigneeRoleMap, AGENT_FEATURE_FLAGS } from './agent-config-manager.js';
 import { buildSalesReport } from './bi-sales-detail.js';
 import { generateWeeklyReport, generateMonthlyReport, formatReportMarkdown } from './bi-weekly-report.js';
 import { extractRelationsFromBitableRecord, extractAnomalyRelations } from './knowledge-graph.js';
@@ -48,6 +48,19 @@ import {
   isToolAllowed,
   isTierBudgetExceeded
 } from './hq-brain-config.js';
+import {
+  executeMetrics,
+  matchAnalysisRule,
+  getSessionState,
+  setSessionState,
+  resetSessionState,
+  setDataExecutorPool,
+  purgeExpiredCache,
+  extractTimeRangeFromText,
+  runBusinessDiagnosis,
+  setCallLLMBridge,
+  logExecutorEvent
+} from './data-executor.js';
 
 // ─────────────────────────────────────────────
 // 0. Config
@@ -2830,6 +2843,11 @@ function isRetryableLLMError(err) {
   );
 }
 
+// ── LLM Bridge for data-executor (避免循环依赖，延迟注入) ──
+// 注意：此行必须在 callLLM 定义之后，利用函数提升不适用于表达式，
+// 所以用 setTimeout(0) 延迟注入，等模块完全加载后再绑定
+setTimeout(() => { try { setCallLLMBridge(callLLM); } catch (_) {} }, 0);
+
 export async function callLLM(messages, options = {}) {
   const role = String(options.role || '').trim();
   const purpose = String(options.purpose || 'reasoning').trim();
@@ -5076,11 +5094,11 @@ function scheduleRandomTask(taskKey, config) {
   const scheduleNext = () => {
     const intervalHours = minHours + Math.random() * (maxHours - minHours);
     let nextExecution = new Date(Date.now() + intervalHours * 3600000);
-    // 确保在工作时间10:00-20:00 CST内执行，否则推到次日10:00+随机偏移
+    // 确保在工作时间08:00-23:00 CST内执行，否则推到次日08:00+随机偏移
     const cstH = Number(nextExecution.toLocaleString('en-US',{timeZone:'Asia/Shanghai',hour:'numeric',hour12:false}));
-    if (cstH < 10 || cstH >= 20) {
-      // 计算推迟到下一个CST 10:00的毫秒数（纯UTC算术，避免setHours混淆CST/UTC）
-      const hoursUntilNext = cstH >= 20 ? (24 - cstH + 10) : (10 - cstH);
+    if (cstH < 8 || cstH >= 23) {
+      // 计算推迟到下一个CST 08:00的毫秒数（纯UTC算术，避免setHours混淆CST/UTC）
+      const hoursUntilNext = cstH >= 23 ? (24 - cstH + 8) : (8 - cstH);
       const baseNext = new Date(nextExecution.getTime() + hoursUntilNext * 3600000);
       // 对齐到整点（清掉分秒）
       baseNext.setMinutes(0, 0, 0);
@@ -5108,12 +5126,12 @@ function scheduleRandomTask(taskKey, config) {
 function isWithinWorkingHours() {
   const now = new Date();
   const hour = Number(now.toLocaleString('en-US', { timeZone: 'Asia/Shanghai', hour: 'numeric', hour12: false }));
-  return hour >= 10 && hour <= 20;
+  return hour >= 8 && hour <= 23;
 }
 
 async function executeScheduledTask(taskKey, config) {
   if (!isWithinWorkingHours()) {
-    console.log(`[ops] skipping task ${taskKey}: outside working hours (10:00-21:00 CST)`);
+    console.log(`[ops] skipping task ${taskKey}: outside working hours (08:00-23:00 CST)`);
     return;
   }
   console.log(`[ops] executing scheduled task: ${taskKey}`);
@@ -6853,6 +6871,32 @@ function checkAgentPermission(role, route) {
 
 async function routeMessage(text, hasImage, senderUsername) {
   const t = String(text || '').trim();
+
+  // ── P1: 规则引擎（最高优先级，确定性路由）——Feature Flag 保护
+  if (AGENT_FEATURE_FLAGS.enable_rule_engine && AGENT_FEATURE_FLAGS.enable_metric_dictionary) {
+    try {
+      const analysisRule = await matchAnalysisRule(t);
+      if (analysisRule) {
+        logExecutorEvent('route_rule_engine_hit', {
+          intent: analysisRule.intent,
+          required_metrics: analysisRule.required_metrics,
+          username: senderUsername || null
+        });
+        return {
+          route: analysisRule.route || 'data_auditor',
+          intent: analysisRule.intent,
+          intent_label: analysisRule.intent_label,
+          required_metrics: analysisRule.required_metrics || [],
+          confidence: 1.0,
+          reason: `rule_engine:${analysisRule.intent}`
+        };
+      }
+    } catch (e) {
+      console.error('[route] rule_engine error:', e?.message);
+    }
+  }
+
+  // ── P2: 原有规则路由 ──
   const ruleRoute = inferRouteByRules(t, hasImage);
   if (ruleRoute?.route && ruleRoute.route !== 'general') {
     return { route: ruleRoute.route, confidence: ruleRoute.confidence || 0.9, reason: ruleRoute.reason || 'rule_match' };
@@ -6976,6 +7020,38 @@ async function handleAgentMessage(senderUsername, senderName, senderStore, sende
   
   if (route === 'clarify') {
     return prefixWithAgentName('master', routeRes.message || '请问您具体想咨询哪个方面的问题？');
+  }
+
+  // ── Session State 管理（Feature Flag 保护）───────────────────
+  let sessionState = null;
+  if (AGENT_FEATURE_FLAGS.enable_session_state) {
+    try {
+      sessionState = await getSessionState(senderUsername);
+      // 若会话超过2小时或状态已关闭，重置为新会话
+      if (sessionState && sessionState.created_at) {
+        const ageMs = Date.now() - new Date(sessionState.created_at).getTime();
+        if (ageMs > 2 * 60 * 60 * 1000 || sessionState.status === 'closed') {
+          sessionState = null;
+        }
+      }
+    } catch (e) {
+      logExecutorEvent('session_state_load_error', { username: senderUsername, error: e?.message });
+    }
+  }
+
+  if (!sessionState) {
+    sessionState = {
+      task_id: randomUUID(),
+      route: null,
+      intent: null,
+      metrics_requested: [],
+      metrics_returned: [],
+      metric_versions: {},
+      time_range: null,
+      store: null,
+      status: 'active',
+      created_at: new Date().toISOString()
+    };
   }
 
   let store = senderStore;
@@ -7126,9 +7202,102 @@ async function handleAgentMessage(senderUsername, senderName, senderStore, sende
   let response = '';
   let agentData = { route, brandId, brandConfig };
 
+  // ── 更新 session state 中的 route/intent/store ───────────
+  sessionState.route = route;
+  sessionState.intent = routeRes.intent || sessionState.intent;
+  sessionState.store = store || sessionState.store;
+  if (routeRes.time_range) sessionState.time_range = routeRes.time_range;
+  setSessionState(senderUsername, sessionState).catch(() => {});
+
   try {
     switch (route) {
       case 'data_auditor': {
+
+        // ── [Data Executor 层] Feature Flag 保护 ─────────────────
+        if (AGENT_FEATURE_FLAGS.enable_data_executor && AGENT_FEATURE_FLAGS.enable_metric_dictionary) {
+          const ruleMetrics = Array.isArray(routeRes.required_metrics) ? routeRes.required_metrics : [];
+          if (ruleMetrics.length > 0) {
+            try {
+              // F: 智能时间范围提取——优先 session_state > 从文本提取 > 默认近7天
+              let resolvedTimeRange = sessionState.time_range;
+              if (!resolvedTimeRange) {
+                const extracted = extractTimeRangeFromText(text);
+                resolvedTimeRange = extracted.timeRange;
+                sessionState.time_range = resolvedTimeRange;
+                logExecutorEvent('time_range_extracted', {
+                  task_id: sessionState.task_id,
+                  text_snippet: text.slice(0, 60),
+                  time_range: resolvedTimeRange,
+                  label: extracted.label
+                });
+              }
+
+              const execResult = await executeMetrics(
+                ruleMetrics, resolvedTimeRange, store, sessionState.task_id
+              );
+              // 更新 session state
+              sessionState.metrics_requested = [...new Set([...(sessionState.metrics_requested || []), ...ruleMetrics])];
+              sessionState.metrics_returned = [...new Set([...(sessionState.metrics_returned || []), ...execResult.metrics_returned])];
+              sessionState.metric_versions = { ...(sessionState.metric_versions || {}), ...execResult.metric_versions };
+              setSessionState(senderUsername, sessionState).catch(() => {});
+
+              const validResults = execResult.results.filter(r => r.value !== null && r.value !== undefined);
+              if (validResults.length > 0) {
+                // 组装数据层回复
+                const lines = validResults.map(r => {
+                  const isRatio = r.metric_id.includes('率') || r.name?.includes('率');
+                  const v = typeof r.value === 'number'
+                    ? (isRatio ? `${r.value}%` : r.value.toLocaleString('zh-CN'))
+                    : r.value;
+                  return `- **${r.name}**：${v}${r.notes ? `（${r.notes}）` : ''}`;
+                });
+                const failedResults = execResult.results.filter(r => r.value === null || r.value === undefined);
+                const failNote = failedResults.length > 0
+                  ? `\n\n⚠️ 以下指标暂无数据：${failedResults.map(r => r.name || r.metric_id).join('、')}`
+                  : '';
+                const intentLabel = routeRes.intent_label || routeRes.intent || '';
+                const { label: timeLabel } = extractTimeRangeFromText(text);
+                let dataBlock = `📊 ${intentLabel}（${store || '全部门店'}｜${timeLabel}）\n\n${lines.join('\n')}${failNote}`;
+
+                // G: Business Diagnosis Agent — 仅当 Feature Flag 开启时叠加分析层
+                if (AGENT_FEATURE_FLAGS.enable_business_diagnosis) {
+                  try {
+                    const diagResult = await runBusinessDiagnosis(execResult, text);
+                    if (diagResult?.diagnosis) {
+                      dataBlock += `\n\n💡 **经营诊断**\n${diagResult.diagnosis}`;
+                      logExecutorEvent('diagnosis_injected', {
+                        task_id: execResult.task_id,
+                        data_basis: diagResult.data_basis
+                      });
+                    }
+                  } catch (de) {
+                    logExecutorEvent('diagnosis_inject_error', { task_id: execResult.task_id, error: de?.message });
+                  }
+                }
+
+                response = dataBlock;
+                agentData = {
+                  route, store, brand, brandId, brandConfig,
+                  grounded: true, deterministic: true,
+                  source: 'data_executor',
+                  task_id: execResult.task_id,
+                  intent: routeRes.intent,
+                  metrics_returned: execResult.metrics_returned,
+                  metric_versions: execResult.metric_versions
+                };
+                break;
+              }
+            } catch (e) {
+              logExecutorEvent('executor_fallthrough', {
+                task_id: sessionState.task_id,
+                error: e?.message,
+                metrics: routeRes.required_metrics
+              });
+              console.error('[data_executor] rule-engine query failed, falling through:', e?.message);
+            }
+          }
+        }
+
         const deterministicCoverageReply = await buildBiDeterministicDataSourceCoverageReply(text);
         if (deterministicCoverageReply) {
           response = deterministicCoverageReply;
@@ -7597,6 +7766,19 @@ ${kbContext}${trainingTasksContext}${activeTaskContext}
       confidence: agentData.confidence,
       updatedAt: new Date().toISOString()
     });
+  } catch (e) {}
+
+  // ── 最终持久化 session state ────────────────────────────────
+  try {
+    if (agentData.metrics_returned?.length) {
+      sessionState.metrics_returned = [...new Set([...(sessionState.metrics_returned || []), ...agentData.metrics_returned])];
+    }
+    if (agentData.metric_versions) {
+      sessionState.metric_versions = { ...(sessionState.metric_versions || {}), ...agentData.metric_versions };
+    }
+    sessionState.route = route;
+    sessionState.store = store || sessionState.store;
+    await setSessionState(senderUsername, sessionState);
   } catch (e) {}
 
   const needsAutonomousTask = !!(

@@ -1,5 +1,20 @@
 import { pool } from './agents.js';
 
+// ─── Feature Flags（降级开关）────────────────────────────────
+// 通过环境变量覆盖，例如 FEATURE_DISABLE_METRIC_DICTIONARY=true
+export const AGENT_FEATURE_FLAGS = {
+  // 阶段1：指标字典 & 分析规则是否启用
+  enable_metric_dictionary: process.env.FEATURE_DISABLE_METRIC_DICTIONARY !== 'true',
+  // 阶段1：session state 跨轮记忆
+  enable_session_state: process.env.FEATURE_DISABLE_SESSION_STATE !== 'true',
+  // 阶段2：Data Executor 确定性查询层
+  enable_data_executor: process.env.FEATURE_DISABLE_DATA_EXECUTOR !== 'true',
+  // 阶段2：Business Diagnosis Agent（LLM 约束分析层）
+  enable_business_diagnosis: process.env.FEATURE_ENABLE_DIAGNOSIS === 'true',
+  // 阶段3：规则引擎强路由（替代 LLM 路由）
+  enable_rule_engine: process.env.FEATURE_DISABLE_RULE_ENGINE !== 'true',
+};
+
 const ALLOWED_MODEL_PREFIXES = ['deepseek', 'qwen', 'doubao'];
 const FALLBACK_MODEL = 'deepseek-chat';
 
