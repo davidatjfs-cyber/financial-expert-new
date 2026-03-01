@@ -9405,6 +9405,30 @@ app.put('/api/state', authRequired, async (req, res) => {
        on conflict (key) do update set data = excluded.data, updated_at = now()`,
       ['default', JSON.stringify(data)]
     );
+    // 同步 feishu_users：更新在职员工的 role/store/name，注销已删除/离职员工
+    setImmediate(async () => {
+      try {
+        const emps = Array.isArray(data.employees) ? data.employees : [];
+        const inactiveStatuses = ['resigned','deleted','inactive','terminated','离职','已删除','已离职'];
+        for (const emp of emps) {
+          const uname = String(emp.username || '').trim();
+          if (!uname) continue;
+          const empStatus = String(emp.status || '').trim().toLowerCase();
+          if (inactiveStatuses.includes(empStatus)) {
+            // 注销已删除/离职员工的飞书绑定
+            await pool.query('UPDATE feishu_users SET registered=FALSE WHERE username=$1', [uname]);
+          } else {
+            // 同步在职员工的最新 role/store/name
+            await pool.query(
+              'UPDATE feishu_users SET role=$1, store=$2, name=$3, updated_at=NOW() WHERE username=$4',
+              [String(emp.role||''), String(emp.store||''), String(emp.name||''), uname]
+            );
+          }
+        }
+      } catch (syncErr) {
+        console.error('[state] feishu_users sync error:', syncErr?.message);
+      }
+    });
     return res.json({ ok: true });
   } catch (e) {
     return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });

@@ -8106,6 +8106,21 @@ export async function onFeishuEvent(body) {
       return { ok: true, pendingRegistration: true };
     }
 
+    // ── 校验员工是否仍在职 ──
+    try {
+      const _state = await getSharedState();
+      const _empList = Array.isArray(_state?.employees) ? _state.employees : [];
+      const _empU = String(feishuUser.username || '').trim().toLowerCase();
+      const _empRec = _empList.find(e => String(e?.username || '').trim().toLowerCase() === _empU);
+      const _inactive = ['resigned','deleted','inactive','terminated','离职','已删除','已离职'];
+      if (!_empRec || _inactive.includes(String(_empRec.status || '').trim().toLowerCase())) {
+        const _msg = !_empRec ? '⚠️ 您的账号已从系统中移除，无法使用智能助理。' : '⚠️ 您的账号已离职，无法使用智能助理。';
+        await sendLarkMessage(openId, _msg);
+        try { await pool().query('UPDATE feishu_users SET registered=FALSE WHERE open_id=$1', [openId]); } catch(_e) {}
+        return { ok: true, blocked: !_empRec ? 'deleted' : 'inactive' };
+      }
+    } catch (_e) { console.error('[feishu] status check error:', _e?.message); }
+
     // ── User is registered, process message ──
     let text = '';
     let imageUrls = [];
