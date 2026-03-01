@@ -5151,12 +5151,14 @@ async function executeScheduledTask(taskKey, config) {
 export async function sendScheduledChecklist(config) {
   // 优先按门店发送；未配置门店时，按品牌发送
   const sharedState = await getSharedState();
-  const stores = Object.entries(sharedState.stores || {});
+  // stores 可能是数组（hrms_state中的格式）或对象
+  const rawStores = sharedState.stores || [];
+  const storeList = Array.isArray(rawStores) ? rawStores : Object.values(rawStores);
   const configStore = String(config?.store || '').trim();
   const configBrand = String(config?.brand || '').trim();
   const targetStores = configStore
-    ? stores.filter(([, s]) => isLikelySameStore(s?.name, configStore))
-    : stores.filter(([, s]) => String(s?.brand || '').trim() === configBrand);
+    ? storeList.filter(s => isLikelySameStore(s?.name, configStore))
+    : storeList.filter(s => String(s?.brand || '').trim() === configBrand);
   
   if (targetStores.length === 0) {
     console.log(`[ops] no stores found for config: store=${configStore}, brand=${configBrand}`);
@@ -5170,7 +5172,7 @@ export async function sendScheduledChecklist(config) {
   ];
 
   // 向每个门店发送检查表
-  for (const [storeKey, store] of targetStores) {
+  for (const store of targetStores) {
     try {
       // 同时查找该门店的 店长(store_manager) 和 出品经理(store_production_manager)
       const targets = allStaff.filter(u =>
@@ -5179,7 +5181,7 @@ export async function sendScheduledChecklist(config) {
       );
       const uniqueUsernames = [...new Set(targets.map(u => String(u.username || '').trim()).filter(Boolean))];
       if (!uniqueUsernames.length) {
-        console.log(`[ops] no staff found for store=${store.name}, storeKey=${normalizeStoreKey(store.name)}, allStaff=${allStaff.length}`);
+        console.log(`[ops] no staff found for store=${store.name}, allStaff=${allStaff.length}`);
       }
       
       for (const username of uniqueUsernames) {
@@ -5234,16 +5236,17 @@ export async function sendScheduledChecklist(config) {
         }
       }
     } catch (e) {
-      console.error(`[ops] failed to send checklist to ${storeKey}:`, e?.message);
+      console.error(`[ops] failed to send checklist to ${store?.name}:`, e?.message);
     }
   }
 }
 
 async function sendSafetyCheck(config) {
   const sharedState = await getSharedState();
-  const stores = Object.entries(sharedState.stores || {});
+  const rawStores = sharedState.stores || [];
+  const storeList = Array.isArray(rawStores) ? rawStores : Object.values(rawStores);
 
-  if (!stores.length) {
+  if (!storeList.length) {
     console.log('[ops] no stores available for safety check');
     return;
   }
@@ -5251,14 +5254,14 @@ async function sendSafetyCheck(config) {
   const configStore = String(config?.store || '').trim();
   const configBrand = String(config?.brand || '').trim();
   const targetStores = configStore
-    ? stores.filter(([, s]) => isLikelySameStore(s?.name, configStore))
-    : (configBrand ? stores.filter(([, s]) => String(s?.brand || '').trim() === configBrand) : stores);
+    ? storeList.filter(s => isLikelySameStore(s?.name, configStore))
+    : (configBrand ? storeList.filter(s => String(s?.brand || '').trim() === configBrand) : storeList);
   if (!targetStores.length) {
     console.log(`[ops] no stores matched safety check config: store=${configStore}, brand=${configBrand}`);
     return;
   }
 
-  const [, pickedStore] = targetStores[Math.floor(Math.random() * targetStores.length)];
+  const pickedStore = targetStores[Math.floor(Math.random() * targetStores.length)];
   const roles = Array.isArray(config?.assigneeRoles) && config.assigneeRoles.length
     ? config.assigneeRoles.map((r) => String(r || '').trim()).filter(Boolean)
     : ['store_manager', 'store_production_manager'];
@@ -8571,7 +8574,8 @@ export function getAgentHealthStatus() {
     schedulerRunning: _schedulerStarted,
     consecutiveLLMErrors: _errorTracker.consecutiveLLMErrors,
     performanceMetrics: { ..._performanceMetrics },
-    llmHealthy: _errorTracker.consecutiveLLMErrors < 5
+    llmHealthy: _errorTracker.consecutiveLLMErrors < 5,
+    scheduledTaskStatus: getScheduledTaskStatus()
   };
 }
 

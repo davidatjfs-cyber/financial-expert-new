@@ -26002,16 +26002,17 @@ ${knowledgeContent.slice(0, 30000)}`;
             if (managerUsernameEl) {
                 const users = HRMS_STORE.getUsers();
                 const employees = HRMS_STORE.getEmployees();
-                const nameMap = {};
-                (users || []).forEach(u => { if (u?.username) nameMap[u.username] = String(u.name || '').trim(); });
-                (employees || []).forEach(e => { if (e?.username && !nameMap[e.username]) nameMap[e.username] = String(e.name || '').trim(); });
+                // 直属上级只显示4个角色：店长/出品经理/总部营运/管理员
+                const managerRoles = new Set(['store_manager', 'store_production_manager', 'hq_manager', 'admin']);
                 const seen = new Set();
                 const items = [];
-                [...(users || []), ...(employees || [])].forEach(x => {
+                [...(employees || []), ...(users || [])].forEach(x => {
                     const u = String(x?.username || '').trim();
+                    const r = String(x?.role || '').trim();
                     if (!u || seen.has(u)) return;
+                    if (!managerRoles.has(r)) return;
                     seen.add(u);
-                    items.push({ username: u, name: nameMap[u] || '' });
+                    items.push({ username: u, name: String(x?.name || '').trim() || u, role: r });
                 });
                 items.sort((a, b) => (a.name || a.username).localeCompare(b.name || b.username, 'zh-CN'));
                 managerUsernameEl.innerHTML = '<option value="">（无）</option>' + items.map(it => {
