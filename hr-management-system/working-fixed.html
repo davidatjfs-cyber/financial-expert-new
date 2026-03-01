@@ -27487,18 +27487,9 @@ ${knowledgeContent.slice(0, 30000)}`;
                 const _uname = String(currentUser.username || '').trim().toLowerCase();
                 const _uid = String(currentUser.id || '').trim().toLowerCase();
                 const _name = String(currentUser.name || '').trim();
-                const _empRec = _empList.find(e => {
-                    const eu = String(e?.username || '').trim().toLowerCase();
-                    const ei = String(e?.id || '').trim().toLowerCase();
-                    const en = String(e?.name || '').trim();
-                    return (_uname && eu === _uname) || (_uid && ei === _uid) || (_name && en === _name);
-                }) || {};
-                const _usrRec = _userList.find(u => {
-                    const uu = String(u?.username || '').trim().toLowerCase();
-                    const ui = String(u?.id || '').trim().toLowerCase();
-                    const un = String(u?.name || '').trim();
-                    return (_uname && uu === _uname) || (_uid && ui === _uid) || (_name && un === _name);
-                }) || {};
+                // 仅按username匹配：id字段大量重复不可信，name匹配会误伤其他员工
+                const _empRec = _uname ? (_empList.find(e => String(e?.username || '').trim().toLowerCase() === _uname) || {}) : {};
+                const _usrRec = _uname ? (_userList.find(u => String(u?.username || '').trim().toLowerCase() === _uname) || {}) : {};
 
                 currentUser = {
                     ...currentUser,
