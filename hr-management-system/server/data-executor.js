@@ -88,19 +88,65 @@ async function getCachedResult(taskId, metricId, timeRange, store) {
   }
 }
 
-async function setCachedResult(taskId, metricId, timeRange, store, result, metricVersion) {
+async function setCachedResult(taskId, metricId, timeRange, store, result, metricVersion, ttlMinutes) {
+  const ttl = (ttlMinutes && ttlMinutes > 0) ? `${ttlMinutes} minutes` : '120 minutes';
   try {
     await pool().query(
       `INSERT INTO agent_metric_cache
          (task_id, metric_id, time_range, store, result, metric_version, created_at, expires_at)
-       VALUES ($1, $2, $3, $4, $5::jsonb, $6, NOW(), NOW() + INTERVAL '2 hours')
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6, NOW(), NOW() + $7::interval)
        ON CONFLICT (task_id, metric_id, time_range, store)
        DO UPDATE SET result = EXCLUDED.result, metric_version = EXCLUDED.metric_version,
-                     expires_at = NOW() + INTERVAL '2 hours'`,
-      [taskId, metricId, timeRange, store || '', JSON.stringify(result), metricVersion || 1]
+                     expires_at = NOW() + $7::interval`,
+      [taskId, metricId, timeRange, store || '', JSON.stringify(result), metricVersion || 1, ttl]
     );
   } catch (e) {
     console.error('[data-executor] setCachedResult error:', e?.message);
+  }
+}
+
+// ── 2b. 指标版本变更：写 change_log + 清理旧缓存 ──────────────
+
+export async function updateMetricVersion(metricId, changes, changedBy) {
+  try {
+    const cur = await getMetricDef(metricId);
+    if (!cur) return { ok: false, error: 'metric_not_found' };
+    const newVersion = (cur.version || 1) + 1;
+    const entry = {
+      version: newVersion,
+      changed_by: changedBy || 'system',
+      changed_at: new Date().toISOString(),
+      changes: changes || {}
+    };
+    // 追加 change_log（保留最近20条）
+    const existingLog = Array.isArray(cur.metadata?.change_log) ? cur.metadata.change_log : [];
+    const newLog = [...existingLog, entry].slice(-20);
+    await pool().query(
+      `UPDATE metric_dictionary
+         SET version = $1,
+             metadata = jsonb_set(COALESCE(metadata,'{}'), '{change_log}', $2::jsonb),
+             updated_at = NOW()
+       WHERE metric_id = $3`,
+      [newVersion, JSON.stringify(newLog), metricId]
+    );
+    // 清理该指标所有缓存（版本变更，旧缓存全部失效）
+    const deleted = await pool().query(
+      `DELETE FROM agent_metric_cache WHERE metric_id = $1`,
+      [metricId]
+    );
+    // 清除内存字典缓存
+    _dictCache.delete(metricId);
+    logExecutorEvent('metric_version_bumped', {
+      metric_id: metricId,
+      old_version: cur.version || 1,
+      new_version: newVersion,
+      cache_cleared: deleted.rowCount || 0,
+      changed_by: changedBy || 'system'
+    });
+    return { ok: true, metric_id: metricId, new_version: newVersion, cache_cleared: deleted.rowCount || 0 };
+  } catch (e) {
+    console.error('[data-executor] updateMetricVersion error:', e?.message);
+    return { ok: false, error: e?.message };
   }
 }
 
@@ -471,7 +517,8 @@ export async function executeMetrics(metricIds, timeRange, store, taskId) {
         } else {
           const depResult = await executeOneMetric(depId, timeRange, store, depResultsMap);
           depResultsMap[depId] = depResult;
-          await setCachedResult(tId, depId, timeRange || '', store, depResult, def?.version);
+          const depDef = await getMetricDef(depId);
+          await setCachedResult(tId, depId, timeRange || '', store, depResult, depDef?.version, depDef?.cache_ttl_minutes);
           logExecutorEvent('metric_queried', { task_id: tId, metric_id: depId, value: depResult.value, error: depResult.error || null, is_dep: true });
         }
       }
@@ -481,7 +528,7 @@ export async function executeMetrics(metricIds, timeRange, store, taskId) {
     const result = await executeOneMetric(metricId, timeRange, store, depResultsMap);
     depResultsMap[metricId] = result;
     results.push(result);
-    await setCachedResult(tId, metricId, timeRange || '', store, result, def?.version);
+    await setCachedResult(tId, metricId, timeRange || '', store, result, def?.version, def?.cache_ttl_minutes);
     logExecutorEvent('metric_queried', { task_id: tId, metric_id: metricId, value: result.value, error: result.error || null });
   }
 
@@ -522,7 +569,7 @@ export async function matchAnalysisRule(text) {
   if (!_rulesCache.rules || Date.now() - _rulesCache.ts > 5 * 60 * 1000) {
     try {
       const r = await pool().query(
-        `SELECT * FROM analysis_rules WHERE enabled = TRUE ORDER BY priority DESC`
+        `SELECT * FROM analysis_rules WHERE enabled = TRUE ORDER BY priority DESC, id ASC`
       );
       _rulesCache.rules = r.rows || [];
       _rulesCache.ts = Date.now();
@@ -532,13 +579,23 @@ export async function matchAnalysisRule(text) {
   }
 
   const t = String(text || '').toLowerCase();
+  const matched = [];
   for (const rule of _rulesCache.rules) {
     const keywords = Array.isArray(rule.trigger_keywords) ? rule.trigger_keywords : [];
     if (keywords.some(kw => t.includes(String(kw).toLowerCase()))) {
-      return rule;
+      matched.push(rule);
     }
   }
-  return null;
+  if (matched.length === 0) return null;
+  // 已按 priority DESC 排序，取最高优先级；若同优先级有多条记录冲突
+  if (matched.length > 1) {
+    logExecutorEvent('rule_conflict', {
+      matched_rules: matched.map(r => r.intent),
+      selected: matched[0].intent,
+      text_snippet: text.slice(0, 60)
+    });
+  }
+  return matched[0];
 }
 
 // ── 12. Session State 管理 ────────────────────────────────────
@@ -648,9 +705,9 @@ export function extractTimeRangeFromText(text) {
     return { timeRange: `${s}~${s}`, label: '前天' };
   }
   if (/上周/.test(q)) {
-    const dow = today.getDay() || 7;
-    const mon = new Date(today - (dow + 6) * ms);
-    const sun = new Date(+mon + 6 * ms);
+    const dow = today.getDay() || 7; // 1=周一 ... 7=周日
+    const mon = new Date(+today - (dow - 1 + 7) * ms); // 上周一
+    const sun = new Date(+mon + 6 * ms);               // 上周日
     return { timeRange: `${fmt(mon)}~${fmt(sun)}`, label: '上周' };
   }
   if (/本周/.test(q)) {
@@ -788,6 +845,28 @@ ${JSON.stringify(dataSummary, null, 2)}
       duration_ms: duration,
       text_len: diagnosisText.length
     });
+
+    // P1B: 写入 diagnosis_feedback 表供质量监控
+    try {
+      await pool().query(
+        `INSERT INTO diagnosis_feedback
+           (task_id, user_key, store, time_range, metrics_used, diagnosis, char_count, metric_count, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, NOW(), NOW())
+         ON CONFLICT DO NOTHING`,
+        [
+          taskId,
+          options.username || 'unknown',
+          execResult.store || null,
+          execResult.time_range || null,
+          JSON.stringify(availableMetrics),
+          diagnosisText.slice(0, 2000),
+          diagnosisText.length,
+          availableMetrics.length
+        ]
+      );
+    } catch (fe) {
+      // 不阻断主流程
+    }
 
     return {
       task_id: taskId,

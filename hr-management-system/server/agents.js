@@ -7262,7 +7262,7 @@ async function handleAgentMessage(senderUsername, senderName, senderStore, sende
                 // G: Business Diagnosis Agent — 仅当 Feature Flag 开启时叠加分析层
                 if (AGENT_FEATURE_FLAGS.enable_business_diagnosis) {
                   try {
-                    const diagResult = await runBusinessDiagnosis(execResult, text);
+                    const diagResult = await runBusinessDiagnosis(execResult, text, { username: senderUsername });
                     if (diagResult?.diagnosis) {
                       dataBlock += `\n\n💡 **经营诊断**\n${diagResult.diagnosis}`;
                       logExecutorEvent('diagnosis_injected', {

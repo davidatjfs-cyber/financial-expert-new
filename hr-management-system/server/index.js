@@ -32,6 +32,7 @@ import { ensureRAGSchema, ragQuery, ragMultiQuery, ragUpdateScope, ragStats } fr
 import { ensureTaskBoardSchema, checkTimeoutsAndEscalate, registerTaskBoardRoutes } from './task-board-api.js';
 import { ensureHRMSApiSchema, registerHRMSApiRoutes } from './hrms-api-tools.js';
 import { ensureSOPDistributionSchema, registerSOPDistributionRoutes } from './sop-distribution.js';
+import { setDataExecutorPool, purgeExpiredCache, updateMetricVersion } from './data-executor.js';
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = String(process.env.HOST || '0.0.0.0');
@@ -991,13 +992,57 @@ function normalizeForecastWeatherTag(input) {
 // 门店预测配置：雨天系数、节假日策略
 const STORE_FORECAST_CONFIG = {
   '洪潮大宁久光店': { rainFactor: 0.90, snowFactor: 0.85, holidayAsWeekend: true },
+  '洪潮久光店': { rainFactor: 0.90, snowFactor: 0.85, holidayAsWeekend: true },
   '马己仙上海音乐广场店': { rainFactor: 0.85, snowFactor: 0.80, holidayAsWeekend: true },
+  '马己仙': { rainFactor: 0.85, snowFactor: 0.80, holidayAsWeekend: true },
   '_default': { rainFactor: 0.88, snowFactor: 0.82, holidayAsWeekend: true }
 };
 
 function getStoreForecastConfig(store) {
   const s = String(store || '').trim();
-  return STORE_FORECAST_CONFIG[s] || STORE_FORECAST_CONFIG['_default'];
+  if (STORE_FORECAST_CONFIG[s]) return STORE_FORECAST_CONFIG[s];
+  // Partial name match for abbreviated store names
+  const key = Object.keys(STORE_FORECAST_CONFIG).find(k => k !== '_default' && (s.includes(k) || k.includes(s)));
+  return (key ? STORE_FORECAST_CONFIG[key] : null) || STORE_FORECAST_CONFIG['_default'];
+}
+
+function isCNYPeriod(dateStr) {
+  // Spring Festival anomaly window. Mar 1+ treated as normal (元宵 = Feb 20 2026).
+  if (!dateStr) return false;
+  const d = new Date(dateStr + 'T00:00:00');
+  if (!Number.isFinite(d.getTime())) return false;
+  const y = d.getFullYear(), m = d.getMonth() + 1, day = d.getDate();
+  // 2026 CNY window: Jan 25 – Feb 28
+  if (y === 2026 && ((m === 1 && day >= 25) || m === 2)) return true;
+  // Generic guard for other years: Jan 25 – Feb 28
+  if (m === 2 || (m === 1 && day >= 25)) return true;
+  return false;
+}
+
+// Known national public holidays (non-CNY) that inflate restaurant sales.
+const KNOWN_PUBLIC_HOLIDAYS = new Set([
+  '2026-01-01','2026-01-02','2026-01-03',
+  '2026-05-01','2026-05-02','2026-05-03','2026-05-04','2026-05-05',
+  '2026-06-19','2026-06-20','2026-06-21',
+  '2026-10-01','2026-10-02','2026-10-03','2026-10-04','2026-10-05','2026-10-06','2026-10-07','2026-10-08',
+  '2025-01-01','2025-01-02','2025-01-03',
+  '2025-05-01','2025-05-02','2025-05-03','2025-05-04','2025-05-05',
+  '2025-05-31','2025-06-01','2025-06-02',
+  '2025-10-01','2025-10-02','2025-10-03','2025-10-04','2025-10-05','2025-10-06','2025-10-07','2025-10-08',
+]);
+
+function isKnownPublicHoliday(dateStr) {
+  return KNOWN_PUBLIC_HOLIDAYS.has(String(dateStr || '').trim());
+}
+
+function isNormalWorkday(dateStr, isHoliday) {
+  if (isHoliday) return false;
+  if (isCNYPeriod(dateStr)) return false;
+  if (isKnownPublicHoliday(dateStr)) return false;
+  const d = new Date((dateStr || '') + 'T00:00:00');
+  if (!Number.isFinite(d.getTime())) return false;
+  const dow = d.getDay();
+  return dow >= 1 && dow <= 5;
 }
 
 function estimateRevenueByHistory(historyRows, target, store) {
@@ -1020,6 +1065,43 @@ function estimateRevenueByHistory(historyRows, target, store) {
     if (row?.isHoliday) prev.isHoliday = true;
     dailyMap.set(key, prev);
   });
+
+  // Mark known public holidays so they get the same penalty as CNY weekdays
+  dailyMap.forEach((item) => {
+    if (!item.isHoliday && isKnownPublicHoliday(item.date)) item.isHoliday = true;
+  });
+
+  // Outlier removal: per-DOW IQR filter.
+  // Removes extreme records (e.g. Jan 15 = 502722) that would skew the weighted average.
+  // Only removes genuine outliers: revenue > Q3 + 3×IQR within the same day-of-week group.
+  (() => {
+    const revByDow = {};
+    dailyMap.forEach((item) => {
+      const dObj = new Date(String(item.date || '') + 'T00:00:00');
+      if (!Number.isFinite(dObj.getTime())) return;
+      const dw = dObj.getDay();
+      if (!revByDow[dw]) revByDow[dw] = [];
+      revByDow[dw].push(Number(item.revenue || 0));
+    });
+    const caps = {};
+    Object.entries(revByDow).forEach(([dw, vals]) => {
+      if (vals.length < 4) return;
+      const sorted = vals.slice().sort((a, b) => a - b);
+      const q1 = sorted[Math.floor(sorted.length * 0.25)];
+      const q3 = sorted[Math.floor(sorted.length * 0.75)];
+      const iqr = q3 - q1;
+      caps[dw] = q3 + 3 * iqr;
+    });
+    dailyMap.forEach((item, key) => {
+      const dObj = new Date(String(item.date || '') + 'T00:00:00');
+      if (!Number.isFinite(dObj.getTime())) return;
+      const dw = dObj.getDay();
+      const cap = caps[dw];
+      if (cap != null && Number(item.revenue || 0) > cap) {
+        dailyMap.delete(key);
+      }
+    });
+  })();
 
   const storeConfig = getStoreForecastConfig(store);
   const targetDate = safeDateOnly(target?.date);
@@ -1053,31 +1135,60 @@ function estimateRevenueByHistory(historyRows, target, store) {
     result.sampleCount += list.length;
     if (!list.length) return;
 
+    // Determine if target is a normal workday (non-holiday, non-CNY, Mon-Fri)
+    const targetIsNormalWorkday = isNormalWorkday(targetDate, targetIsHoliday);
+
     const scored = list.map((item) => {
       let score = 1;
+      let cnyPenaltyFactor = 1.0; // applied last, after all additive scoring
       try {
         const d1 = new Date(String(item.date || '') + 'T00:00:00');
         if (Number.isFinite(d1.getTime()) && targetDow >= 0) {
           // Day-of-week: exact match is the strongest signal (Mon≠Fri, weekday≠weekend)
           let itemDow = d1.getDay();
+          const itemRawDow = itemDow;
           if (storeConfig.holidayAsWeekend && item.isHoliday && itemDow >= 1 && itemDow <= 5) itemDow = 0;
-          if (itemDow === targetDow) score += 5.0;
+          if (itemDow === targetDow) score += 20.0;
           else {
+            // Saturday(6) and Sunday(0) are NOT interchangeable — different revenue patterns
             const bothWeekend = (itemDow === 0 || itemDow === 6) && (targetDow === 0 || targetDow === 6);
-            if (bothWeekend) score += 3.0;
-            else score += 0.1;
+            if (bothWeekend) score += 1.5;
+            else score += 0.3; // weekday vs wrong weekday, or weekday vs weekend
           }
-        }
-        // Recency bonus: recent data is more reliable
-        if (targetDate) {
+
+          // ── CNY / holiday contamination detection ─────────────────────────
+          const itemIsCNY = isCNYPeriod(item.date);
+          const itemIsHolidayWeekday = (item.isHoliday || itemIsCNY) && itemRawDow >= 1 && itemRawDow <= 5;
+          const itemIsNormalWkd = isNormalWorkday(item.date, item.isHoliday);
+
+          if (itemIsHolidayWeekday && targetIsNormalWorkday) {
+            // CNY-inflated weekday vs normal-day target: nearly discard
+            // Penalty applied AFTER all additive scoring so recency can't rescue it
+            cnyPenaltyFactor = 0.05;
+          } else if (itemIsNormalWkd && !targetIsNormalWorkday && (targetDow === 0 || targetDow === 6 || targetIsHoliday)) {
+            // Normal weekday data pulled for weekend/holiday forecast: down-weight
+            cnyPenaltyFactor = 0.5;
+          }
+
+          // Recency bonus: skip for CNY-contaminated items targeting normal workdays
+          if (targetDate && cnyPenaltyFactor > 0.1) {
+            const d2 = new Date(targetDate + 'T00:00:00');
+            if (Number.isFinite(d2.getTime())) {
+              const dayDiff = Math.abs(Math.round((d2.getTime() - d1.getTime()) / 86400000));
+              score += Math.max(0, 2.0 * (1.0 - Math.min(1.0, dayDiff / 90)));
+            }
+          }
+        } else if (targetDate) {
+          // Recency bonus when DOW not available
+          const d1b = new Date(String(item.date || '') + 'T00:00:00');
           const d2 = new Date(targetDate + 'T00:00:00');
-          if (Number.isFinite(d2.getTime())) {
-            const dayDiff = Math.abs(Math.round((d2.getTime() - d1.getTime()) / 86400000));
-            score += Math.max(0, 1.0 - Math.min(1.0, dayDiff / 60));
+          if (Number.isFinite(d1b.getTime()) && Number.isFinite(d2.getTime())) {
+            const dayDiff = Math.abs(Math.round((d2.getTime() - d1b.getTime()) / 86400000));
+            score += Math.max(0, 2.0 * (1.0 - Math.min(1.0, dayDiff / 90)));
           }
         }
       } catch (e) {}
-      // Holiday matching (separate dimension — some stores do better on holidays, some worse)
+      // Holiday matching (separate dimension)
       if (Boolean(item.isHoliday) === targetIsHoliday) score += 0.8;
       // Weather match
       const itemWeatherTag = normalizeForecastWeatherTag(item.weather);
@@ -1085,12 +1196,24 @@ function estimateRevenueByHistory(historyRows, target, store) {
         if (itemWeatherTag === targetWeatherTag) score += 0.6;
         else score += 0.1;
       }
+      // Apply CNY penalty as final multiplier — after all additive bonuses
+      score = score * cnyPenaltyFactor;
       return { ...item, score: Number(score.toFixed(4)) };
     });
 
-    const picked = scored
+    // Filter to exact DOW-matching items when sufficient (≥2) to prevent
+    // weekend high-revenue records from inflating weekday forecasts.
+    const dowMatched = scored.filter((x) => {
+      if (targetDow < 0) return false;
+      try {
+        const dw = new Date(String(x.date || '') + 'T00:00:00').getDay();
+        return dw === targetDow;
+      } catch (e) { return false; }
+    });
+    const scoringPool = dowMatched.length >= 2 ? dowMatched : scored;
+    const picked = scoringPool
       .sort((a, b) => Number(b.score || 0) - Number(a.score || 0))
-      .slice(0, Math.min(50, scored.length));
+      .slice(0, Math.min(20, scoringPool.length));
     const scoreSum = picked.reduce((s, x) => s + Number(x.score || 0), 0);
     const weightedRevenue = picked.reduce((s, x) => s + Number(x.revenue || 0) * Number(x.score || 0), 0);
     let estimatedRevenue = scoreSum > 0 ? (weightedRevenue / scoreSum) : 0;
@@ -1142,12 +1265,14 @@ function computeAvgPricePerProduct(historyRows, storeScope, aliasLookup) {
       .map((x) => String(x || '').trim())
       .filter(Boolean)
   );
+  // agg keyed by bizType||productKey so dine-in and takeaway prices are tracked separately
   const agg = new Map();
   const rows = Array.isArray(historyRows) ? historyRows : [];
   rows.filter((x) => {
     if (!storeSet.size) return true;
     return storeSet.has(String(x?.store || '').trim());
   }).forEach((row) => {
+    const rowBiz = normalizeForecastBizType(row?.bizType) || '';
     const rev = Math.max(0, Number(row?.expectedRevenue || 0));
     const products = row?.productQuantities && typeof row.productQuantities === 'object' ? row.productQuantities : {};
     const entries = Object.entries(products)
@@ -1158,10 +1283,18 @@ function computeAvgPricePerProduct(historyRows, storeScope, aliasLookup) {
       const resolved = resolveForecastProductName(product, aliasLookup);
       if (!resolved.key) return;
       const allocRev = totalQty > 0 && rev > 0 ? (qty / totalQty) * rev : 0;
-      const prev = agg.get(resolved.key) || { totalRevenue: 0, totalQty: 0 };
+      // Key by bizType so channels don't blend prices
+      const key = `${rowBiz}||${resolved.key}`;
+      const prev = agg.get(key) || { totalRevenue: 0, totalQty: 0 };
       prev.totalRevenue += allocRev;
       prev.totalQty += qty;
-      agg.set(resolved.key, prev);
+      agg.set(key, prev);
+      // Also accumulate blended fallback key (empty biz prefix) for cross-channel lookup
+      const fallbackKey = `||${resolved.key}`;
+      const prev2 = agg.get(fallbackKey) || { totalRevenue: 0, totalQty: 0 };
+      prev2.totalRevenue += allocRev;
+      prev2.totalQty += qty;
+      agg.set(fallbackKey, prev2);
     });
   });
   const result = new Map();
@@ -1231,9 +1364,11 @@ const costPerUnitMap = new Map();
       costPerUnitMap.set(`${item.bizType}||${resolvedItem.key}`, item.costPerUnit);
       costPerUnitMap.set(`||${resolvedItem.key}`, item.costPerUnit);
     }
-    // If only costPerUnit is set, compute grossPerUnit from avg price
+    // If only costPerUnit is set, compute grossPerUnit from biz-specific avg price
     if ((!Number.isFinite(gpu) || gpu === undefined) && hasCost) {
-      const avgPrice = priceMap.get(resolvedItem.key) || 0;
+      const bizKey = `${item.bizType}||${resolvedItem.key}`;
+      const fallbackKey = `||${resolvedItem.key}`;
+      const avgPrice = priceMap.get(bizKey) || priceMap.get(fallbackKey) || 0;
       gpu = avgPrice > item.costPerUnit ? Number((avgPrice - item.costPerUnit).toFixed(4)) : 0;
     }
     if (!Number.isFinite(gpu)) return;
@@ -4656,12 +4791,12 @@ app.post('/api/gm-mailbox', authRequired, async (req, res) => {
 
 function canAccessDailyReports(role) {
   const r = String(role || '').trim();
-  return r === 'admin' || r === 'hq_manager' || r === 'store_manager' || r === 'store_production_manager';
+  return r === 'admin' || r === 'hq_manager' || r === 'store_manager' || r === 'store_production_manager' || r === 'front_manager';
 }
 
 function canWriteDailyReports(role) {
   const r = String(role || '').trim();
-  return r === 'admin' || r === 'store_manager';
+  return r === 'admin' || r === 'store_manager' || r === 'front_manager';
 }
 
 function canAccessOpsTasks(role) {
@@ -4844,7 +4979,7 @@ app.post('/api/daily-reports', authRequired, async (req, res) => {
       };
 
       // 同时更新到daily_reports表（只保存实际数据，目标从系统设置读取）
-      await safeExecute('daily_report_update', async () => {
+      try {
         const todayWechat = Math.max(0, Math.floor(Number(payload?.new_wechat_members) || 0));
         // 先写入今日新增，然后自动计算本月累计（不接受客户端传入的wechat_month_total）
         await pool.query(`
@@ -4873,7 +5008,7 @@ app.post('/api/daily-reports', authRequired, async (req, res) => {
             WHERE store = $1 AND date >= $2 AND date <= $3
           ) WHERE store = $1 AND date = $3
         `, [store, monthStart, date]);
-      });
+      } catch (e) { console.error('[daily_report_update_month]', e.message); }
 
       if (wantSubmit || submittedAt) {
         item.submittedAt = nextSubmittedAt;
@@ -4899,7 +5034,7 @@ app.post('/api/daily-reports', authRequired, async (req, res) => {
       }
 
       // 新建日报时也必须同步到 daily_reports（否则评分模型/Agent 数据源会缺失）
-      await safeExecute('daily_report_insert', async () => {
+      try {
         const todayWechat = Math.max(0, Math.floor(Number(payload?.new_wechat_members) || 0));
         await pool.query(`
           INSERT INTO daily_reports (store, brand, date, actual_revenue, actual_margin, dianping_rating, new_wechat_members, wechat_month_total, submitted, submitted_at)
@@ -4920,8 +5055,11 @@ app.post('/api/daily-reports', authRequired, async (req, res) => {
           payload?.dianping_rating || null,
           todayWechat
         ]);
-        // 重新计算本月累计并写回
-        const monthStart = date.slice(0, 7) + '-01';
+      } catch (e) { console.error('[daily_report_insert]', e.message); }
+
+      // 重新计算本月累计并写回
+      const monthStart = date.slice(0, 7) + '-01';
+      try {
         await pool.query(`
           UPDATE daily_reports SET wechat_month_total = (
             SELECT COALESCE(SUM(new_wechat_members), 0)
@@ -4929,7 +5067,7 @@ app.post('/api/daily-reports', authRequired, async (req, res) => {
             WHERE store = $1 AND date >= $2 AND date <= $3
           ) WHERE store = $1 AND date = $3
         `, [store, monthStart, date]);
-      });
+      } catch (e) { console.error('[daily_report_insert_month]', e.message); }
 
       shouldNotifySchedule = !!wantSubmit;
       list.unshift(item);
@@ -5037,6 +5175,22 @@ function normalizeForecastBizType(input) {
   return '';
 }
 
+// Store-level business slot configuration.
+// hasAfternoon: false  → no afternoon tea slot; 14:00-16:59 becomes early dinner.
+// dineinEarlyStart: hour at which dine-in can start (e.g. 16 for weekend 16:30 arrivals).
+const STORE_SLOT_CONFIG = {
+  '洪潮大宁久光店': { hasAfternoon: false, dineinEarlyStart: 16 },
+  '洪潮久光店':     { hasAfternoon: false, dineinEarlyStart: 16 },
+  '_default':       { hasAfternoon: true,  dineinEarlyStart: 17 }
+};
+
+function getStoreSlotConfig(store) {
+  const s = String(store || '').trim();
+  if (STORE_SLOT_CONFIG[s]) return STORE_SLOT_CONFIG[s];
+  const key = Object.keys(STORE_SLOT_CONFIG).find(k => k !== '_default' && (s.includes(k) || k.includes(s)));
+  return (key ? STORE_SLOT_CONFIG[key] : null) || STORE_SLOT_CONFIG['_default'];
+}
+
 function normalizeForecastSlot(input) {
   const v = String(input || '').trim().toLowerCase();
   if (!v) return '';
@@ -5046,28 +5200,48 @@ function normalizeForecastSlot(input) {
   return '';
 }
 
-function normalizeForecastSlotFromHourRange(input) {
+// Returns the canonical slot for a given hour, respecting store-level slot config.
+function resolveSlotForHour(startHour, storeSlotCfg) {
+  const cfg = storeSlotCfg || STORE_SLOT_CONFIG['_default'];
+  if (startHour >= 10 && startHour < 14) return 'lunch';
+  if (!cfg.hasAfternoon) {
+    // No afternoon tea: everything from lunch-end onward is dinner
+    if (startHour >= 14 && startHour < 23) return 'dinner';
+  } else {
+    if (startHour >= 14 && startHour < 17) return 'afternoon';
+    if (startHour >= 17 && startHour < 23) return 'dinner';
+  }
+  return '';
+}
+
+function normalizeForecastSlotFromHourRange(input, store) {
   const raw = String(input || '').trim();
   if (!raw) return '';
   const byWord = normalizeForecastSlot(raw);
-  if (byWord) return byWord;
+  // If explicitly named as a slot, remap 'afternoon' → 'dinner' for stores without afternoon tea
+  if (byWord) {
+    if (byWord === 'afternoon' && store) {
+      const cfg = getStoreSlotConfig(store);
+      if (!cfg.hasAfternoon) return 'dinner';
+    }
+    return byWord;
+  }
+  const slotCfg = store ? getStoreSlotConfig(store) : null;
   // Match HH:MM or HH：MM patterns
   const m = raw.match(/(\d{1,2})\s*[:：]\s*\d{1,2}/);
   if (m) {
     const startHour = Number(m[1]);
     if (Number.isFinite(startHour)) {
-      if (startHour >= 10 && startHour < 14) return 'lunch';
-      if (startHour >= 14 && startHour < 17) return 'afternoon';
-      if (startHour >= 17 && startHour < 22) return 'dinner';
+      const s = resolveSlotForHour(startHour, slotCfg);
+      if (s) return s;
     }
   }
   // Match decimal time from Excel (e.g. 0.708333 = 17:00)
   const dec = Number(raw);
   if (Number.isFinite(dec) && dec > 0 && dec < 1) {
     const hour = Math.floor(dec * 24);
-    if (hour >= 10 && hour < 14) return 'lunch';
-    if (hour >= 14 && hour < 17) return 'afternoon';
-    if (hour >= 17 && hour < 22) return 'dinner';
+    const s = resolveSlotForHour(hour, slotCfg);
+    if (s) return s;
   }
   // Match AM/PM time (e.g. "5:00 PM", "5:00:00 PM")
   const ampm = raw.match(/(\d{1,2})\s*[:：]\s*\d{1,2}(?:\s*[:：]\s*\d{1,2})?\s*(AM|PM|am|pm|上午|下午)/i);
@@ -5076,17 +5250,14 @@ function normalizeForecastSlotFromHourRange(input) {
     const isPM = /pm|下午/i.test(ampm[2]);
     if (isPM && h < 12) h += 12;
     if (!isPM && h === 12) h = 0;
-    if (h >= 10 && h < 14) return 'lunch';
-    if (h >= 14 && h < 17) return 'afternoon';
-    if (h >= 17 && h < 22) return 'dinner';
+    const s = resolveSlotForHour(h, slotCfg);
+    if (s) return s;
   }
   // Match plain hour number (e.g. "17" or "17:00")
   const plainHour = raw.match(/^(\d{1,2})$/);
   if (plainHour) {
-    const h = Number(plainHour[1]);
-    if (h >= 10 && h < 14) return 'lunch';
-    if (h >= 14 && h < 17) return 'afternoon';
-    if (h >= 17 && h < 22) return 'dinner';
+    const s = resolveSlotForHour(Number(plainHour[1]), slotCfg);
+    if (s) return s;
   }
   return '';
 }
@@ -5326,16 +5497,16 @@ function parseInventoryForecastRowsFromTableMatrix(matrix, fallbackBizType = '',
 
     // Derive slot: prefer explicit slot column, then 下单时间, then 结账时间
     let slotRaw = norm(iSlot >= 0 ? line[iSlot] : '');
-    let slot = slotRaw ? normalizeForecastSlotFromHourRange(slotRaw) : '';
+    let slot = slotRaw ? normalizeForecastSlotFromHourRange(slotRaw, store) : '';
     if (!slot && iOrderTime >= 0) {
-      slot = normalizeForecastSlotFromHourRange(norm(line[iOrderTime]));
+      slot = normalizeForecastSlotFromHourRange(norm(line[iOrderTime]), store);
     }
     if (!slot && iCheckoutTime >= 0) {
-      slot = normalizeForecastSlotFromHourRange(norm(line[iCheckoutTime]));
+      slot = normalizeForecastSlotFromHourRange(norm(line[iCheckoutTime]), store);
     }
     // If still no slot and we have a datetime in the date column, try extracting time from it
     if (!slot && dateRaw && /\d{1,2}[:：]\d{1,2}/.test(dateRaw)) {
-      slot = normalizeForecastSlotFromHourRange(dateRaw);
+      slot = normalizeForecastSlotFromHourRange(dateRaw, store);
     }
     if (!slot) continue;
     const weather = normalizeForecastWeather(iWeather >= 0 ? line[iWeather] : '') || defaultWeather;
@@ -5389,7 +5560,7 @@ function parseInventoryForecastRowsFromTableMatrix(matrix, fallbackBizType = '',
         }
       }
       if (slotIdx < 0) continue;
-      const slot = normalizeForecastSlotFromHourRange(line[slotIdx]);
+      const slot = normalizeForecastSlotFromHourRange(line[slotIdx], defaultStore);
       if (!slot) continue;
 
       const numericCells = [];
@@ -7625,6 +7796,79 @@ app.post('/api/reports/inventory-forecast/history/upload-image', authRequired, u
   });
 });
 
+// ─── P0A: 指标版本管理 API ───
+app.post('/api/admin/metrics/bump-version', authRequired, async (req, res) => {
+  const role = String(req.user?.role || '').trim();
+  if (!['admin', 'hq_manager'].includes(role)) return res.status(403).json({ error: 'forbidden' });
+  const metricId = String(req.body?.metric_id || '').trim();
+  const changes = req.body?.changes || {};
+  const changedBy = String(req.user?.username || 'admin');
+  if (!metricId) return res.status(400).json({ error: 'missing metric_id' });
+  try {
+    const result = await updateMetricVersion(metricId, changes, changedBy);
+    return res.json(result);
+  } catch (e) {
+    return res.status(500).json({ error: e?.message });
+  }
+});
+
+app.get('/api/admin/metrics/change-log/:metricId', authRequired, async (req, res) => {
+  const role = String(req.user?.role || '').trim();
+  if (!['admin', 'hq_manager', 'hr_manager'].includes(role)) return res.status(403).json({ error: 'forbidden' });
+  const metricId = String(req.params.metricId || '').trim();
+  try {
+    const r = await pool.query(
+      `SELECT metric_id, name, version, metadata->'change_log' AS change_log, updated_at
+       FROM metric_dictionary WHERE metric_id = $1`,
+      [metricId]
+    );
+    if (!r.rows[0]) return res.status(404).json({ error: 'not_found' });
+    return res.json(r.rows[0]);
+  } catch (e) {
+    return res.status(500).json({ error: e?.message });
+  }
+});
+
+// ─── P1B: Diagnosis 反馈 API ───
+app.post('/api/agent/diagnosis-feedback', authRequired, async (req, res) => {
+  const userKey = String(req.user?.username || '').toLowerCase();
+  const { task_id, feedback, feedback_note } = req.body || {};
+  if (!task_id || feedback === undefined) return res.status(400).json({ error: 'missing task_id or feedback' });
+  const fb = Number(feedback);
+  if (fb !== 0 && fb !== 1) return res.status(400).json({ error: 'feedback must be 0 or 1' });
+  try {
+    await pool.query(
+      `UPDATE diagnosis_feedback
+       SET feedback = $1, feedback_note = $2, updated_at = NOW()
+       WHERE task_id = $3 AND user_key = $4`,
+      [fb, String(feedback_note || '').slice(0, 500), task_id, userKey]
+    );
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message });
+  }
+});
+
+app.get('/api/admin/diagnosis-stats', authRequired, async (req, res) => {
+  const role = String(req.user?.role || '').trim();
+  if (!['admin', 'hq_manager'].includes(role)) return res.status(403).json({ error: 'forbidden' });
+  try {
+    const r = await pool.query(`
+      SELECT
+        COUNT(*) AS total,
+        COUNT(feedback) AS rated,
+        ROUND(AVG(CASE WHEN feedback = 1 THEN 100.0 ELSE 0 END), 1) AS like_rate_pct,
+        ROUND(AVG(char_count), 0) AS avg_char_count,
+        ROUND(AVG(metric_count), 1) AS avg_metric_count
+      FROM diagnosis_feedback
+      WHERE created_at > NOW() - INTERVAL '30 days'
+    `);
+    return res.json(r.rows[0]);
+  } catch (e) {
+    return res.status(500).json({ error: e?.message });
+  }
+});
+
 // ─── Sales Raw Upload ───
 app.post('/api/reports/sales-raw/upload', authRequired, upload.single('file'), async (req, res) => {
   const username = String(req.user?.username || '').trim();
@@ -8251,12 +8495,29 @@ app.post('/api/reports/inventory-forecast/revenue-estimate', authRequired, async
       })
       .slice(0, 1200);
 
-    // 补充 sales_raw 数据提高预测准确度
+    // 补充 sales_raw 数据提高预测准确度（扩至90天以覆盖1月正常数据）
     const nsk = String(store||'').trim().toLowerCase().replace(/\s+/g,'');
+    const targetDow0 = (() => { try { const td=new Date(date+'T00:00:00'); return Number.isFinite(td.getTime())?td.getDay():-1; } catch(e){return -1;} })();
+    const targetIsNormalWd0 = targetDow0>=1 && targetDow0<=5 && !isHoliday && !isCNYPeriod(date) && !isKnownPublicHoliday(date);
+    // For normal-weekday targets: strip CNY/holiday records from stored history
+    // so sales_raw normal-January data can fill in those dates instead.
+    if (targetIsNormalWd0) {
+      for (let i = historyRows.length - 1; i >= 0; i--) {
+        const d = safeDateOnly(historyRows[i]?.date);
+        if (d && (isCNYPeriod(d) || isKnownPublicHoliday(d))) { historyRows.splice(i, 1); }
+      }
+    }
     try {
-      const srR = await pool.query(`SELECT s.date::text AS date, ROUND(SUM(COALESCE(s.revenue,0))::numeric,2) AS day_revenue FROM sales_raw s WHERE lower(regexp_replace(coalesce(s.store,''),'\\s+','','g'))=$1 AND s.date<=$2::date AND s.date>=($2::date-INTERVAL '60 days') GROUP BY s.date ORDER BY s.date DESC LIMIT 60`,[nsk,date]);
+      const srR = await pool.query(`SELECT s.date::text AS date, ROUND(SUM(COALESCE(s.revenue,0))::numeric,2) AS day_revenue FROM sales_raw s WHERE lower(regexp_replace(coalesce(s.store,''),'\\s+','','g'))=$1 AND s.date<=$2::date AND s.date>=($2::date-INTERVAL '90 days') GROUP BY s.date ORDER BY s.date DESC LIMIT 90`,[nsk,date]);
       const exD=new Set(historyRows.map(r=>safeDateOnly(r?.date)).filter(Boolean));
-      for(const sr of(srR.rows||[])){const d=safeDateOnly(sr.date),rev=Number(sr.day_revenue)||0;if(!d||rev<=0||exD.has(d))continue;historyRows.push({date:d,bizType:'dinein',slot:'lunch',expectedRevenue:rev});}
+      for(const sr of(srR.rows||[])){
+        const d=safeDateOnly(sr.date),rev=Number(sr.day_revenue)||0;
+        if(!d||rev<=0||exD.has(d))continue;
+        const srIsCNY=isCNYPeriod(d),srIsHol=isKnownPublicHoliday(d);
+        // For normal-weekday targets: skip CNY and public-holiday source days entirely
+        if(targetIsNormalWd0 && (srIsCNY||srIsHol)) continue;
+        historyRows.push({date:d,bizType:'dinein',slot:'lunch',expectedRevenue:rev,isHoliday:srIsCNY||srIsHol});
+      }
     } catch(e){}
 
     const target = { date, weather, isHoliday };
@@ -8290,13 +8551,14 @@ app.get('/api/reports/inventory-forecast/gross-profit-profiles', authRequired, a
     try {
       const storeKeys = scope.storeScope.map(s => normalizeStoreKey(s));
       const dlR = await pool.query(`SELECT biz_type,dish_name,dish_price,unit_cost FROM dish_library_costs WHERE enabled=TRUE AND (lower(regexp_replace(coalesce(store,''),'\\s+','','g'))=ANY($1) OR store='*')`, [storeKeys]);
-      const existingKeys = new Set(items.map(x => `${normalizeForecastBizType(x?.bizType)||''}||${String(x?.product||'').trim().toLowerCase()}`));
+      const existingKeys = new Set(items.map(x => `${normalizeForecastBizType(x?.bizType)||''}||${normalizeProductName(String(x?.product||'').trim())}`));
       for (const r of (dlR.rows||[])) {
         const biz = normalizeForecastBizType(r.biz_type) || '';
         const name = String(r.dish_name||'').trim();
+        const nameNorm = normalizeProductName(name);
         const cost = safeNumber(r.unit_cost);
-        if (!name || !Number.isFinite(cost) || cost < 0) continue;
-        const ek = `${biz}||${name.toLowerCase()}`;
+        if (!nameNorm || !Number.isFinite(cost) || cost < 0) continue;
+        const ek = `${biz}||${nameNorm}`;
         if (!existingKeys.has(ek)) {
           items.push({ product: name, bizType: biz, costPerUnit: Number(cost.toFixed(4)), source: 'feishu_bitable' });
           existingKeys.add(ek);
@@ -8513,8 +8775,8 @@ app.post('/api/reports/inventory-forecast/gross-margin-estimate', authRequired, 
     try {
       const sk = scope.storeScope.map(s => normalizeStoreKey(s));
       const dlR = await pool.query(`SELECT biz_type,dish_name,unit_cost FROM dish_library_costs WHERE enabled=TRUE AND (lower(regexp_replace(coalesce(store,''),'\\s+','','g'))=ANY($1) OR store='*')`, [sk]);
-      const ek = new Set(profiles.map(x => `${normalizeForecastBizType(x?.bizType)||''}||${String(x?.product||'').trim().toLowerCase()}`));
-      for (const r of (dlR.rows||[])) { const b=normalizeForecastBizType(r.biz_type)||''; const n=String(r.dish_name||'').trim(); const c=safeNumber(r.unit_cost); if(!n||!Number.isFinite(c)||c<0) continue; const k=`${b}||${n.toLowerCase()}`; if(!ek.has(k)){profiles.push({product:n,bizType:b,costPerUnit:Number(c.toFixed(4))});ek.add(k);} }
+      const ek = new Set(profiles.map(x => `${normalizeForecastBizType(x?.bizType)||''}||${normalizeProductName(String(x?.product||'').trim())}`));
+      for (const r of (dlR.rows||[])) { const b=normalizeForecastBizType(r.biz_type)||''; const n=String(r.dish_name||'').trim(); const nNorm=normalizeProductName(n); const c=safeNumber(r.unit_cost); if(!nNorm||!Number.isFinite(c)||c<0) continue; const k=`${b}||${nNorm}`; if(!ek.has(k)){profiles.push({product:n,bizType:b,costPerUnit:Number(c.toFixed(4))});ek.add(k);} }
     } catch(e) { console.error('[margin-est] dish_library_costs merge error:', e?.message||e); }
     const aliasLookup = buildForecastProductAliasLookup(state0, { store: scope.store, brandId: scope.brandId });
 
@@ -9018,14 +9280,15 @@ function calcEmployeeMonthlyLeaveBalance(state, employee, month) {
   const [yr, mo] = m.split('-').map(Number);
   const daysInMonth = new Date(yr, mo, 0).getDate();
 
+  // Fixed entitlement: 4 rest days per month (not Sunday-count based)
+  const MONTHLY_REST_DAYS = 4;
   const weekDetails = [];
   for (let d = 1; d <= daysInMonth; d += 7) {
     const startDay = d;
     const endDay = Math.min(daysInMonth, d + 6);
-    let entitled = 0;
-    for (let x = startDay; x <= endDay; x++) {
-      if (new Date(yr, mo - 1, x).getDay() === 0) entitled += 1;
-    }
+    // Proportional share of 4 days based on days in this week-segment
+    const weekDays = endDay - startDay + 1;
+    const entitled = Number((MONTHLY_REST_DAYS * weekDays / daysInMonth).toFixed(2));
     weekDetails.push({
       weekIndex: weekDetails.length + 1,
       range: `${m}-${String(startDay).padStart(2, '0')}~${m}-${String(endDay).padStart(2, '0')}`,
@@ -9035,7 +9298,7 @@ function calcEmployeeMonthlyLeaveBalance(state, employee, month) {
     });
   }
 
-  const baseLeave = weekDetails.reduce((s, w) => s + Number(w?.entitled || 0), 0);
+  const baseLeave = MONTHLY_REST_DAYS;
 
   const joinDate = String(emp.joinDate || emp.createdAt || '').trim();
   let annualLeave = 0;
@@ -9339,7 +9602,7 @@ function authRequiredOrQueryToken(req, res, next) {
 function normalizeRoleForJwt(input) {
   const v = String(input || '').trim();
   if (!v) return 'store_employee';
-  const allowed = ['admin', 'hq_manager', 'store_manager', 'store_employee', 'cashier', 'hr_manager', 'store_production_manager'];
+  const allowed = ['admin', 'hq_manager', 'store_manager', 'store_employee', 'cashier', 'hr_manager', 'store_production_manager', 'front_manager'];
   if (allowed.includes(v)) return v;
   // Map known Chinese/custom role names to standard codes BEFORE preserving custom_ prefix
   const map = {
@@ -11371,10 +11634,46 @@ app.listen(PORT, HOST, async () => {
     setMasterPool(pool);
     setReportPool(pool);
     setSalesRawPool(pool);
+    setDataExecutorPool(pool);
     setTaskResponseHook(handleTaskResponse);
     await ensureMasterTables();
     startMasterAgent();
     console.log('[master] Master Agent orchestration initialized');
+
+    // Run intelligence upgrade migration (idempotent)
+    try {
+      const migSql = await import('fs').then(f => f.promises.readFile(new URL('./migrations/008_agent_intelligence_upgrade.sql', import.meta.url), 'utf8'));
+      await pool.query(migSql);
+      console.log('[intelligence] Migration 008 applied: metric_dictionary + analysis_rules + agent_metric_cache');
+    } catch (e) {
+      console.error('[intelligence] Migration 008 error (non-fatal):', e?.message);
+    }
+
+    // Run improvements migration 009 (idempotent)
+    try {
+      const mig009 = await import('fs').then(f => f.promises.readFile(new URL('./migrations/009_agent_improvements.sql', import.meta.url), 'utf8'));
+      await pool.query(mig009);
+      console.log('[intelligence] Migration 009 applied: cache_ttl_minutes + diagnosis_feedback');
+    } catch (e) {
+      console.error('[intelligence] Migration 009 error (non-fatal):', e?.message);
+    }
+
+    // Purge expired metric cache every 2 hours
+    setInterval(() => purgeExpiredCache().catch(() => {}), 2 * 60 * 60 * 1000);
+
+    // P0B: Purge expired session states every hour
+    setInterval(async () => {
+      try {
+        const r = await pool.query(
+          `DELETE FROM agent_long_memory
+           WHERE memory_key = 'session_state'
+             AND updated_at < NOW() - INTERVAL '2 hours'`
+        );
+        if (r.rowCount > 0) console.log(`[intelligence] Purged ${r.rowCount} expired session states`);
+      } catch (e) {
+        console.error('[intelligence] Session state purge error:', e?.message);
+      }
+    }, 60 * 60 * 1000);
 
     // Initialize enhanced autonomous agent systems
     try {
