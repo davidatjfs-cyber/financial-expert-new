@@ -3303,16 +3303,8 @@ function extractTableVisitItems(row) {
         .filter(Boolean)
     : [];
 
-  const negativePattern = /太[咸淡冷油辣热硬]|有点[咸淡冷硬腥慢小挤]|不满意|不好吃|不新鲜|不够|偏[咸淡]|等[很太]久|等了[很太]久|上菜[有稍]?[点微]?慢|不[满熟行]|肿了|太老|没有肉感|不是很满意|该[咸淡]的不[咸淡]/;
-
-  const reasonItems = reasonText && negativePattern.test(reasonText)
-    ? reasonText
-        .split(/[，,、\/;；|\n\r\t\s]+/)
-        .map((k) => String(k || '').trim())
-        .filter(Boolean)
-    : [];
-
-  return [...dishItems, ...reasonItems].filter((x) => x && !/卤鹅/.test(String(x)));
+  // 只用dissatisfaction_dish统计产品投诉，unsatisfied_items是原因描述不是菜品名
+  return dishItems.filter((x) => x && !/卤鹅/.test(String(x)));
 }
 
 function extractTableVisitDishes(row) {
@@ -3404,9 +3396,13 @@ function getMonthlyTarget(state, ym, store) {
 }
 
 function getActualRevenueFromHistoryRow(row) {
-  const actual = Math.max(0, toNum(row?.actualRevenue, 0));
+  let actual = Math.max(0, toNum(row?.actualRevenue, 0));
+  let expected = Math.max(0, toNum(row?.expectedRevenue, 0));
+  // 安全校验：折前>=实收，若反了则交换
+  if (actual > 0 && expected > 0 && actual > expected) {
+    const tmp = actual; actual = expected; expected = tmp;
+  }
   if (actual > 0) return actual;
-  const expected = Math.max(0, toNum(row?.expectedRevenue, 0));
   const discount = Math.max(0, toNum(row?.totalDiscount, 0));
   return Math.max(0, expected - discount);
 }
@@ -3505,19 +3501,23 @@ async function estimateMarginMetricsForRange({ state, store, startDate, endDate 
         estimatedCost = Math.max(0, allocRevenue - entry.qty * profile.grossPerUnit);
       }
 
+      const cR = expectedRevenue > 0 ? (entry.qty/totalQty)*expectedRevenue : 0;
       out[bizType].estimatedCost += estimatedCost;
+      out[bizType].covRev = (out[bizType].covRev||0)+cR;
       out.total.estimatedCost += estimatedCost;
+      out.total.covRev = (out.total.covRev||0)+cR;
     }
   }
 
-  const calcRate = (actualRevenue, estimatedCost) => {
-    if (!(actualRevenue > 0)) return 0;
-    return Math.max(0, 1 - (estimatedCost / actualRevenue));
+  const calcRate = (rev, cost) => {
+    if (!(rev > 0)) return 0;
+    return Math.max(0, 1 - cost / rev);
   };
 
-  out.takeaway.marginRate = calcRate(out.takeaway.actualRevenue, out.takeaway.estimatedCost);
-  out.dinein.marginRate = calcRate(out.dinein.actualRevenue, out.dinein.estimatedCost);
-  out.total.marginRate = calcRate(out.total.actualRevenue, out.total.estimatedCost);
+  const xCost = (o) => o.covRev > 0 ? o.estimatedCost * (o.actualRevenue / o.covRev) : o.estimatedCost;
+  out.takeaway.marginRate = calcRate(out.takeaway.actualRevenue, xCost(out.takeaway));
+  out.dinein.marginRate = calcRate(out.dinein.actualRevenue, xCost(out.dinein));
+  out.total.marginRate = calcRate(out.total.actualRevenue, xCost(out.total));
 
   return out;
 }
@@ -3759,6 +3759,8 @@ async function processTableVisitData(records) {
       await pool().query(`
         INSERT INTO agent_messages (direction, channel, feishu_open_id, sender_username, sender_name, sender_role, routed_to, content_type, content, agent_data, record_id)
         VALUES ('in','feishu',$1,$2,$3,$4,'ops_supervisor','table_visit',$5,$6::jsonb,$7)
+        ON CONFLICT (record_id, content_type) WHERE record_id IS NOT NULL AND record_id != ''
+        DO UPDATE SET content = EXCLUDED.content, agent_data = EXCLUDED.agent_data, updated_at = NOW()
       `, [
         tableVisitData.submitter?.id || '',
         tableVisitData.submitter?.name || '',
@@ -4479,13 +4481,15 @@ export async function pollBitableSubmissions(configKey = 'ops_checklist') {
           }
         } catch (e) {}
         
-        // 6. 存储结构化数据到本地数据库
+        // 6. 存储结构化数据到本地数据库（含 record_id 去重）
         try {
           await pool().query(
-            `INSERT INTO agent_messages (direction, channel, feishu_open_id, sender_username, sender_name, sender_role, routed_to, content_type, content, agent_data)
-             VALUES ('in','feishu',$1,$2,$3,$4,'ops_supervisor','bitable_submission',$5,$6::jsonb)`,
+            `INSERT INTO agent_messages (direction, channel, feishu_open_id, sender_username, sender_name, sender_role, routed_to, content_type, content, agent_data, record_id)
+             VALUES ('in','feishu',$1,$2,$3,$4,'ops_supervisor','bitable_submission',$5,$6::jsonb,$7)
+             ON CONFLICT (record_id, content_type) WHERE record_id IS NOT NULL AND record_id != ''
+             DO UPDATE SET content = EXCLUDED.content, agent_data = EXCLUDED.agent_data, updated_at = NOW()`,
             [sub.submitter.id, sub.submitter.name || sub.submitter.id, sub.submitter.name || sub.submitter.id, '', 
-             `${sub.checkType}提交（Bitable）`, JSON.stringify(submission)]
+             `${sub.checkType}提交（Bitable）`, JSON.stringify(submission), sub.recordId || '']
           );
         } catch (e) {}
         
@@ -5037,15 +5041,14 @@ function scheduleFixedTask(taskKey, config) {
 
   const scheduleNext = () => {
     const now = new Date();
-    const nextExecution = new Date(now);
-    nextExecution.setHours(hour);
-    nextExecution.setMinutes(minute);
-    nextExecution.setSeconds(0);
-    nextExecution.setMilliseconds(0);
+    // 配置时间是CST(+08:00)，正确转换
+    const cst = new Date(now.toLocaleString('en-US',{timeZone:'Asia/Shanghai'}));
+    const ds = `${cst.getFullYear()}-${String(cst.getMonth()+1).padStart(2,'0')}-${String(cst.getDate()).padStart(2,'0')}T${String(hour).padStart(2,'0')}:${String(minute).padStart(2,'0')}:00+08:00`;
+    let nextExecution = new Date(ds);
     
-    // 如果今天时间已过，按频率顺延
-    if (nextExecution <= now) {
-      nextExecution.setDate(nextExecution.getDate() + intervalDays);
+    // 如果CST时间已过，按频率顺延
+    if (nextExecution.getTime() <= now.getTime()) {
+      nextExecution = new Date(nextExecution.getTime() + intervalDays * 86400000);
     }
     
     const msUntilExecution = nextExecution.getTime() - now.getTime();
@@ -5076,9 +5079,12 @@ function scheduleRandomTask(taskKey, config) {
     // 确保在工作时间10:00-20:00 CST内执行，否则推到次日10:00+随机偏移
     const cstH = Number(nextExecution.toLocaleString('en-US',{timeZone:'Asia/Shanghai',hour:'numeric',hour12:false}));
     if (cstH < 10 || cstH >= 20) {
-      const adj = new Date(nextExecution); adj.setMinutes(0); adj.setSeconds(0);
-      adj.setHours(adj.getHours() + (cstH >= 20 ? (24 - cstH + 10) : (10 - cstH)));
-      nextExecution = new Date(adj.getTime() + Math.random() * 6 * 3600000);
+      // 计算推迟到下一个CST 10:00的毫秒数（纯UTC算术，避免setHours混淆CST/UTC）
+      const hoursUntilNext = cstH >= 20 ? (24 - cstH + 10) : (10 - cstH);
+      const baseNext = new Date(nextExecution.getTime() + hoursUntilNext * 3600000);
+      // 对齐到整点（清掉分秒）
+      baseNext.setMinutes(0, 0, 0);
+      nextExecution = new Date(baseNext.getTime() + Math.random() * 6 * 3600000);
     }
     const intervalMs = nextExecution.getTime() - Date.now();
     const status = _scheduledTaskRuntimeStatus.get(taskKey);
@@ -5172,6 +5178,9 @@ export async function sendScheduledChecklist(config) {
         (u.role === 'store_manager' || u.role === 'store_production_manager')
       );
       const uniqueUsernames = [...new Set(targets.map(u => String(u.username || '').trim()).filter(Boolean))];
+      if (!uniqueUsernames.length) {
+        console.log(`[ops] no staff found for store=${store.name}, storeKey=${normalizeStoreKey(store.name)}, allStaff=${allStaff.length}`);
+      }
       
       for (const username of uniqueUsernames) {
         const feishuUser = await lookupFeishuUserByUsername(username);
@@ -5783,7 +5792,18 @@ function buildAlertCard(title, severity, detail, actions) {
 // Data Auditor 核心功能：只负责异常检测，不负责评分
 // ─────────────────────────────────────────────
 
-export async function runDataAuditor() {
+function getPreviousWeekRange() {
+  const now = new Date();
+  const cst = new Date(now.toLocaleString('en-US',{timeZone:'Asia/Shanghai'}));
+  const dow = cst.getDay(), d2m = (dow+6)%7;
+  const pM = new Date(cst); pM.setDate(pM.getDate()-d2m-7);
+  const pS = new Date(cst); pS.setDate(pS.getDate()-d2m-1);
+  const j1 = new Date(pM.getFullYear(),0,1);
+  const wn = Math.ceil(((pM-j1)/864e5+j1.getDay()+1)/7);
+  return { weekStart:toDateOnly(pM.toISOString()), weekEnd:toDateOnly(pS.toISOString()), weekLabel:`${pM.getFullYear()}-W${String(wn).padStart(2,'0')}` };
+}
+
+export async function runDataAuditor(checkMode='all') {
   await refreshBiAgentRuntimeConfig();
   const state = await getSharedState();
   const reports = Array.isArray(state?.dailyReports) ? state.dailyReports : [];
@@ -5802,9 +5822,17 @@ export async function runDataAuditor() {
     const brand = brandCtx.brandName || storeInfo.brand || inferBrandFromStoreName(storeName) || '洪潮';
 
     const now = new Date();
-    const nowDate = toDateOnly(now.toISOString());
-    const weekAgo = new Date(now.getTime() - 7 * 86400000);
-    const weekAgoDate = toDateOnly(weekAgo.toISOString());
+    const isWeekly = checkMode === 'weekly';
+    const isDaily = checkMode === 'daily';
+    let nowDate, weekAgoDate, periodLabel;
+    if (isWeekly) {
+      const wr = getPreviousWeekRange();
+      weekAgoDate = wr.weekStart; nowDate = wr.weekEnd; periodLabel = wr.weekLabel;
+    } else {
+      nowDate = toDateOnly(now.toISOString());
+      weekAgoDate = toDateOnly(new Date(now.getTime() - 7 * 86400000).toISOString());
+      periodLabel = nowDate;
+    }
 
     const normalizedStoreName = normalizeStoreKey(storeName);
     const storeReports = enableDailyReports ? reports.filter(r => {
@@ -5828,10 +5856,10 @@ export async function runDataAuditor() {
       .slice()
       .sort((a, b) => String(a?.date || '').localeCompare(String(b?.date || '')));
 
-    // 1) 实收营收异常 - 阈值从配置中心读取，支持门店级别覆盖
+    // 1) 实收营收异常 - weekly only
     const revenueGapMedium = getStoreThreshold(storeName, 'revenueGapMedium', 0.10);
     const revenueGapHigh = getStoreThreshold(storeName, 'revenueGapHigh', 0.20);
-    if (enableDailyReports) {
+    if (!isDaily && enableDailyReports) {
       const ym = nowDate.slice(0, 7);
       const target = getMonthlyTarget(state, ym, storeName);
       const targetActual = toNum(target?.targets?.actual, 0);
@@ -5862,7 +5890,7 @@ export async function runDataAuditor() {
           title: `${storeName} 累计实收营收达成偏低（${daysPassed}天较理论差 ${(gap * 100).toFixed(1)}%）`,
           detail: `${ym}月1日至${nowDate}累计：实收达成率 ${(actualAchieveRate * 100).toFixed(1)}%，理论达成率 ${(theoryAchieveRate * 100).toFixed(1)}%（${daysPassed}/${monthDays}天），差值 ${(gap * 100).toFixed(1)}%。`,
           data: {
-            date: nowDate,
+            date: periodLabel,
             periodStart: monthStart,
             periodEnd: nowDate,
             daysPassed,
@@ -5878,13 +5906,13 @@ export async function runDataAuditor() {
     }
     }
 
-    // 2) 人效值异常 - 阈值从配置中心读取，支持门店级别覆盖
+    // 2) 人效值异常 - weekly only
     const efficiencyThresholds = {
       medium: getStoreThreshold(storeName, 'efficiencyMedium', 1100),
       high: getStoreThreshold(storeName, 'efficiencyHigh', 1000)
     };
 
-    if (enableDailyReports) for (const report of reportsSorted) {
+    if (!isDaily && enableDailyReports) for (const report of reportsSorted) {
       const data = report?.data || {};
       const reportDate = toDateOnly(report?.date);
       if (!reportDate) continue;
@@ -5907,8 +5935,9 @@ export async function runDataAuditor() {
       });
     }
 
-    // 3) 充值异常 - 阈值从配置中心读取
+    // 3) 充值异常 - daily only
     const rechargeHighDays = Math.max(2, getStoreThreshold(storeName, 'rechargeStreakHighDays', 2));
+    if (!isWeekly) {
     let rechargeStreak = 0;
     let prevDate = '';
     for (const report of reportsSorted) {
@@ -5941,21 +5970,22 @@ export async function runDataAuditor() {
       }
       prevDate = reportDate;
     }
+    } // end if (!isWeekly) for 充值异常
 
-    // 4) 桌访产品异常 - 阈值从配置中心读取
+    // 4) 桌访产品异常 - weekly only
     const productMedium = Math.max(1, getStoreThreshold(storeName, 'tableVisitProductMedium', 2));
     const productHigh = Math.max(productMedium, getStoreThreshold(storeName, 'tableVisitProductHigh', 4));
     const productComplaints = tableVisitMetrics.dissatisfiedProducts;
-    if (enableTableVisit) for (const [key, count] of productComplaints) {
+    if (!isDaily && enableTableVisit) for (const [key, count] of productComplaints) {
       if (count >= productMedium) {
         const [, productKey] = key.split('||');
         const product = tableVisitMetrics.productLabelByKey.get(productKey) || productKey || '未知产品';
         issues.push({
           agent: 'data_auditor', brand, store: storeName, category: '桌访产品异常',
           severity: count >= productHigh ? 'high' : 'medium',
-          title: `${storeName} 近7天「${product}」不满意 ${count} 次`,
-          detail: `同一产品7天内不满意次数 ${count} 次（medium:≥${productMedium}次, high:≥${productHigh}次）。`,
-          data: { date: nowDate, dissatisfiedProducts: product, dissatisfiedCount: count }
+          title: `${storeName}「${product}」${weekAgoDate}~${nowDate} 不满意 ${count} 次`,
+          detail: `${weekAgoDate}~${nowDate} 不满意次数 ${count} 次（medium:≥${productMedium}, high:≥${productHigh}）。`,
+          data: { date: periodLabel, dissatisfiedProducts: product, dissatisfiedCount: count }
         });
       }
     }
@@ -5967,14 +5997,14 @@ export async function runDataAuditor() {
     // 从营业日报获取堂食订单数作为总桌数
     const weekDineOrders = storeReports.reduce((s, r) => s + toNum(r?.data?.dine?.orders, 0), 0);
     const tableVisitRatio = weekDineOrders > 0 ? (weekVisits / weekDineOrders) : 0;
-    if (enableTableVisit && enableDailyReports && weekDineOrders > 0 && tableVisitRatio < ratioMedium) {
+    if (!isDaily && enableTableVisit && enableDailyReports && weekDineOrders > 0 && tableVisitRatio < ratioMedium) {
       issues.push({
         agent: 'data_auditor', brand, store: storeName, category: '桌访占比异常',
         severity: tableVisitRatio < ratioHigh ? 'high' : 'medium',
-        title: `${storeName} 近7天桌访占比偏低（${(tableVisitRatio * 100).toFixed(1)}%）`,
+        title: `${storeName} ${weekAgoDate}~${nowDate} 桌访占比偏低（${(tableVisitRatio * 100).toFixed(1)}%）`,
         detail: `桌访数量 ${weekVisits}，堂食订单数量 ${weekDineOrders}，桌访占比 ${(tableVisitRatio * 100).toFixed(1)}%（medium:<${(ratioMedium*100).toFixed(0)}%, high:<${(ratioHigh*100).toFixed(0)}%）。`,
         data: {
-          date: nowDate,
+          date: periodLabel,
           tableVisitCount: weekVisits,
           dineOrders: weekDineOrders,
           tableVisitOrderRatio: Number((tableVisitRatio * 100).toFixed(2))
@@ -5993,14 +6023,14 @@ export async function runDataAuditor() {
     });
     const totalMarginRate = toNum(marginMetrics?.total?.marginRate, 0);
     const marginThresholds = { medium: marginMedium, high: marginHigh };
-    if (marginMetrics.total.actualRevenue > 0 && totalMarginRate < marginThresholds.medium) {
+    if (!isDaily && marginMetrics.total.actualRevenue > 0 && totalMarginRate < marginThresholds.medium) {
       issues.push({
         agent: 'data_auditor', brand, store: storeName, category: '总实收毛利率异常',
         severity: totalMarginRate < marginThresholds.high ? 'high' : 'medium',
-        title: `${storeName} 近7天总实收毛利率偏低（${(totalMarginRate * 100).toFixed(1)}%）`,
+        title: `${storeName} ${weekAgoDate}~${nowDate} 总实收毛利率偏低（${(totalMarginRate * 100).toFixed(1)}%）`,
         detail: `品牌阈值：medium < ${(marginThresholds.medium * 100).toFixed(0)}%，high < ${(marginThresholds.high * 100).toFixed(0)}%。当前 ${(totalMarginRate * 100).toFixed(1)}%。`,
         data: {
-          date: nowDate,
+          date: periodLabel,
           totalActualRevenue: Number(toNum(marginMetrics?.total?.actualRevenue, 0).toFixed(2)),
           totalEstimatedCost: Number(toNum(marginMetrics?.total?.estimatedCost, 0).toFixed(2)),
           totalMarginRate: Number((totalMarginRate * 100).toFixed(2))
@@ -6008,12 +6038,11 @@ export async function runDataAuditor() {
       });
     }
 
-    // 7) 产品差评异常 / 服务差评异常 - 阈值从配置中心读取
+    // 7) 产品差评异常 / 服务差评异常 - weekly only
     const badReviewMedium = Math.max(1, getStoreThreshold(storeName, 'badReviewMedium', 1));
     const badReviewHigh = Math.max(badReviewMedium, getStoreThreshold(storeName, 'badReviewHigh', 2));
-    try {
-      const day7Ago = new Date(now.getTime() - 7 * 86400000);
-      const day7AgoDate = toDateOnly(day7Ago.toISOString());
+    if (!isDaily) try {
+      const day7AgoDate = weekAgoDate;
 
       // 产品差评统计（1周内）
       const productReviews = await pool().query(
@@ -6033,10 +6062,10 @@ export async function runDataAuditor() {
           issues.push({
             agent: 'data_auditor', brand, store: storeName, category: '产品差评异常',
             severity: count7d >= badReviewHigh ? 'high' : 'medium',
-            title: `${storeName} 「${product}」近7天收到 ${count7d} 次产品差评`,
-            detail: `产品「${product}」在7天内收到 ${count7d} 次差评（medium:≥${badReviewMedium}条, high:≥${badReviewHigh}条）。`,
+            title: `${storeName}「${product}」${weekAgoDate}~${nowDate} 收到 ${count7d} 次产品差评`,
+            detail: `${weekAgoDate}~${nowDate} 产品「${product}」收到 ${count7d} 次差评（medium:≥${badReviewMedium}, high:≥${badReviewHigh}）。`,
             data: {
-              date: nowDate,
+              date: periodLabel,
               productName: product,
               reviewCount: count7d,
               periodDays: 7,
@@ -6064,10 +6093,10 @@ export async function runDataAuditor() {
           issues.push({
             agent: 'data_auditor', brand, store: storeName, category: '服务差评异常',
             severity: count7d >= badReviewHigh ? 'high' : 'medium',
-            title: `${storeName} 「${service}」服务近7天收到 ${count7d} 次差评`,
-            detail: `服务项「${service}」在7天内收到 ${count7d} 次差评（medium:≥${badReviewMedium}条, high:≥${badReviewHigh}条）。`,
+            title: `${storeName}「${service}」服务${weekAgoDate}~${nowDate} 收到 ${count7d} 次差评`,
+            detail: `${weekAgoDate}~${nowDate} 服务项「${service}」收到 ${count7d} 次差评（medium:≥${badReviewMedium}, high:≥${badReviewHigh}）。`,
             data: {
-              date: nowDate,
+              date: periodLabel,
               serviceItem: service,
               reviewCount: count7d,
               periodDays: 7,
@@ -8547,12 +8576,12 @@ export function startAgentScheduler() {
     });
   }, 10 * 60 * 1000);
 
-  // Data audit + push issues every 30 minutes
+  // Daily audit (充值异常 only) every 30 minutes
   const auditTick = async () => {
     try {
-      const result = await runDataAuditor();
+      const result = await runDataAuditor('daily');
       if (result.issuesCreated > 0) {
-        console.log(`[scheduler] Data Auditor: ${result.issuesCreated} new issues`);
+        console.log(`[scheduler] Data Auditor(daily): ${result.issuesCreated} new issues`);
       }
       // Push new issues to Feishu
       const pushed = await pushIssuesToFeishu();
@@ -8560,6 +8589,19 @@ export function startAgentScheduler() {
     } catch (e) {
       console.error('[scheduler] audit tick error:', e?.message);
     }
+  };
+
+  // Weekly audit: Mon 00:00 CST
+  const weeklyAuditTick = async () => {
+    try {
+      const c = new Date(new Date().toLocaleString('en-US',{timeZone:'Asia/Shanghai'}));
+      if (c.getDay()===1 && c.getHours()===0) {
+        console.log('[scheduler] Weekly audit running...');
+        const r = await runDataAuditor('weekly');
+        console.log(`[scheduler] Weekly audit: ${r.issuesCreated} issues`);
+        await pushIssuesToFeishu();
+      }
+    } catch(e){ console.error('[scheduler] weekly audit err:', e?.message); }
   };
 
   // Weekly evaluation (Monday 9am) + push scores
@@ -8705,7 +8747,8 @@ export function startAgentScheduler() {
   setTimeout(auditTick, 15000);
 
   // Periodic runs
-  setInterval(auditTick, 30 * 60 * 1000);   // every 30 min
+  setInterval(auditTick, 30 * 60 * 1000);   // every 30 min (daily checks)
+  setInterval(weeklyAuditTick, 30 * 60 * 1000); // every 30 min (checks if Mon 00:00 CST)
   setInterval(evalTick, 60 * 60 * 1000);     // every hour
   setInterval(weeklyOpsTick, 60 * 60 * 1000); // every hour (checks if Monday 10am)
   setInterval(dailyRechargeTick, 60 * 60 * 1000); // every hour (checks if 10am)

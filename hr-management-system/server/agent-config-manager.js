@@ -181,6 +181,8 @@ function normalizeOpsAgentConfig(cfg) {
     time: String(x?.time || '').trim() || '10:00',
     frequency: normalizeFrequency(x?.frequency),
     customIntervalDays: Math.max(1, Math.floor(Number(x?.customIntervalDays) || 1)),
+    timeWindow: Math.max(5, Math.floor(Number(x?.timeWindow) || 60)),
+    formUrl: String(x?.formUrl || '').trim(),
     checklist: Array.isArray(x?.checklist) ? x.checklist.map((v) => String(v || '').trim()).filter(Boolean) : []
   }));
   const normalizedRandom = (Array.isArray(c?.scheduledTasks?.randomInspections)
@@ -1062,6 +1064,48 @@ export function registerAgentConfigRoutes(app, authRequired) {
       clearAgentRuleCache();
       res.json({ ok: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // === 角色模块权限配置 ===
+  const DEFAULT_ROLE_MODULES = {
+    store_employee: ['profile', 'attendance', 'points', 'exam'],
+    store_manager: ['profile', 'attendance', 'employees', 'daily-report', 'approvals', 'payment', 'rewards', 'points', 'reports'],
+    store_production_manager: ['profile', 'attendance', 'reports', 'points'],
+    hq_manager: ['profile', 'attendance', 'daily-report', 'approvals', 'employees', 'payment', 'exam', 'rewards', 'points', 'knowledge', 'reports', 'agents'],
+    hr_manager: ['profile', 'attendance', 'employees', 'approvals', 'payment', 'reports', 'exam'],
+    cashier: ['profile', 'attendance', 'payment', 'exam']
+  };
+
+  // 所有用户可调用（登录后加载自己角色的可用模块）
+  app.get('/api/role-modules', authRequired, async (req, res) => {
+    try {
+      const r = await pool().query(`SELECT config FROM hr_rating_configs WHERE config_key='role_module_config' AND enabled=true LIMIT 1`);
+      const cfg = r.rows?.[0]?.config;
+      const parsed = cfg && typeof cfg === 'object' ? cfg : (typeof cfg === 'string' ? JSON.parse(cfg) : null);
+      return res.json({ config: parsed || DEFAULT_ROLE_MODULES });
+    } catch (e) {
+      return res.json({ config: DEFAULT_ROLE_MODULES });
+    }
+  });
+
+  // 管理员保存角色模块配置
+  app.put('/api/admin/role-modules', authRequired, async (req, res) => {
+    if (!assertAdmin(req, res)) return;
+    const config = req.body?.config;
+    if (!config || typeof config !== 'object') return res.status(400).json({ error: 'invalid_config' });
+    try {
+      const r = await pool().query(
+        `INSERT INTO hr_rating_configs (config_key, config, enabled, updated_at)
+         VALUES ('role_module_config', $1::jsonb, true, now())
+         ON CONFLICT (config_key)
+         DO UPDATE SET config = excluded.config, enabled = true, updated_at = now()
+         RETURNING config, updated_at`,
+        [JSON.stringify(config)]
+      );
+      return res.json({ config: r.rows[0].config, updated_at: r.rows[0].updated_at });
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
   });
 }
 

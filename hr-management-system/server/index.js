@@ -511,6 +511,35 @@ async function ensureFeishuSyncTable() {
   }
 }
 
+// ─── Dedup: unique partial index on agent_messages ───────────────────────────
+async function ensureDedupIndexes() {
+  try {
+    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_messages_record_content
+      ON agent_messages (record_id, content_type)
+      WHERE record_id IS NOT NULL AND record_id != ''`);
+  } catch (e) {
+    // If duplicates already exist, clean them first then retry
+    if (/duplicate key|could not create unique index/i.test(String(e?.message || ''))) {
+      console.log('[dedup] cleaning existing duplicates in agent_messages...');
+      try {
+        await pool.query(`
+          DELETE FROM agent_messages a USING agent_messages b
+          WHERE a.record_id IS NOT NULL AND a.record_id != ''
+            AND a.record_id = b.record_id AND a.content_type = b.content_type
+            AND a.created_at < b.created_at`);
+        await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_messages_record_content
+          ON agent_messages (record_id, content_type)
+          WHERE record_id IS NOT NULL AND record_id != ''`);
+        console.log('[dedup] agent_messages unique index created after cleanup');
+      } catch (e2) {
+        console.warn('[dedup] could not create unique index:', e2?.message);
+      }
+    } else {
+      console.warn('[dedup] index creation skipped:', e?.message);
+    }
+  }
+}
+
 async function ensureTableVisitRecordsTable() {
   try {
     await pool.query('create extension if not exists pgcrypto');
@@ -959,7 +988,19 @@ function normalizeForecastWeatherTag(input) {
   return s.toLowerCase();
 }
 
-function estimateRevenueByHistory(historyRows, target) {
+// 门店预测配置：雨天系数、节假日策略
+const STORE_FORECAST_CONFIG = {
+  '洪潮大宁久光店': { rainFactor: 0.90, snowFactor: 0.85, holidayAsWeekend: true },
+  '马己仙上海音乐广场店': { rainFactor: 0.85, snowFactor: 0.80, holidayAsWeekend: true },
+  '_default': { rainFactor: 0.88, snowFactor: 0.82, holidayAsWeekend: true }
+};
+
+function getStoreForecastConfig(store) {
+  const s = String(store || '').trim();
+  return STORE_FORECAST_CONFIG[s] || STORE_FORECAST_CONFIG['_default'];
+}
+
+function estimateRevenueByHistory(historyRows, target, store) {
   const rows = Array.isArray(historyRows) ? historyRows : [];
   const dailyMap = new Map();
   rows.forEach((row) => {
@@ -980,6 +1021,7 @@ function estimateRevenueByHistory(historyRows, target) {
     dailyMap.set(key, prev);
   });
 
+  const storeConfig = getStoreForecastConfig(store);
   const targetDate = safeDateOnly(target?.date);
   const targetWeatherTag = normalizeForecastWeatherTag(target?.weather);
   const targetIsHoliday = !!target?.isHoliday;
@@ -987,6 +1029,8 @@ function estimateRevenueByHistory(historyRows, target) {
   try {
     const td = new Date(String(targetDate || '') + 'T00:00:00');
     if (Number.isFinite(td.getTime())) targetDow = td.getDay();
+    // 节假日按周末预测：将目标日视为周日(0)
+    if (storeConfig.holidayAsWeekend && targetIsHoliday && targetDow >= 1 && targetDow <= 5) targetDow = 0;
   } catch (e) {}
 
   const result = {
@@ -1015,11 +1059,13 @@ function estimateRevenueByHistory(historyRows, target) {
         const d1 = new Date(String(item.date || '') + 'T00:00:00');
         if (Number.isFinite(d1.getTime()) && targetDow >= 0) {
           // Day-of-week: exact match is the strongest signal (Mon≠Fri, weekday≠weekend)
-          if (d1.getDay() === targetDow) score += 2.0;
+          let itemDow = d1.getDay();
+          if (storeConfig.holidayAsWeekend && item.isHoliday && itemDow >= 1 && itemDow <= 5) itemDow = 0;
+          if (itemDow === targetDow) score += 5.0;
           else {
-            const diff = Math.abs(d1.getDay() - targetDow);
-            const adj = Math.min(diff, 7 - diff);
-            if (adj === 1) score += 0.3; // adjacent day gets small bonus
+            const bothWeekend = (itemDow === 0 || itemDow === 6) && (targetDow === 0 || targetDow === 6);
+            if (bothWeekend) score += 3.0;
+            else score += 0.1;
           }
         }
         // Recency bonus: recent data is more reliable
@@ -1055,8 +1101,10 @@ function estimateRevenueByHistory(historyRows, target) {
       const matchCount = picked.filter((x) => normalizeForecastWeatherTag(x.weather) === targetWeatherTag).length;
       const coverage = picked.length > 0 ? matchCount / picked.length : 0;
       const strength = Math.max(0, 1 - coverage * 2); // full strength if <50% weather-matched
-      if (bizType === 'takeaway') estimatedRevenue *= (1 + 0.20 * strength);
-      else if (bizType === 'dinein') estimatedRevenue *= (1 - 0.20 * strength);
+      const wf = targetWeatherTag === 'snow' ? storeConfig.snowFactor : storeConfig.rainFactor;
+      const drop = 1 - wf; // e.g. 0.10 for 90% factor
+      if (bizType === 'dinein') estimatedRevenue *= (1 - drop * strength);
+      else if (bizType === 'takeaway') estimatedRevenue *= (1 + drop * 0.5 * strength);
     }
 
     const confidence = Math.max(0.2, Math.min(0.95, 0.35 + Math.min(0.5, list.length * 0.02)));
@@ -1208,14 +1256,20 @@ const costPerUnitMap = new Map();
   let totalRevenue = 0;
   let totalGrossProfit = 0;
   let totalActualRevenue = 0;
+  let totalExpectedRevenue = 0;
 
   rows.forEach((row) => {
     const rowBizType = normalizeForecastBizType(row?.bizType);
     const products = row?.productQuantities && typeof row.productQuantities === 'object' ? row.productQuantities : {};
-    const rev = Math.max(0, Number(row?.expectedRevenue || 0));
-    const rowActualRevRaw = Math.max(0, Number(row?.actualRevenue || 0));
+    let rev = Math.max(0, Number(row?.expectedRevenue || 0));
+    let rowActualRevRaw = Math.max(0, Number(row?.actualRevenue || 0));
     const rowDiscount = Math.max(0, Number(row?.totalDiscount || 0));
+    // 安全校验：折前营收一定>=实收营收，若反了则交换（修复列映射反转问题）
+    if (rev > 0 && rowActualRevRaw > 0 && rowActualRevRaw > rev) {
+      const tmp = rev; rev = rowActualRevRaw; rowActualRevRaw = tmp;
+    }
     const rowActualRev = rowActualRevRaw > 0 ? rowActualRevRaw : Math.max(0, rev - rowDiscount);
+    totalExpectedRevenue += rev;
     totalActualRevenue += rowActualRev;
     const validEntries = Object.entries(products)
       .map(([product, qtyRaw]) => ({ product: String(product || '').trim(), qty: Number(qtyRaw || 0) }))
@@ -1288,16 +1342,21 @@ const costPerUnitMap = new Map();
     }))
     .sort((a, b) => Number(b.grossProfit || 0) - Number(a.grossProfit || 0));
 
-  // 实收毛利率 = (1 - 成本/实际收到的营业额) × 100%
-  // Here: actualMarginRate = grossProfit / actualRevenue (when actualRevenue > 0)
-  const actualMarginRate = totalActualRevenue > 0 ? Number((totalGrossProfit / totalActualRevenue).toFixed(4)) : 0;
+  // 估算成本 = 折前营收 - 毛利（毛利基于折前营收分配计算）
+  const coveredCostRate = totalRevenue > 0 ? Math.max(0, 1 - totalGrossProfit / totalRevenue) : 1;
+  const totalEstimatedCost = Math.max(0, totalExpectedRevenue * coveredCostRate);
+  // 折前毛利率 = (折前营收 - 成本) / 折前营收
+  const marginRate = totalRevenue > 0 ? Number((totalGrossProfit / totalRevenue).toFixed(4)) : 0;
+  // 实收毛利率 = (实收营收 - 成本) / 实收营收（成本不变，实收更低所以实收毛利率 < 折前毛利率）
+  const actualGrossProfit = Math.max(0, totalActualRevenue - totalEstimatedCost);
+  const actualMarginRate = totalActualRevenue > 0 ? Number((actualGrossProfit / totalActualRevenue).toFixed(4)) : 0;
 
   return {
     sampleCount: rows.length,
-    revenue: Number(totalRevenue.toFixed(2)),
+    revenue: Number(totalExpectedRevenue.toFixed(2)),
     actualRevenue: Number(totalActualRevenue.toFixed(2)),
     grossProfit: Number(totalGrossProfit.toFixed(2)),
-    marginRate: Number((totalRevenue > 0 ? totalGrossProfit / totalRevenue : 0).toFixed(4)),
+    marginRate,
     actualMarginRate,
     byBiz,
     products,
@@ -3481,6 +3540,74 @@ app.use(
   })
 );
 
+// ─── Role-Modules Config API ─────────────────────────────────────────────────
+app.get('/api/role-modules', authRequired, async (req, res) => {
+  try {
+    const state = (await getSharedState()) || {};
+    return res.json({ config: state.roleModules || null });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+app.put('/api/role-modules', authRequired, async (req, res) => {
+  const role = String(req.user?.role || '').trim();
+  if (role !== 'admin') return res.status(403).json({ error: 'admin_only' });
+  try {
+    const config = req.body?.config;
+    if (!config || typeof config !== 'object') return res.status(400).json({ error: 'invalid_config' });
+    const state = (await getSharedState()) || {};
+    state.roleModules = config;
+    await saveSharedState(state);
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+// ─── Dedup Stats & Cleanup API ───────────────────────────────────────────────
+app.get('/api/dedup/stats', authRequired, async (req, res) => {
+  const role = String(req.user?.role || '').trim();
+  if (role !== 'admin') return res.status(403).json({ error: 'admin_only' });
+  try {
+    const tables = {};
+    // agent_messages duplicates
+    const am = await pool.query(`SELECT count(*) as cnt FROM (
+      SELECT record_id, content_type, count(*) as c FROM agent_messages
+      WHERE record_id IS NOT NULL AND record_id != ''
+      GROUP BY record_id, content_type HAVING count(*) > 1) t`);
+    tables.agent_messages_dup_groups = Number(am.rows[0]?.cnt || 0);
+    // feishu_generic_records total
+    const fg = await pool.query(`SELECT count(*) as cnt FROM feishu_generic_records`);
+    tables.feishu_generic_records = Number(fg.rows[0]?.cnt || 0);
+    // sales_raw total
+    const sr = await pool.query(`SELECT count(*) as cnt FROM sales_raw`);
+    tables.sales_raw = Number(sr.rows[0]?.cnt || 0);
+    // table_visit_records total
+    const tv = await pool.query(`SELECT count(*) as cnt FROM table_visit_records`);
+    tables.table_visit_records = Number(tv.rows[0]?.cnt || 0);
+    return res.json({ ok: true, tables });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+app.post('/api/dedup/cleanup', authRequired, async (req, res) => {
+  const role = String(req.user?.role || '').trim();
+  if (role !== 'admin') return res.status(403).json({ error: 'admin_only' });
+  try {
+    // Remove duplicate agent_messages (keep newest, tiebreak by id)
+    const del = await pool.query(`
+      DELETE FROM agent_messages a USING agent_messages b
+      WHERE a.record_id IS NOT NULL AND a.record_id != ''
+        AND a.record_id = b.record_id AND a.content_type = b.content_type
+        AND (a.created_at < b.created_at OR (a.created_at = b.created_at AND a.id < b.id))`);
+    return res.json({ ok: true, deleted: del.rowCount || 0 });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
 app.get('/api/me', authRequired, async (req, res) => {
   const username = String(req.user?.username || '').trim();
   const role = String(req.user?.role || '').trim();
@@ -4718,9 +4845,11 @@ app.post('/api/daily-reports', authRequired, async (req, res) => {
 
       // 同时更新到daily_reports表（只保存实际数据，目标从系统设置读取）
       await safeExecute('daily_report_update', async () => {
+        const todayWechat = Math.max(0, Math.floor(Number(payload?.new_wechat_members) || 0));
+        // 先写入今日新增，然后自动计算本月累计（不接受客户端传入的wechat_month_total）
         await pool.query(`
-          INSERT INTO daily_reports (store, brand, date, actual_revenue, actual_margin, dianping_rating, new_wechat_members, submitted, submitted_at)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, true, NOW())
+          INSERT INTO daily_reports (store, brand, date, actual_revenue, actual_margin, dianping_rating, new_wechat_members, wechat_month_total, submitted, submitted_at)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, 0, true, NOW())
           ON CONFLICT (store, date)
           DO UPDATE SET 
             actual_revenue = EXCLUDED.actual_revenue,
@@ -4733,8 +4862,17 @@ app.post('/api/daily-reports', authRequired, async (req, res) => {
           payload?.actual || 0,
           payload?.margin || null, 
           payload?.dianping_rating || null,
-          payload?.new_wechat_members || 0
+          todayWechat
         ]);
+        // 重新计算本月累计并写回
+        const monthStart = date.slice(0, 7) + '-01';
+        await pool.query(`
+          UPDATE daily_reports SET wechat_month_total = (
+            SELECT COALESCE(SUM(new_wechat_members), 0)
+            FROM daily_reports
+            WHERE store = $1 AND date >= $2 AND date <= $3
+          ) WHERE store = $1 AND date = $3
+        `, [store, monthStart, date]);
       });
 
       if (wantSubmit || submittedAt) {
@@ -4762,9 +4900,10 @@ app.post('/api/daily-reports', authRequired, async (req, res) => {
 
       // 新建日报时也必须同步到 daily_reports（否则评分模型/Agent 数据源会缺失）
       await safeExecute('daily_report_insert', async () => {
+        const todayWechat = Math.max(0, Math.floor(Number(payload?.new_wechat_members) || 0));
         await pool.query(`
-          INSERT INTO daily_reports (store, brand, date, actual_revenue, actual_margin, dianping_rating, new_wechat_members, submitted, submitted_at)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, true, NOW())
+          INSERT INTO daily_reports (store, brand, date, actual_revenue, actual_margin, dianping_rating, new_wechat_members, wechat_month_total, submitted, submitted_at)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, 0, true, NOW())
           ON CONFLICT (store, date)
           DO UPDATE SET
             actual_revenue = EXCLUDED.actual_revenue,
@@ -4779,8 +4918,17 @@ app.post('/api/daily-reports', authRequired, async (req, res) => {
           payload?.actual || 0,
           payload?.margin || null,
           payload?.dianping_rating || null,
-          payload?.new_wechat_members || 0
+          todayWechat
         ]);
+        // 重新计算本月累计并写回
+        const monthStart = date.slice(0, 7) + '-01';
+        await pool.query(`
+          UPDATE daily_reports SET wechat_month_total = (
+            SELECT COALESCE(SUM(new_wechat_members), 0)
+            FROM daily_reports
+            WHERE store = $1 AND date >= $2 AND date <= $3
+          ) WHERE store = $1 AND date = $3
+        `, [store, monthStart, date]);
       });
 
       shouldNotifySchedule = !!wantSubmit;
@@ -7179,7 +7327,9 @@ app.delete('/api/reports/inventory-forecast/history/clear', authRequired, async 
     }
     await saveSharedState(state0);
     const afterCount = Array.isArray(state0.inventoryForecastHistory) ? state0.inventoryForecastHistory.length : 0;
-    return res.json({ ok: true, cleared: prevCount - afterCount, remaining: afterCount, store: qStore || '(all)' });
+    let srDel=0;
+    try{const d=qStore?await pool.query(`DELETE FROM sales_raw WHERE lower(regexp_replace(store,'\\s+','','g'))=$1`,[qStore.toLowerCase().replace(/\s+/g,'')]):await pool.query(`DELETE FROM sales_raw`);srDel=d.rowCount||0;}catch(e2){}
+    return res.json({ ok:true, cleared:prevCount-afterCount, remaining:afterCount, salesRawDeleted:srDel, store:qStore||'(all)' });
   } catch (e) {
     return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
   }
@@ -7506,7 +7656,8 @@ app.post('/api/reports/sales-raw/upload', authRequired, upload.single('file'), a
     if (Number(quality?.skuCompletenessPct || 0) < Number(quality?.skuCompletenessWarnPct || 70)) {
       qualityWarnings.push(`SKU编码完整率 ${Number(quality?.skuCompletenessPct || 0).toFixed(1)}%，低于建议门槛 ${Number(quality?.skuCompletenessWarnPct || 70)}%。建议在原始表增加SKU编码列以提升主数据稳定性。`);
     }
-    if (!quality.pass) {
+    const forceUpload = String(req.body?.force || '') === 'true' && role === 'admin';
+    if (!quality.pass && !forceUpload) {
       return res.status(422).json({
         error: 'low_cost_coverage',
         message: `成本覆盖率 ${Number(quality?.salesCoveragePct || 0).toFixed(1)}% 低于门槛 ${Number(quality?.thresholdPct || 0)}%，已阻止导入。请先补齐成本库或菜名别名。`,
@@ -8109,7 +8260,7 @@ app.post('/api/reports/inventory-forecast/revenue-estimate', authRequired, async
     } catch(e){}
 
     const target = { date, weather, isHoliday };
-    const estimate = estimateRevenueByHistory(historyRows, target);
+    const estimate = estimateRevenueByHistory(historyRows, target, store);
     return res.json({ store, target, estimate });
   } catch (e) {
     return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
@@ -11176,6 +11327,8 @@ app.listen(PORT, HOST, async () => {
     await pool.query(`ALTER TABLE knowledge_base ADD COLUMN IF NOT EXISTS version VARCHAR(50) DEFAULT NULL`);
     await ensureDataGovernanceTables();
     await ensureAgentTables();
+    // Runtime migration: dedup unique index on agent_messages(record_id, content_type)
+    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_messages_record_content_uniq ON agent_messages (record_id, content_type) WHERE record_id IS NOT NULL AND record_id != ''`).catch(e => console.warn('[migration] dedup index:', e?.message));
     assertCriticalFunctions();
     // LLM健康检查 — 启动时验证所有大模型API可用，失败时飞书通知管理员
     verifyLLMHealth().then(h => {
@@ -12056,6 +12209,7 @@ ensureOpsTasksTable();
 ensureFeishuSyncTable();
 ensureFeishuGenericRecordsTable();
 ensureTableVisitRecordsTable();
+ensureDedupIndexes();
 startOpsTaskScheduler();
 
 setInterval(() => {

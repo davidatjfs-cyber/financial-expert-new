@@ -6489,18 +6489,18 @@
                             <div style="margin-top: 10px; color: rgba(34,197,94,0.95); font-weight: 900;">销售金额占比：<span id="dr-cat-water-amt-rate">0.00%</span> / 工作量占比：<span id="dr-cat-water-qty-rate">0.00%</span></div>
                         </div>
                         <div style="margin-bottom: 14px;">
-                            <div style="font-weight: 900;">汤档销售</div>
+                            <div style="font-weight: 900;">汤档/煲仔销售</div>
                             <div style="margin-top: 10px; display:grid; grid-template-columns: repeat(2, 1fr); gap: 12px 18px;">
-                                <div><label style="color:#666;font-size:12px;">汤档销售金额（元）</label><input id="dr-cat-soup-amt" type="number" placeholder="请输入汤档销售金额" style="width:100%; padding:12px;" oninput="syncDailyReportComputed()"></div>
-                                <div><label style="color:#666;font-size:12px;">汤档产品制作数量（份）</label><input id="dr-cat-soup-qty" type="number" placeholder="请输入汤档产品制作数量" style="width:100%; padding:12px;" oninput="syncDailyReportComputed()"></div>
+                                <div><label style="color:#666;font-size:12px;">汤档/煲仔销售金额（元）</label><input id="dr-cat-soup-amt" type="number" placeholder="请输入汤档/煲仔销售金额" style="width:100%; padding:12px;" oninput="syncDailyReportComputed()"></div>
+                                <div><label style="color:#666;font-size:12px;">汤档/煲仔产品制作数量（份）</label><input id="dr-cat-soup-qty" type="number" placeholder="请输入汤档/煲仔产品制作数量" style="width:100%; padding:12px;" oninput="syncDailyReportComputed()"></div>
                             </div>
                             <div style="margin-top: 10px; color: rgba(34,197,94,0.95); font-weight: 900;">销售金额占比：<span id="dr-cat-soup-amt-rate">0.00%</span> / 工作量占比：<span id="dr-cat-soup-qty-rate">0.00%</span></div>
                         </div>
                         <div style="margin-bottom: 14px;">
-                            <div style="font-weight: 900;">烧腊销售</div>
+                            <div style="font-weight: 900;">烧腊/卤水销售</div>
                             <div style="margin-top: 10px; display:grid; grid-template-columns: repeat(2, 1fr); gap: 12px 18px;">
-                                <div><label style="color:#666;font-size:12px;">烧腊销售金额（元）</label><input id="dr-cat-roast-amt" type="number" placeholder="请输入烧腊销售金额" style="width:100%; padding:12px;" oninput="syncDailyReportComputed()"></div>
-                                <div><label style="color:#666;font-size:12px;">烧腊产品制作数量（份）</label><input id="dr-cat-roast-qty" type="number" placeholder="请输入烧腊产品制作数量" style="width:100%; padding:12px;" oninput="syncDailyReportComputed()"></div>
+                                <div><label style="color:#666;font-size:12px;">烧腊/卤水销售金额（元）</label><input id="dr-cat-roast-amt" type="number" placeholder="请输入烧腊/卤水销售金额" style="width:100%; padding:12px;" oninput="syncDailyReportComputed()"></div>
+                                <div><label style="color:#666;font-size:12px;">烧腊/卤水产品制作数量（份）</label><input id="dr-cat-roast-qty" type="number" placeholder="请输入烧腊/卤水产品制作数量" style="width:100%; padding:12px;" oninput="syncDailyReportComputed()"></div>
                             </div>
                             <div style="margin-top: 10px; color: rgba(34,197,94,0.95); font-weight: 900;">销售金额占比：<span id="dr-cat-roast-amt-rate">0.00%</span> / 工作量占比：<span id="dr-cat-roast-qty-rate">0.00%</span></div>
                         </div>
@@ -6513,6 +6513,16 @@
                             <div style="margin-top: 10px; color: rgba(34,197,94,0.95); font-weight: 900;">销售金额占比：<span id="dr-cat-wok-amt-rate">0.00%</span> / 工作量占比：<span id="dr-cat-wok-qty-rate">0.00%</span></div>
                         </div>
                     </div>
+                </div>
+
+                <div class="card" style="margin-bottom: 18px;">
+                    <div class="card-icon blue">🐟</div>
+                    <h4>刺身销售组</h4>
+                    <div style="margin-top: 12px; display:grid; grid-template-columns: repeat(2, 1fr); gap: 12px 18px;">
+                        <div><label style="color:#666;font-size:12px;">刺身销售金额（元）</label><input id="dr-cat-sashimi-amt" type="number" placeholder="请输入刺身销售金额" style="width:100%; padding:12px;" oninput="syncDailyReportComputed()"></div>
+                        <div><label style="color:#666;font-size:12px;">刺身产品制作数量（份）</label><input id="dr-cat-sashimi-qty" type="number" placeholder="请输入刺身产品制作数量" style="width:100%; padding:12px;" oninput="syncDailyReportComputed()"></div>
+                    </div>
+                    <div style="margin-top: 10px; color: rgba(34,197,94,0.95); font-weight: 900;">销售金额占比：<span id="dr-cat-sashimi-amt-rate">0.00%</span> / 工作量占比：<span id="dr-cat-sashimi-qty-rate">0.00%</span></div>
                 </div>
 
                 <div class="card" style="margin-bottom: 18px;">
@@ -6556,6 +6566,7 @@
                         <div><label style="color:#666;font-size:12px;">美团外卖差评数量</label><input id="dr-bad-meituan" type="number" placeholder="请输入差评数量" style="width:100%; padding:12px;"></div>
                         <div><label style="color:#666;font-size:12px;">饿了么外卖差评数量</label><input id="dr-bad-eleme" type="number" placeholder="请输入差评数量" style="width:100%; padding:12px;"></div>
                         <div><label style="color:#666;font-size:12px;">今日企微会员新增数量</label><input id="dr-new-wechat-members" type="number" placeholder="请输入企微会员新增数量" style="width:100%; padding:12px;"></div>
+                        <div><label style="color:#666;font-size:12px;">累计本月新增企微数量</label><div id="dr-wechat-month-total" style="padding:12px; border-radius:12px; background:rgba(0,0,0,0.03); color:#333; font-size:14px;">0</div></div>
                     </div>
                 </div>
 
@@ -9172,6 +9183,28 @@
                         <div class="settings-hint" style="margin-top: 0; margin-bottom: 16px;">维护门店信息与状态</div>
                         <div class="settings-actions" style="margin-top: 0;">
                             <button class="btn" type="button" onclick="showPage('stores')">进入门店管理</button>
+                        </div>
+                    </div>
+
+                    <div class="settings-card" id="role-modules-settings-card">
+                        <div class="settings-card-icon">🔑</div>
+                        <h4>角色模块权限</h4>
+                        <div class="settings-hint" style="margin-top:0;margin-bottom:12px;">自定义每个角色可访问的功能模块（管理员拥有全部权限）</div>
+                        <div id="role-modules-grid" style="max-height:480px;overflow-y:auto;"></div>
+                        <div class="settings-actions" style="margin-top:12px;">
+                            <button class="btn" type="button" onclick="saveRoleModulesConfig()">保存权限配置</button>
+                            <button class="btn btn-secondary" type="button" onclick="resetRoleModulesConfig()">恢复默认</button>
+                        </div>
+                    </div>
+
+                    <div class="settings-card" id="dedup-settings-card">
+                        <div class="settings-card-icon">🔄</div>
+                        <h4>数据去重</h4>
+                        <div class="settings-hint" style="margin-top:0;margin-bottom:12px;">查看各数据表记录数及重复数据，一键清理重复记录</div>
+                        <div id="dedup-stats-content" style="font-size:13px;color:rgba(200,215,230,0.85);margin-bottom:12px;">点击下方按钮查看统计...</div>
+                        <div class="settings-actions" style="margin-top:0;">
+                            <button class="btn btn-secondary" type="button" onclick="loadDedupStats()">查看统计</button>
+                            <button class="btn" type="button" onclick="runDedupCleanup()">清理重复数据</button>
                         </div>
                     </div>
 
@@ -12752,20 +12785,21 @@
                 currentUser = {
                     id: u.id,
                     username: u.username,
-                    name: u.name || empInfo.name || u.username,
+                    name: empInfo.name || u.name || u.username,
                     role: hrmsNormalizeRoleCode(u.role),
-                    store: u.store || empInfo.store || userInfo.store || '',
-                    position: u.position || empInfo.position || userInfo.position || '',
-                    department: u.department || empInfo.department || userInfo.department || '',
-                    level: u.level || empInfo.level || userInfo.level || '',
-                    joinDate: u.joinDate || empInfo.joinDate || userInfo.joinDate || '',
-                    managerUsername: u.managerUsername || empInfo.managerUsername || userInfo.managerUsername || '',
+                    store: empInfo.store || u.store || '',
+                    position: empInfo.position || u.position || '',
+                    department: empInfo.department || u.department || '',
+                    level: empInfo.level || empInfo.jobLevel || empInfo.rank || u.level || '',
+                    joinDate: empInfo.joinDate || empInfo.hireDate || empInfo.entryDate || u.joinDate || '',
+                    managerUsername: empInfo.managerUsername || empInfo.manager || u.managerUsername || '',
                     status: 'active'
                 };
                 isLoggedIn = true;
 
                 // Load shared state so mobile/non-admin can see records.
                 await hrmsLoadStateFromServer();
+                await loadRoleModulesFromServer();
 
                 document.getElementById('login').classList.add('hidden');
                 document.getElementById('main-app').classList.remove('hidden');
@@ -12829,22 +12863,39 @@
             return r === ROLES.ADMIN || r === ROLES.HQ_MANAGER || r === ROLES.HR_MANAGER || r === ROLES.STORE_MANAGER;
         }
 
+        function hrmsCanAccessSmartAssistant(role) {
+            const r = String(role || '').trim();
+            return r === ROLES.ADMIN;
+        }
+
+        // 服务端加载的角色模块配置（登录后从API获取）
+        let _serverRoleModules = null;
+        const _defaultRoleModules = {
+            [ROLES.EMPLOYEE]: ['profile', 'attendance', 'points', 'exam'],
+            [ROLES.STORE_MANAGER]: ['profile', 'attendance', 'employees', 'daily-report', 'approvals', 'payment', 'rewards', 'points', 'reports'],
+            [ROLES.PRODUCTION_MANAGER]: ['profile', 'attendance', 'reports', 'points'],
+            [ROLES.HQ_MANAGER]: ['profile', 'attendance', 'daily-report', 'approvals', 'employees', 'payment', 'exam', 'rewards', 'points', 'knowledge', 'reports'],
+            [ROLES.HR_MANAGER]: ['profile', 'attendance', 'employees', 'approvals', 'payment', 'reports', 'exam'],
+            [ROLES.CASHIER]: ['profile', 'attendance', 'payment', 'exam']
+        };
+        async function loadRoleModulesFromServer() {
+            try {
+                const r = await fetch('/api/role-modules', { credentials: 'include' });
+                if (r.ok) { const d = await r.json(); if (d?.config) _serverRoleModules = d.config; }
+            } catch (e) { console.warn('[role-modules] load failed:', e); }
+        }
         function getRoleModulePages(role) {
             const r = String(role || '').trim();
             if (r === ROLES.ADMIN) return null; // null means all modules
-            const byRole = {
-                [ROLES.EMPLOYEE]: ['profile', 'attendance', 'points', 'exam'],
-                [ROLES.STORE_MANAGER]: ['profile', 'attendance', 'employees', 'daily-report', 'approvals', 'payment', 'exam', 'rewards', 'points', 'reports', 'agents'],
-                [ROLES.PRODUCTION_MANAGER]: ['profile', 'attendance', 'reports', 'exam', 'points', 'agents'],
-                [ROLES.HQ_MANAGER]: ['profile', 'attendance', 'daily-report', 'approvals', 'employees', 'payment', 'exam', 'rewards', 'points', 'knowledge', 'reports', 'agents'],
-                [ROLES.HR_MANAGER]: ['profile', 'attendance', 'employees', 'approvals', 'payment', 'reports', 'exam'],
-                [ROLES.CASHIER]: ['profile', 'attendance', 'payment', 'exam']
-            };
-            return byRole[r] || byRole[ROLES.EMPLOYEE];
+            const src = _serverRoleModules || _defaultRoleModules;
+            return src[r] || src[ROLES.EMPLOYEE] || ['profile', 'attendance'];
         }
 
         function canAccessModulePage(pageName, role) {
             const page = String(pageName || '').trim();
+            if (page === 'agents') {
+                return hrmsCanAccessSmartAssistant(role == null ? currentUser?.role : role);
+            }
             const pages = getRoleModulePages(role == null ? currentUser?.role : role);
             if (pages === null) return true;
             return Array.isArray(pages) && pages.includes(page);
@@ -12865,6 +12916,16 @@
             return 'profile';
         }
         
+        // ---- role-modules UI ----
+        var _allMods=[{p:'profile',l:'我的档案'},{p:'employees',l:'员工管理'},{p:'attendance',l:'考勤管理'},{p:'daily-report',l:'营业日报'},{p:'approvals',l:'审批管理'},{p:'payment',l:'薪资管理'},{p:'rewards',l:'奖惩管理'},{p:'points',l:'积分管理'},{p:'reports',l:'报表中心'},{p:'agents',l:'智能助手'},{p:'exam',l:'考试管理'},{p:'knowledge',l:'知识库'},{p:'users',l:'用户管理'}];
+        var _edRoles=[{c:ROLES.STORE_MANAGER,l:'店长'},{c:ROLES.PRODUCTION_MANAGER,l:'出品经理'},{c:ROLES.HQ_MANAGER,l:'总部经理'},{c:ROLES.HR_MANAGER,l:'HR经理'},{c:ROLES.CASHIER,l:'收银员'},{c:ROLES.EMPLOYEE,l:'普通员工'}];
+        function renderRoleModulesGrid(){var c=document.getElementById('role-modules-grid');if(!c)return;var s=_serverRoleModules||_defaultRoleModules;var h='<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr><th style="text-align:left;padding:6px 8px;border-bottom:1px solid rgba(255,255,255,.15);color:rgba(255,255,255,.6)">模块</th>';for(var i=0;i<_edRoles.length;i++)h+='<th style="text-align:center;padding:6px 4px;border-bottom:1px solid rgba(255,255,255,.15);color:rgba(255,255,255,.6);font-size:11px">'+_edRoles[i].l+'</th>';h+='</tr></thead><tbody>';for(var j=0;j<_allMods.length;j++){var m=_allMods[j];h+='<tr><td style="padding:5px 8px;border-bottom:1px solid rgba(255,255,255,.06);color:#e0e8f0">'+m.l+'</td>';for(var k=0;k<_edRoles.length;k++){var r=_edRoles[k],ck=(s[r.c]||[]).includes(m.p)?'checked':'';h+='<td style="text-align:center;padding:5px 4px;border-bottom:1px solid rgba(255,255,255,.06)"><input type=checkbox data-role="'+r.c+'" data-page="'+m.p+'" '+ck+' style="accent-color:#4f8cff"></td>';}h+='</tr>';}h+='</tbody></table>';c.innerHTML=h;}
+function collectRoleModulesFromUI(){var cfg={};_edRoles.forEach(function(r){cfg[r.c]=[];});var boxes=document.querySelectorAll('#role-modules-grid input[type=checkbox]');boxes.forEach(function(b){if(b.checked)cfg[b.dataset.role].push(b.dataset.page);});return cfg;}
+async function saveRoleModulesConfig(){try{var cfg=collectRoleModulesFromUI();var r=await fetch('/api/role-modules',{method:'PUT',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({config:cfg})});if(!r.ok)throw new Error('HTTP '+r.status);_serverRoleModules=cfg;updateUserInfo();showNotification('角色模块权限已保存','success');}catch(e){showNotification('保存失败: '+e.message,'error');}}
+function resetRoleModulesConfig(){if(!confirm('确定恢复为默认权限配置？'))return;_serverRoleModules=null;renderRoleModulesGrid();showNotification('已恢复默认配置，请点击保存生效','info');}
+async function loadDedupStats(){var el=document.getElementById('dedup-stats-content');if(!el)return;el.textContent='加载中...';try{var r=await fetch('/api/dedup/stats',{credentials:'include'});if(!r.ok)throw new Error('HTTP '+r.status);var d=await r.json();var t=d.tables||{};el.innerHTML='<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;font-size:13px;"><span>消息记录重复组:</span><span style="font-weight:600;color:'+(t.agent_messages_dup_groups>0?'#ef5350':'#66bb6a')+'">'+t.agent_messages_dup_groups+'</span><span>飞书通用记录:</span><span>'+t.feishu_generic_records+'</span><span>销售明细:</span><span>'+t.sales_raw+'</span><span>桌访记录:</span><span>'+t.table_visit_records+'</span></div>';}catch(e){el.textContent='加载失败: '+e.message;}}
+async function runDedupCleanup(){if(!confirm('确定清理重复数据？'))return;try{var r=await fetch('/api/dedup/cleanup',{method:'POST',credentials:'include'});if(!r.ok)throw new Error('HTTP '+r.status);var d=await r.json();showNotification('清理完成，删除 '+d.deleted+' 条重复记录','success');loadDedupStats();}catch(e){showNotification('清理失败: '+e.message,'error');}}
+
         // 更新调试信息
         function updateDebug(message) {
             // UI 已去除调试面板，保留 console 输出以便排查
@@ -12963,14 +13024,14 @@
                 currentUser = {
                     id: u.id,
                     username: u.username,
-                    name: u.name || empInfo.name || u.username,
+                    name: empInfo.name || u.name || u.username,
                     role: hrmsNormalizeRoleCode(u.role),
-                    store: empInfo.store || userInfo.store || u.store || '',
-                    position: empInfo.position || userInfo.position || u.position || '',
-                    department: empInfo.department || userInfo.department || u.department || '',
-                    level: empInfo.level || userInfo.level || u.level || '',
-                    joinDate: empInfo.joinDate || userInfo.joinDate || u.joinDate || '',
-                    managerUsername: empInfo.managerUsername || userInfo.managerUsername || u.managerUsername || '',
+                    store: empInfo.store || u.store || '',
+                    position: empInfo.position || u.position || '',
+                    department: empInfo.department || u.department || '',
+                    level: empInfo.level || empInfo.jobLevel || empInfo.rank || u.level || '',
+                    joinDate: empInfo.joinDate || empInfo.hireDate || empInfo.entryDate || u.joinDate || '',
+                    managerUsername: empInfo.managerUsername || empInfo.manager || u.managerUsername || '',
                     status: 'active'
                 };
                 isLoggedIn = true;
@@ -12981,22 +13042,23 @@
                     const empInfo2 = employees2.find(e => String(e?.username || '').toLowerCase() === String(u.username || '').toLowerCase()) || {};
                     const users2 = HRMS_STORE.getUsers() || [];
                     const userInfo2 = users2.find(x => x && String(x?.username || '').toLowerCase() === String(u.username || '').toLowerCase()) || {};
-                    const stateRole = hrmsNormalizeRoleCode(empInfo2.role || userInfo2.role || '');
+                    const stateRole = hrmsNormalizeRoleCode(empInfo2.role || '');
                     currentUser = {
                         ...currentUser,
                         role: (stateRole && stateRole !== ROLES.EMPLOYEE) ? stateRole : currentUser.role,
-                        store: empInfo2.store || userInfo2.store || currentUser.store || '',
-                        position: empInfo2.position || userInfo2.position || currentUser.position || '',
-                        department: empInfo2.department || userInfo2.department || currentUser.department || '',
-                        level: empInfo2.level || userInfo2.level || currentUser.level || '',
-                        joinDate: empInfo2.joinDate || userInfo2.joinDate || currentUser.joinDate || '',
-                        managerUsername: empInfo2.managerUsername || userInfo2.managerUsername || currentUser.managerUsername || ''
+                        store: empInfo2.store || currentUser.store || '',
+                        position: empInfo2.position || currentUser.position || '',
+                        department: empInfo2.department || currentUser.department || '',
+                        level: empInfo2.level || empInfo2.jobLevel || empInfo2.rank || currentUser.level || '',
+                        joinDate: empInfo2.joinDate || empInfo2.hireDate || empInfo2.entryDate || currentUser.joinDate || '',
+                        managerUsername: empInfo2.managerUsername || empInfo2.manager || currentUser.managerUsername || ''
                     };
                 } catch (e) {
                     // keep going even if sync fails
                 }
 
                 console.log('登录成功:', currentUser);
+                await loadRoleModulesFromServer();
                 document.getElementById('login').classList.add('hidden');
                 document.getElementById('main-app').classList.remove('hidden');
                 updateUserInfo();
@@ -13070,7 +13132,7 @@
             if (settingsNav) settingsNav.style.display = isAdminUser() ? '' : 'none';
 
             const forecastNav = document.getElementById('nav-forecast');
-            const canSeeForecast = !!currentUser;
+            const canSeeForecast = hrmsCanAccessSmartAssistant(currentUser?.role);
             if (forecastNav) forecastNav.style.display = canSeeForecast ? '' : 'none';
 
             try {
@@ -13158,9 +13220,9 @@
             }
 
             if (pageName === 'agents') {
-                const canAccess = !!currentUser;
+                const canAccess = hrmsCanAccessSmartAssistant(currentUser?.role);
                 if (!canAccess) {
-                    showNotification('请先登录后访问 Agent 中心', 'warning');
+                    showNotification('仅店长、出品经理和总部角色可访问智能助手', 'warning');
                     pageName = getHomePageName();
                 }
             }
@@ -13355,6 +13417,7 @@
                     break;
                 case 'settings':
                     loadSettingsData();
+                    renderRoleModulesGrid();
                     break;
             }
         }
@@ -26109,26 +26172,26 @@ ${knowledgeContent.slice(0, 30000)}`;
             HRMS_STORE.setUsers(users);
 
             try {
-                if (String(role || '') === String(ROLES.ADMIN)) {
-                    const employees = HRMS_STORE.getEmployees() || [];
-                    const idx = (employees || []).findIndex(e => String(e?.username || '').toLowerCase() === username.toLowerCase());
-                    const empPatch = {
-                        id: username,
-                        username,
-                        name,
-                        store: store || '总部',
-                        department: department || '管理部',
-                        position: position || '系统管理员',
-                        role: '管理员',
-                        status: status || 'active'
-                    };
-                    if (idx >= 0) {
-                        employees[idx] = { ...(employees[idx] || {}), ...empPatch };
-                    } else {
-                        employees.push(empPatch);
-                    }
-                    HRMS_STORE.setEmployees(employees);
+                const employees = HRMS_STORE.getEmployees() || [];
+                const idx = (employees || []).findIndex(e => String(e?.username || '').toLowerCase() === username.toLowerCase());
+                const empPatch = {
+                    id: username,
+                    username,
+                    name,
+                    store: store || (String(role || '') === String(ROLES.ADMIN) ? '总部' : ''),
+                    department: department || (String(role || '') === String(ROLES.ADMIN) ? '管理部' : ''),
+                    position: position || (String(role || '') === String(ROLES.ADMIN) ? '系统管理员' : ''),
+                    level,
+                    managerUsername,
+                    role,
+                    status: status || 'active'
+                };
+                if (idx >= 0) {
+                    employees[idx] = { ...(employees[idx] || {}), ...empPatch };
+                } else {
+                    employees.push(empPatch);
                 }
+                HRMS_STORE.setEmployees(employees);
             } catch (e) {}
             closeUserFormModal();
             loadUsersData();
@@ -27439,18 +27502,18 @@ ${knowledgeContent.slice(0, 30000)}`;
 
                 currentUser = {
                     ...currentUser,
-                    id: currentUser.id || _usrRec.id || _empRec.id || '',
-                    username: currentUser.username || _usrRec.username || _empRec.username || '',
-                    name: currentUser.name || _usrRec.name || _empRec.name || '',
+                    id: currentUser.id || _empRec.id || _usrRec.id || '',
+                    username: currentUser.username || _empRec.username || _usrRec.username || '',
+                    name: _empRec.name || currentUser.name || _usrRec.name || '',
                     gender: _empRec.gender || _usrRec.gender || currentUser.gender || '',
                     birthday: _empRec.birthday || _usrRec.birthday || currentUser.birthday || '',
                     hometown: _empRec.hometown || _usrRec.hometown || currentUser.hometown || '',
-                    store: _empRec.store || _usrRec.store || currentUser.store || '',
-                    department: _empRec.department || _usrRec.department || currentUser.department || '',
-                    position: _empRec.position || _usrRec.position || currentUser.position || '',
-                    level: _empRec.level || _empRec.jobLevel || _empRec.rank || _usrRec.level || _usrRec.jobLevel || _usrRec.rank || currentUser.level || '',
-                    joinDate: _empRec.joinDate || _empRec.hireDate || _empRec.entryDate || _empRec.onboardDate || _usrRec.joinDate || _usrRec.hireDate || _usrRec.entryDate || _usrRec.onboardDate || currentUser.joinDate || '',
-                    managerUsername: _empRec.managerUsername || _empRec.manager || _usrRec.managerUsername || _usrRec.manager || currentUser.managerUsername || ''
+                    store: _empRec.store || currentUser.store || '',
+                    department: _empRec.department || currentUser.department || '',
+                    position: _empRec.position || currentUser.position || '',
+                    level: _empRec.level || _empRec.jobLevel || _empRec.rank || currentUser.level || '',
+                    joinDate: _empRec.joinDate || _empRec.hireDate || _empRec.entryDate || _empRec.onboardDate || currentUser.joinDate || '',
+                    managerUsername: _empRec.managerUsername || _empRec.manager || currentUser.managerUsername || ''
                 };
             } catch (e) {}
             
@@ -29192,20 +29255,23 @@ ${knowledgeContent.slice(0, 30000)}`;
                 drGetNum('dr-cat-water-amt'),
                 drGetNum('dr-cat-soup-amt'),
                 drGetNum('dr-cat-roast-amt'),
-                drGetNum('dr-cat-wok-amt')
+                drGetNum('dr-cat-wok-amt'),
+                drGetNum('dr-cat-sashimi-amt')
             ];
             const catQtys = [
                 drGetNum('dr-cat-water-qty'),
                 drGetNum('dr-cat-soup-qty'),
                 drGetNum('dr-cat-roast-qty'),
-                drGetNum('dr-cat-wok-qty')
+                drGetNum('dr-cat-wok-qty'),
+                drGetNum('dr-cat-sashimi-qty')
             ];
             const qtySum = catQtys.reduce((a, b) => a + b, 0);
             const ids = [
                 ['dr-cat-water-amt-rate', 'dr-cat-water-qty-rate', catAmts[0], catQtys[0]],
                 ['dr-cat-soup-amt-rate', 'dr-cat-soup-qty-rate', catAmts[1], catQtys[1]],
                 ['dr-cat-roast-amt-rate', 'dr-cat-roast-qty-rate', catAmts[2], catQtys[2]],
-                ['dr-cat-wok-amt-rate', 'dr-cat-wok-qty-rate', catAmts[3], catQtys[3]]
+                ['dr-cat-wok-amt-rate', 'dr-cat-wok-qty-rate', catAmts[3], catQtys[3]],
+                ['dr-cat-sashimi-amt-rate', 'dr-cat-sashimi-qty-rate', catAmts[4], catQtys[4]]
             ];
             ids.forEach(([aId, qId, aV, qV]) => {
                 drSetText(aId, drFmtPct(gross > 0 ? (Number(aV || 0) / gross) : 0));
@@ -29332,7 +29398,8 @@ ${knowledgeContent.slice(0, 30000)}`;
                     water: { amt: drGetNum('dr-cat-water-amt'), qty: drGetNum('dr-cat-water-qty') },
                     soup: { amt: drGetNum('dr-cat-soup-amt'), qty: drGetNum('dr-cat-soup-qty') },
                     roast: { amt: drGetNum('dr-cat-roast-amt'), qty: drGetNum('dr-cat-roast-qty') },
-                    wok: { amt: drGetNum('dr-cat-wok-amt'), qty: drGetNum('dr-cat-wok-qty') }
+                    wok: { amt: drGetNum('dr-cat-wok-amt'), qty: drGetNum('dr-cat-wok-qty') },
+                    sashimi: { amt: drGetNum('dr-cat-sashimi-amt'), qty: drGetNum('dr-cat-sashimi-qty') }
                 },
                 delivery: {
                     eleme: {
@@ -29354,6 +29421,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                     eleme: drGetNum('dr-bad-eleme')
                 },
                 new_wechat_members: drGetNum('dr-new-wechat-members'),
+                wechat_month_total: 0, // server auto-calculates monthly total
                 recharge: {
                     count: drGetNum('dr-recharge-count'),
                     amount: drGetNum('dr-recharge-amt')
@@ -29612,6 +29680,8 @@ ${knowledgeContent.slice(0, 30000)}`;
                 drSetValue('dr-cat-roast-qty', data?.categories?.roast?.qty);
                 drSetValue('dr-cat-wok-amt', data?.categories?.wok?.amt);
                 drSetValue('dr-cat-wok-qty', data?.categories?.wok?.qty);
+                drSetValue('dr-cat-sashimi-amt', data?.categories?.sashimi?.amt);
+                drSetValue('dr-cat-sashimi-qty', data?.categories?.sashimi?.qty);
                 drSetValue('dr-eleme-orders', data?.delivery?.eleme?.orders);
                 drSetValue('dr-eleme-rev', data?.delivery?.eleme?.revenue);
                 drSetValue('dr-eleme-actual', data?.delivery?.eleme?.actual);
@@ -29624,6 +29694,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                 drSetValue('dr-bad-meituan', data?.badReviews?.meituan);
                 drSetValue('dr-bad-eleme', data?.badReviews?.eleme);
                 drSetValue('dr-new-wechat-members', data?.new_wechat_members);
+                const _wmt = document.getElementById('dr-wechat-month-total'); if (_wmt) _wmt.textContent = (data?.wechat_month_total != null ? data.wechat_month_total : 0);
                 drSetValue('dr-recharge-count', data?.recharge?.count);
                 drSetValue('dr-recharge-amt', data?.recharge?.amount);
                 // 目标字段：从系统设置读取，只读显示（只有毛利率目标）
@@ -33806,18 +33877,19 @@ ${knowledgeContent.slice(0, 30000)}`;
                 { icon:'✅', label:'待审批', page:'approvals', roles:['admin','hr_manager','hq_manager','store_manager'] },
                 { icon:'💰', label:'请款', page:'payment', roles:['admin','hq_manager','store_manager','cashier'] },
                 { icon:'📚', label:'知识库', page:'knowledge' },
-                { icon:'🤖', label:'Agent中心', page:'agents' },
+                { icon:'🤖', label:'Agent中心', page:'agents', roles:['admin'] },
                 { icon:'📝', label:'考试测评', page:'exam' },
                 { icon:'🏆', label:'奖惩管理', page:'rewards', roles:['admin','hr_manager','hq_manager','store_manager'] },
                 { icon:'💎', label:'员工积分', page:'points' },
                 { icon:'⏰', label:'考勤打卡', page:'attendance' },
                 { icon:'📊', label:'分析报表', page:'reports', roles:['admin','hr_manager','hq_manager','store_manager'] },
-                { icon:'📦', label:'智能助手', href:'/forecast.html' },
+                { icon:'📦', label:'智能助手', href:'/forecast.html', roles:['admin'] },
                 { icon:'⚙️', label:'系统设置', page:'settings', roles:['admin'] },
             ];
             const role = currentUser?.role || '';
             const visibleItems = allItems.filter(item => {
-                if (item.href) return true; // external links always visible
+                if (Array.isArray(item.roles) && item.roles.length && !item.roles.includes(role)) return false;
+                if (item.href) return true;
                 if (item.page && !canAccessModulePage(item.page, role)) return false;
                 return true;
             });
