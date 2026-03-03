@@ -12965,7 +12965,7 @@
         const _defaultRoleModules = {
             [ROLES.EMPLOYEE]:           ['profile', 'attendance', 'exam', 'points', 'knowledge'],
             [ROLES.STORE_MANAGER]:      ['profile', 'attendance', 'exam', 'points', 'employees', 'daily-report', 'approvals', 'payment', 'knowledge', 'rewards', 'reports'],
-            [ROLES.PRODUCTION_MANAGER]: ['profile', 'attendance', 'exam', 'points', 'knowledge', 'rewards', 'reports'],
+            [ROLES.PRODUCTION_MANAGER]: ['profile', 'attendance', 'exam', 'points', 'knowledge', 'rewards'],
             [ROLES.HQ_MANAGER]:         ['profile', 'attendance', 'exam', 'points', 'employees', 'daily-report', 'approvals', 'payment', 'knowledge', 'rewards', 'reports'],
             [ROLES.HR_MANAGER]:         ['profile', 'attendance', 'exam', 'points', 'employees', 'approvals', 'payment', 'knowledge', 'rewards', 'reports'],
             [ROLES.FRONT_MANAGER]:      ['profile', 'attendance', 'exam', 'points', 'daily-report', 'approvals', 'knowledge'],
@@ -13000,7 +13000,7 @@
             const r = String(role || '').trim();
             if (r === ROLES.ADMIN) return ['profile', 'daily-report', 'reports', 'agents'];
             if (r === ROLES.STORE_MANAGER) return ['profile', 'attendance', 'daily-report', 'payment'];
-            if (r === ROLES.PRODUCTION_MANAGER) return ['profile', 'attendance', 'reports', 'agents'];
+            if (r === ROLES.PRODUCTION_MANAGER) return ['profile', 'attendance', 'rewards', 'agents'];
             if (r === ROLES.HQ_MANAGER) return ['profile', 'daily-report', 'approvals', 'reports'];
             if (r === ROLES.HR_MANAGER) return ['profile', 'attendance', 'approvals', 'reports'];
             if (r === ROLES.CASHIER) return ['profile', 'attendance', 'payment', 'exam'];
