@@ -33,6 +33,7 @@ import { ensureTaskBoardSchema, checkTimeoutsAndEscalate, registerTaskBoardRoute
 import { ensureHRMSApiSchema, registerHRMSApiRoutes } from './hrms-api-tools.js';
 import { ensureSOPDistributionSchema, registerSOPDistributionRoutes } from './sop-distribution.js';
 import { setDataExecutorPool, purgeExpiredCache, updateMetricVersion } from './data-executor.js';
+import fileRoutes from './file-routes.js';
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = String(process.env.HOST || '0.0.0.0');
@@ -4910,7 +4911,7 @@ app.get('/api/daily-reports', authRequired, async (req, res) => {
           data: {
             ...(item.data || {}),
             target_margin: targetConfig?.targets?.margin || null,
-            dianping_rating: dbData?.dianping_rating || null
+            dianping_rating: dbData?.dianping_rating ?? item?.data?.dianping_rating ?? null
           }
         };
       });
@@ -11602,6 +11603,7 @@ registerTaskBoardRoutes(app, authRequired);
 registerHRMSApiRoutes(app, authRequired);
 registerSOPDistributionRoutes(app, authRequired);
 registerUploadStatusRoute(app, { pool, getSharedState, authRequired });
+app.use('/api', authRequired, fileRoutes);
 
 app.listen(PORT, HOST, async () => {
   console.log(`hrms-server listening on ${HOST}:${PORT}`);
@@ -11612,6 +11614,55 @@ app.listen(PORT, HOST, async () => {
     await pool.query(`ALTER TABLE daily_reports ADD COLUMN IF NOT EXISTS new_wechat_members INTEGER DEFAULT 0`);
     // Runtime migration: 知识库文件版本号
     await pool.query(`ALTER TABLE knowledge_base ADD COLUMN IF NOT EXISTS version VARCHAR(50) DEFAULT NULL`);
+    // Runtime migration: 文件管理系统表
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS files (
+        id SERIAL PRIMARY KEY,
+        file_id VARCHAR(50) UNIQUE NOT NULL,
+        original_name VARCHAR(255) NOT NULL,
+        stored_name VARCHAR(255) NOT NULL,
+        file_type VARCHAR(50),
+        file_size BIGINT,
+        checksum VARCHAR(64),
+        source VARCHAR(50) DEFAULT 'manual_upload',
+        store VARCHAR(100),
+        brand VARCHAR(100),
+        date_range_start DATE,
+        date_range_end DATE,
+        tags JSONB DEFAULT '[]'::jsonb,
+        metadata JSONB DEFAULT '{}'::jsonb,
+        uploader_username VARCHAR(50),
+        uploader_name VARCHAR(100),
+        upload_ip VARCHAR(50),
+        upload_note TEXT,
+        related_task_id VARCHAR(50),
+        validation_status VARCHAR(20) DEFAULT 'pending',
+        validation_result JSONB,
+        download_count INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        deleted_at TIMESTAMP,
+        deleted_by VARCHAR(50)
+      )
+    `).catch(e => console.warn('[migration] files table:', e?.message));
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS file_access_logs (
+        id SERIAL PRIMARY KEY,
+        file_id VARCHAR(50) NOT NULL,
+        action VARCHAR(20) NOT NULL,
+        username VARCHAR(50),
+        ip VARCHAR(50),
+        user_agent TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `).catch(e => console.warn('[migration] file_access_logs table:', e?.message));
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_files_file_id ON files(file_id)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_files_type ON files(file_type)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_files_store ON files(store)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_files_created_at ON files(created_at DESC)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_files_deleted_at ON files(deleted_at)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_file_access_logs_file_id ON file_access_logs(file_id)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_file_access_logs_created_at ON file_access_logs(created_at DESC)`).catch(() => {});
     await ensureDataGovernanceTables();
     await ensureAgentTables();
     // Runtime migration: dedup unique index on agent_messages(record_id, content_type)
@@ -11674,6 +11725,129 @@ app.listen(PORT, HOST, async () => {
         console.error('[intelligence] Session state purge error:', e?.message);
       }
     }, 60 * 60 * 1000);
+
+    // ── P0-3: 定时任务心跳表初始化 ──────────────────────────────
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS scheduler_heartbeat (
+          task_name   TEXT PRIMARY KEY,
+          last_beat   TIMESTAMPTZ DEFAULT NOW(),
+          run_count   BIGINT DEFAULT 0
+        )
+      `);
+      console.log('[monitor] scheduler_heartbeat table ready');
+    } catch (e) {
+      console.error('[monitor] heartbeat table init error:', e?.message);
+    }
+
+    // 辅助：写心跳
+    async function beatHeartbeat(taskName) {
+      try {
+        await pool.query(
+          `INSERT INTO scheduler_heartbeat (task_name, last_beat, run_count)
+           VALUES ($1, NOW(), 1)
+           ON CONFLICT (task_name)
+           DO UPDATE SET last_beat = NOW(), run_count = scheduler_heartbeat.run_count + 1`,
+          [taskName]
+        );
+      } catch (_) {}
+    }
+
+    // 辅助：发飞书告警给所有 admin/hq_manager
+    async function sendSystemAlert(msg) {
+      try {
+        const admins = await pool.query(
+          `SELECT username FROM users WHERE role IN ('admin','hq_manager') AND status = 'active' LIMIT 5`
+        );
+        for (const a of admins.rows) {
+          const fu = await lookupFeishuUserByUsername(a.username);
+          if (fu?.open_id) {
+            await sendLarkMessage(fu.open_id, msg, { skipDedup: true });
+          }
+        }
+      } catch (e) {
+        console.error('[monitor] sendSystemAlert error:', e?.message);
+      }
+    }
+
+    // 带心跳的缓存清理（覆盖原 setInterval）
+    setInterval(async () => {
+      await purgeExpiredCache().catch(() => {});
+      await beatHeartbeat('cache_purge');
+    }, 2 * 60 * 60 * 1000);
+
+    // ── P0-3: 每 30 分钟检查心跳是否存活 ────────────────────────
+    setInterval(async () => {
+      try {
+        const r = await pool.query(`
+          SELECT task_name,
+                 EXTRACT(EPOCH FROM (NOW() - last_beat)) / 60 AS minutes_ago
+          FROM scheduler_heartbeat
+          WHERE last_beat < NOW() - INTERVAL '3 hours'
+        `);
+        if (r.rows.length > 0) {
+          const dead = r.rows.map(row =>
+            `${row.task_name}（${Math.floor(row.minutes_ago)}分钟前）`
+          ).join('、');
+          const msg = `🚨 [HRMS] 定时任务心跳异常\n停止任务：${dead}\n请登录服务器检查：\nsystemctl status hrms.service`;
+          console.error('[monitor] Dead tasks:', dead);
+          await sendSystemAlert(msg);
+        }
+      } catch (e) {
+        console.error('[monitor] heartbeat check error:', e?.message);
+      }
+    }, 30 * 60 * 1000);
+
+    // ── P0-2: 每天 23:30 检查 sales_raw 数据完整性 ──────────────
+    // 用 setInterval 每5分钟检查时间窗口
+    let _salesCheckFired = false;
+    setInterval(async () => {
+      const now = new Date();
+      const h = now.getHours(), m = now.getMinutes();
+      // 每天 23:30~23:35 触发一次
+      if (h !== 23 || m < 30 || m > 34) return;
+      if (_salesCheckFired && now.getDate() === _salesCheckFired) return;
+      _salesCheckFired = now.getDate();
+
+      try {
+        // 获取昨天日期（sales_raw 一般T+1检查）
+        const yesterday = new Date(now - 86400000).toISOString().split('T')[0];
+        const r = await pool.query(
+          `SELECT DISTINCT store FROM sales_raw WHERE date = $1`,
+          [yesterday]
+        );
+        const presentStores = r.rows.map(row => String(row.store || '').trim());
+
+        // 预期门店列表（从 users 表取 store_manager 角色的门店）
+        const storeR = await pool.query(
+          `SELECT DISTINCT store FROM users WHERE role = 'store_manager' AND status = 'active' AND store IS NOT NULL AND store != ''`
+        );
+        const expectedStores = storeR.rows.map(row => String(row.store || '').trim()).filter(Boolean);
+
+        const missing = expectedStores.filter(es =>
+          !presentStores.some(ps => ps.includes(es.slice(0, 4)) || es.includes(ps.slice(0, 4)))
+        );
+
+        await beatHeartbeat('sales_raw_check');
+
+        if (missing.length > 0) {
+          const msg = [
+            `⚠️ [HRMS] 销售数据缺失告警`,
+            `检查日期：${yesterday}`,
+            `缺失门店：${missing.join('、')}`,
+            `已有数据：${presentStores.join('、') || '无'}`,
+            `请尽快上传 Excel，否则明日销售指标将全部失效。`,
+            `上传入口：系统后台 → 数据上传 → 销售日报`
+          ].join('\n');
+          console.error('[monitor] sales_raw missing stores:', missing);
+          await sendSystemAlert(msg);
+        } else {
+          console.log(`[monitor] sales_raw check OK for ${yesterday}: ${presentStores.join('、')}`);
+        }
+      } catch (e) {
+        console.error('[monitor] sales_raw check error:', e?.message);
+      }
+    }, 5 * 60 * 1000);
 
     // Initialize enhanced autonomous agent systems
     try {

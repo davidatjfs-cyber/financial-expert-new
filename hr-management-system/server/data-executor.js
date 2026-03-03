@@ -263,46 +263,58 @@ async function executeOneMetric(metricId, timeRange, store, depResults) {
 }
 
 // ── 6. 子查询：feishu_generic_records ───────────────────────
+// 注意：表中数据字段为 fields（JSONB），不是 record_data
+// 日期字段"日期"存的是毫秒时间戳，需要用 to_timestamp(val::bigint/1000)::date 转换
+// 收货日期字段存的是字符串 'YYYY-MM-DD'
+
+// 统一的日期过滤条件片段（兼容毫秒时间戳和字符串两种格式）
+function buildFeishuDateFilter(alias) {
+  const f = alias ? `${alias}.fields` : 'fields';
+  return `(
+    to_timestamp((${f}->>'日期')::bigint/1000)::date BETWEEN $2::date AND $3::date
+    OR (${f}->>'收货日期')::date BETWEEN $2::date AND $3::date
+    OR (${f}->>'创建日期')::date BETWEEN $2::date AND $3::date
+    OR to_timestamp((${f}->>'提交时间')::bigint/1000)::date BETWEEN $2::date AND $3::date
+  )`;
+}
+
+// 统一的门店过滤条件片段
+function buildFeishuStoreFilter(paramIdx, alias) {
+  const f = alias ? `${alias}.fields` : 'fields';
+  return `lower(regexp_replace(coalesce(${f}->>'所属门店', ${f}->>'门店', ''), '\\s+', '', 'g')) LIKE $${paramIdx}`;
+}
 
 async function queryFeishuGenericRecords(def, start, end, store) {
   const formula = def.formula || '';
 
-  // 提取 table_id
-  const tableIdMatch = formula.match(/table_id\s*=\s*'([^']+)'/);
+  // 提取 table_id（支持单个或 IN 列表）
+  const tableIdMatch = formula.match(/table_id\s*(?:=\s*'([^']+)'|IN\s*\(([^)]+)\))/);
   if (!tableIdMatch) return null;
-  const tableId = tableIdMatch[1];
+  let tableIds;
+  if (tableIdMatch[1]) {
+    tableIds = [tableIdMatch[1]];
+  } else {
+    tableIds = tableIdMatch[2].split(',').map(s => s.trim().replace(/'/g, ''));
+  }
+  const tableIdPlaceholders = tableIds.map((_, i) => `$${i + 1}`).join(', ');
+
+  const storeParamIdx = tableIds.length + 3; // $1...$N = tableIds, $N+1=start, $N+2=end, $N+3=store
 
   // COUNT(*)
   if (/^COUNT\(\*\)/.test(formula.trim())) {
-    const extraCond = formula.includes('record_data->>') ?
-      formula.split('AND').slice(1).join('AND') : '';
-
+    const params = [...tableIds, start, end];
     let sql = `SELECT COUNT(*)::int AS val FROM feishu_generic_records
-               WHERE table_id = $1
-                 AND (record_data->>'收货日期' IS NOT NULL
-                   OR record_data->>'日期' IS NOT NULL
-                   OR record_data->>'提交时间' IS NOT NULL
-                   OR record_data->>'创建日期' IS NOT NULL)`;
-    const params = [tableId];
+               WHERE table_id IN (${tableIdPlaceholders})
+                 AND ${buildFeishuDateFilter()}`;
 
-    // 日期过滤（尝试多个日期字段）
-    sql += ` AND (
-      (record_data->>'收货日期' BETWEEN $2 AND $3) OR
-      (record_data->>'日期' BETWEEN $2 AND $3) OR
-      (to_timestamp((record_data->>'提交时间')::bigint/1000)::date BETWEEN $2::date AND $3::date)
-    )`;
-    params.push(start, end);
-
-    // 门店过滤
     if (store) {
       const n = normalizeStore(store);
-      sql += ` AND lower(regexp_replace(coalesce(record_data->>'门店', record_data->>'所属门店', ''), '\\s+', '', 'g')) LIKE $4`;
+      sql += ` AND ${buildFeishuStoreFilter(storeParamIdx)}`;
       params.push(`%${n}%`);
     }
 
-    // 异常条件（如原料异常）
     if (formula.includes('异常原料名称')) {
-      sql += ` AND record_data->>'异常原料名称' IS NOT NULL AND record_data->>'异常原料名称' != ''`;
+      sql += ` AND fields->>'异常原料名称' IS NOT NULL AND fields->>'异常原料名称' != ''`;
     }
 
     const r = await pool().query(sql, params);
@@ -311,19 +323,18 @@ async function queryFeishuGenericRecords(def, start, end, store) {
 
   // AVG(...)
   if (/^AVG\(/.test(formula.trim())) {
-    const fieldMatch = formula.match(/record_data->>'([^']+)'/);
+    const fieldMatch = formula.match(/record_data->>'([^']+)'/) || formula.match(/fields->>'([^']+)'/);
     if (!fieldMatch) return null;
     const field = fieldMatch[1];
-    const params = [tableId, start, end];
-    let sql = `SELECT AVG((record_data->>'${field}')::numeric)::numeric(8,2) AS val
+    const params = [...tableIds, start, end];
+    let sql = `SELECT AVG(NULLIF(fields->>'${field}', '')::numeric)::numeric(8,2) AS val
                FROM feishu_generic_records
-               WHERE table_id = $1
-                 AND (record_data->>'收货日期' BETWEEN $2 AND $3
-                   OR record_data->>'日期' BETWEEN $2 AND $3)
-                 AND (record_data->>'${field}') ~ '^[0-9.]+$'`;
+               WHERE table_id IN (${tableIdPlaceholders})
+                 AND ${buildFeishuDateFilter()}
+                 AND (fields->>'${field}') ~ '^[0-9.]+$'`;
     if (store) {
       const n = normalizeStore(store);
-      sql += ` AND lower(regexp_replace(coalesce(record_data->>'门店', record_data->>'所属门店', ''), '\\s+', '', 'g')) LIKE $4`;
+      sql += ` AND ${buildFeishuStoreFilter(storeParamIdx)}`;
       params.push(`%${n}%`);
     }
     const r = await pool().query(sql, params);
@@ -332,45 +343,42 @@ async function queryFeishuGenericRecords(def, start, end, store) {
 
   // COUNT(CASE WHEN ...) / NULLIF — 合格率
   if (/COUNT\(CASE WHEN/.test(formula)) {
-    const condMatch = formula.match(/record_data->>'([^']+)'='([^']+)'/);
+    const condMatch = formula.match(/(?:record_data|fields)->>'([^']+)'='([^']+)'/);
     if (!condMatch) return null;
     const [, field, val] = condMatch;
-    const params = [tableId, start, end];
+    const params = [...tableIds, start, end];
     let sql = `SELECT ROUND(
-      COUNT(CASE WHEN record_data->>'${field}' = '${val}' THEN 1 END)::numeric
+      COUNT(CASE WHEN fields->>'${field}' = '${val}' THEN 1 END)::numeric
       / NULLIF(COUNT(*), 0) * 100, 1
     ) AS val
     FROM feishu_generic_records
-    WHERE table_id = $1
-      AND (record_data->>'收货日期' BETWEEN $2 AND $3
-        OR record_data->>'日期' BETWEEN $2 AND $3
-        OR to_timestamp((record_data->>'提交时间')::bigint/1000)::date BETWEEN $2::date AND $3::date)`;
+    WHERE table_id IN (${tableIdPlaceholders})
+      AND ${buildFeishuDateFilter()}`;
     if (store) {
       const n = normalizeStore(store);
-      sql += ` AND lower(regexp_replace(coalesce(record_data->>'门店', record_data->>'所属门店', ''), '\\s+', '', 'g')) LIKE $4`;
+      sql += ` AND ${buildFeishuStoreFilter(storeParamIdx)}`;
       params.push(`%${n}%`);
     }
     const r = await pool().query(sql, params);
     return r.rows?.[0]?.val !== null ? Number(r.rows[0].val) : null;
   }
 
-  // SUM(COALESCE(...)) — 客流
+  // SUM(COALESCE(...)) — 客流（就餐人数字段含"3人"等文字，需提取数字）
   if (/^SUM\(COALESCE\(/.test(formula.trim())) {
-    const params = [tableId, start, end];
+    const params = [...tableIds, start, end];
     let sql = `SELECT SUM(
       COALESCE(
-        NULLIF(record_data->>'就餐人数', '')::int,
-        NULLIF(record_data->>'人数', '')::int,
+        NULLIF(regexp_replace(fields->>'就餐人数', '[^0-9]', '', 'g'), '')::int,
+        NULLIF(regexp_replace(fields->>'人数', '[^0-9]', '', 'g'), '')::int,
         0
       )
     )::int AS val
     FROM feishu_generic_records
-    WHERE table_id = $1
-      AND (record_data->>'日期' BETWEEN $2 AND $3
-        OR to_timestamp((record_data->>'提交时间')::bigint/1000)::date BETWEEN $2::date AND $3::date)`;
+    WHERE table_id IN (${tableIdPlaceholders})
+      AND ${buildFeishuDateFilter()}`;
     if (store) {
       const n = normalizeStore(store);
-      sql += ` AND lower(regexp_replace(coalesce(record_data->>'门店', record_data->>'所属门店', ''), '\\s+', '', 'g')) LIKE $4`;
+      sql += ` AND ${buildFeishuStoreFilter(storeParamIdx)}`;
       params.push(`%${n}%`);
     }
     const r = await pool().query(sql, params);
@@ -690,6 +698,53 @@ export function extractTimeRangeFromText(text) {
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   }
 
+  // ── 新增：日期范围识别（优先级最高）──────────────────────────
+  // 支持 "15-22号"、"15号-22号"、"15日-22日"、"2月15日-22日"、"2月15-22号" 等
+  const rangePatterns = [
+    // "2月15日-22日" / "2月15-22号" / "2月15日至22日"
+    /(\d{1,2})[月](\d{1,2})(?:[日号])?[-~至到](\d{1,2})[日号]/,
+    // "15-22号" / "15号-22号" / "15日-22日" / "15至22号"
+    /(\d{1,2})(?:[日号])?[-~至到](\d{1,2})[日号]/,
+    // "2月15日-2月22日"
+    /(\d{1,2})[月](\d{1,2})[日号][-~至到](\d{1,2})[月](\d{1,2})[日号]/
+  ];
+
+  for (const pattern of rangePatterns) {
+    const match = q.match(pattern);
+    if (match) {
+      let startMonth, startDay, endMonth, endDay;
+      
+      if (match.length === 4 && pattern.source.includes('月')) {
+        // "2月15日-22日" 或 "2月15-22号"
+        startMonth = parseInt(match[1], 10);
+        startDay = parseInt(match[2], 10);
+        endMonth = startMonth;
+        endDay = parseInt(match[3], 10);
+      } else if (match.length === 5) {
+        // "2月15日-2月22日"
+        startMonth = parseInt(match[1], 10);
+        startDay = parseInt(match[2], 10);
+        endMonth = parseInt(match[3], 10);
+        endDay = parseInt(match[4], 10);
+      } else {
+        // "15-22号" / "15日-22日"
+        startMonth = now.getMonth() + 1;
+        startDay = parseInt(match[1], 10);
+        endMonth = startMonth;
+        endDay = parseInt(match[2], 10);
+      }
+
+      const year = now.getFullYear();
+      const start = new Date(year, startMonth - 1, startDay);
+      const end = new Date(year, endMonth - 1, endDay);
+      
+      return {
+        timeRange: `${fmt(start)}~${fmt(end)}`,
+        label: `${startMonth}月${startDay}日-${endMonth === startMonth ? '' : endMonth + '月'}${endDay}日`
+      };
+    }
+  }
+
   if (/今[天日]/.test(q)) {
     const s = fmt(today);
     return { timeRange: `${s}~${s}`, label: '今日' };
@@ -742,6 +797,17 @@ export function extractTimeRangeFromText(text) {
       const lastDay = new Date(y, mNum, 0).getDate();
       const e = `${y}-${String(mNum).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
       return { timeRange: `${s}~${e}`, label: `${mNum}月` };
+    }
+  }
+  // 具体单日："2月15日"、"3月1号" — 必须在 numMonthMatch 之前，否则"2月"会先匹配
+  const singleDayMatch = q.match(/(\d{1,2})[月](\d{1,2})[日号]/);
+  if (singleDayMatch) {
+    const mNum = parseInt(singleDayMatch[1], 10);
+    const dNum = parseInt(singleDayMatch[2], 10);
+    if (mNum >= 1 && mNum <= 12 && dNum >= 1 && dNum <= 31) {
+      const y = now.getFullYear();
+      const s = `${y}-${String(mNum).padStart(2, '0')}-${String(dNum).padStart(2, '0')}`;
+      return { timeRange: `${s}~${s}`, label: `${mNum}月${dNum}日` };
     }
   }
   // 数字月份 "3月" "3月份"

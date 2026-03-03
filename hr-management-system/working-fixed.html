@@ -6218,6 +6218,11 @@
                         <span class="nav-badge" id="nav-badge-knowledge" style="display:none;">0</span>
                     </a>
                 </div>
+                <div class="nav-item" data-page="files">
+                    <a href="#" class="nav-link" onclick="showPage('files')">
+                        <i>📁</i> <span>文件中心</span>
+                    </a>
+                </div>
                 <div class="nav-item" data-page="agents">
                     <a href="#" class="nav-link" onclick="showPage('agents')">
                         <i>🤖</i> <span>Agent中心</span>
@@ -7980,18 +7985,18 @@
             </div>
 
             <div id="approval-detail-modal" class="modal ui-modal">
-                <div class="modal-content" style="max-width: 820px;">
-                    <div class="modal-header">
+                <div class="modal-content" style="max-width: 820px; display:flex; flex-direction:column; max-height: min(92vh, 100dvh - env(safe-area-inset-bottom, 0px));">
+                    <div class="modal-header" style="flex-shrink:0;">
                         <div>
                             <h3 class="ui-modal-title">审批详情</h3>
                             <div id="approval-detail-subtitle" class="ui-modal-desc">--</div>
                         </div>
                         <button class="modal-close" onclick="closeApprovalDetailModal()">×</button>
                     </div>
-                    <div class="modal-body">
-                        <div id="approval-detail-body" style="padding: 14px 20px; max-height: 70vh; overflow-y: auto;"></div>
+                    <div class="modal-body" style="flex:1; overflow-y:auto; overflow-x:hidden; padding:0; -webkit-overflow-scrolling: touch;">
+                        <div id="approval-detail-body" style="padding: 14px 20px;"></div>
                     </div>
-                    <div class="ui-modal-footer" style="display:flex; justify-content:flex-end; gap:10px; padding: 12px 20px; border-top: 1px solid rgba(255,255,255,0.08);">
+                    <div class="ui-modal-footer" style="flex-shrink:0; display:flex; justify-content:flex-end; gap:10px; padding: 12px 20px calc(12px + env(safe-area-inset-bottom, 0px)) 20px; border-top: 1px solid rgba(255,255,255,0.08);">
                         <button class="btn btn-secondary" type="button" onclick="closeApprovalDetailModal()">关闭</button>
                         <button class="btn" id="approval-detail-admin-delete" type="button" style="display:none; background: linear-gradient(135deg, #ef4444, #dc2626);" onclick="adminDeleteCurrentApproval()">删除</button>
                         <button class="btn" id="approval-detail-pay" type="button" style="display:none; background: linear-gradient(135deg, #3b82f6, #2563eb);" onclick="payCurrentApproval()">标记已付款</button>
@@ -8364,6 +8369,72 @@
                         </div>
                     </div>
                 </div>
+            </div>
+
+            <!-- 文件中心页面 -->
+            <div id="files-page" class="hidden">
+                <div class="page-header" style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
+                    <h2>📁 文件中心</h2>
+                    <div style="display:flex;gap:8px;">
+                        <button class="btn btn-secondary" onclick="batchDownloadFiles()" id="batch-download-btn" style="display:none;">
+                            <i>📦</i> 批量下载 (<span id="selected-count">0</span>)
+                        </button>
+                        <button class="btn btn-primary" onclick="showUploadFileDialog()">
+                            <i>⬆️</i> 上传文件
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 搜索框 -->
+                <div class="card" style="margin-bottom: 16px;">
+                    <div style="display:flex;gap:8px;">
+                        <input type="text" id="file-search-input" placeholder="搜索文件名、备注、门店..." style="flex:1;padding:10px;border-radius:8px;border:1px solid #ddd;" onkeypress="if(event.key==='Enter') searchFiles()">
+                        <button class="btn btn-primary" onclick="searchFiles()">🔍 搜索</button>
+                        <button class="btn btn-secondary" onclick="clearSearch()">清除</button>
+                    </div>
+                </div>
+
+                <!-- 文件过滤器 -->
+                <div class="card" style="margin-bottom: 16px;">
+                    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;">
+                        <div>
+                            <label style="font-size:12px;color:#666;">文件类型</label>
+                            <select id="file-filter-type" onchange="loadFilesList()" style="width:100%;padding:8px;border-radius:8px;border:1px solid #ddd;">
+                                <option value="">全部</option>
+                                <option value="pos_sales">POS销售</option>
+                                <option value="feishu_export">飞书导出</option>
+                                <option value="daily_report">营业日报</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label style="font-size:12px;color:#666;">门店</label>
+                            <select id="file-filter-store" onchange="loadFilesList()" style="width:100%;padding:8px;border-radius:8px;border:1px solid #ddd;">
+                                <option value="">全部</option>
+                                <option value="洪潮大宁久光店">洪潮大宁久光店</option>
+                                <option value="马己仙上海音乐广场店">马己仙上海音乐广场店</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label style="font-size:12px;color:#666;">校验状态</label>
+                            <select id="file-filter-validation" onchange="loadFilesList()" style="width:100%;padding:8px;border-radius:8px;border:1px solid #ddd;">
+                                <option value="">全部</option>
+                                <option value="pending">待校验</option>
+                                <option value="passed">已通过</option>
+                                <option value="failed">未通过</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label style="font-size:12px;color:#666;">上传人</label>
+                            <input type="text" id="file-filter-uploader" placeholder="输入用户名" onchange="loadFilesList()" style="width:100%;padding:8px;border-radius:8px;border:1px solid #ddd;">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 文件列表 -->
+                <div id="files-list-container"></div>
+
+                <!-- 分页 -->
+                <div id="files-pagination" style="display:flex;justify-content:center;gap:8px;margin-top:16px;"></div>
             </div>
 
             <div id="agents-page" class="hidden">
@@ -9694,6 +9765,19 @@
     <!-- 通知容器 -->
     <div id="notification" class="notification hidden"></div>
 
+    <!-- 二次确认弹窗 (hrmsConfirm) -->
+    <div id="hrms-confirm-modal" style="display:none;position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,0.65);display:none;align-items:center;justify-content:center;">
+      <div style="background:#1a2236;border:1px solid rgba(255,255,255,0.12);border-radius:16px;padding:28px 28px 20px;min-width:300px;max-width:420px;box-shadow:0 8px 40px rgba(0,0,0,0.5);">
+        <div id="hrms-confirm-icon" style="font-size:32px;text-align:center;margin-bottom:12px;">⚠️</div>
+        <div id="hrms-confirm-title" style="font-size:16px;font-weight:700;color:#f0f4ff;text-align:center;margin-bottom:8px;"></div>
+        <div id="hrms-confirm-msg" style="font-size:13px;color:rgba(255,255,255,0.6);text-align:center;margin-bottom:24px;line-height:1.6;"></div>
+        <div style="display:flex;gap:12px;justify-content:center;">
+          <button id="hrms-confirm-cancel" style="flex:1;padding:10px 0;border-radius:10px;border:1px solid rgba(255,255,255,0.15);background:rgba(255,255,255,0.06);color:#c0cce0;font-size:14px;cursor:pointer;">取消</button>
+          <button id="hrms-confirm-ok" style="flex:1;padding:10px 0;border-radius:10px;border:none;background:linear-gradient(135deg,#ef4444,#dc2626);color:#fff;font-size:14px;font-weight:600;cursor:pointer;">确认删除</button>
+        </div>
+      </div>
+    </div>
+
     <!-- 离职申请弹窗 -->
     <div id="resignation-modal" class="modal ui-modal">
         <div class="modal-content" style="max-width: 680px;">
@@ -10124,6 +10208,7 @@
             ADMIN: 'admin',
             HQ_MANAGER: 'hq_manager',
             STORE_MANAGER: 'store_manager',
+            FRONT_MANAGER: 'front_manager',
             CASHIER: 'cashier',
             HR_MANAGER: 'hr_manager',
             PRODUCTION_MANAGER: 'store_production_manager',
@@ -12621,7 +12706,8 @@
             const id = String(item?.id || '').trim();
             if (!id) return;
             const typeLabel = approvalTypeText(item?.type);
-            if (!confirm(`确定删除此${typeLabel}记录？此操作不可恢复。`)) return;
+            const _okAp = await hrmsConfirm({ title: '删除审批记录', message: `确定删除此${typeLabel}记录？此操作不可恢复。`, okText: '确认删除', icon: '📝' });
+            if (!_okAp) return;
             try {
                 const resp = await fetch('/api/approvals/' + encodeURIComponent(id), {
                     method: 'DELETE',
@@ -12830,7 +12916,7 @@
         }
 
         function hrmsIsRoleCanWriteDailyReport(role) {
-            return role === ROLES.ADMIN || role === ROLES.STORE_MANAGER;
+            return role === ROLES.ADMIN || role === ROLES.STORE_MANAGER || role === ROLES.FRONT_MANAGER;
         }
 
         function hrmsIsRoleAdmin(role) {
@@ -12846,7 +12932,8 @@
                 [ROLES.STORE_MANAGER]: '店长',
                 [ROLES.CASHIER]: '总部出纳',
                 [ROLES.EMPLOYEE]: '门店员工',
-                [ROLES.PRODUCTION_MANAGER]: '出品经理'
+                [ROLES.PRODUCTION_MANAGER]: '出品经理',
+                [ROLES.FRONT_MANAGER]: '前厅经理'
             };
             const v = String(role || '').trim();
             if (roleNames[v]) return roleNames[v];
@@ -12868,15 +12955,21 @@
             return r === ROLES.ADMIN;
         }
 
+        function hrmsIsAlwaysAllowedPage(pageName) {
+            return ['profile', 'attendance', 'exam', 'points'].includes(String(pageName || '').trim());
+        }
+
         // 服务端加载的角色模块配置（登录后从API获取）
         let _serverRoleModules = null;
+        // 8个管理模块：员工管理/营业日报/待审批/请款/知识库/奖惩管理/分析报表/智能助手
         const _defaultRoleModules = {
-            [ROLES.EMPLOYEE]: ['profile', 'attendance', 'points', 'exam'],
-            [ROLES.STORE_MANAGER]: ['profile', 'attendance', 'employees', 'daily-report', 'approvals', 'payment', 'rewards', 'points', 'reports'],
-            [ROLES.PRODUCTION_MANAGER]: ['profile', 'attendance', 'reports', 'points'],
-            [ROLES.HQ_MANAGER]: ['profile', 'attendance', 'daily-report', 'approvals', 'employees', 'payment', 'exam', 'rewards', 'points', 'knowledge', 'reports'],
-            [ROLES.HR_MANAGER]: ['profile', 'attendance', 'employees', 'approvals', 'payment', 'reports', 'exam'],
-            [ROLES.CASHIER]: ['profile', 'attendance', 'payment', 'exam']
+            [ROLES.EMPLOYEE]:           ['profile', 'attendance', 'exam', 'points', 'knowledge'],
+            [ROLES.STORE_MANAGER]:      ['profile', 'attendance', 'exam', 'points', 'employees', 'daily-report', 'approvals', 'payment', 'knowledge', 'rewards', 'reports'],
+            [ROLES.PRODUCTION_MANAGER]: ['profile', 'attendance', 'exam', 'points', 'knowledge', 'rewards', 'reports'],
+            [ROLES.HQ_MANAGER]:         ['profile', 'attendance', 'exam', 'points', 'employees', 'daily-report', 'approvals', 'payment', 'knowledge', 'rewards', 'reports'],
+            [ROLES.HR_MANAGER]:         ['profile', 'attendance', 'exam', 'points', 'employees', 'approvals', 'payment', 'knowledge', 'rewards', 'reports'],
+            [ROLES.FRONT_MANAGER]:      ['profile', 'attendance', 'exam', 'points', 'daily-report', 'approvals', 'knowledge'],
+            [ROLES.CASHIER]:            ['profile', 'attendance', 'exam', 'points', 'payment', 'knowledge']
         };
         async function loadRoleModulesFromServer() {
             try {
@@ -12893,8 +12986,10 @@
 
         function canAccessModulePage(pageName, role) {
             const page = String(pageName || '').trim();
-            if (page === 'agents') {
-                return hrmsCanAccessSmartAssistant(role == null ? currentUser?.role : role);
+            if (!currentUser && page !== 'profile') return false;
+            if (hrmsIsAlwaysAllowedPage(page)) return true;
+            if (page === 'agents' || page === 'users' || page === 'stores' || page === 'roles' || page === 'settings') {
+                return hrmsIsRoleAdmin(role == null ? currentUser?.role : role);
             }
             const pages = getRoleModulePages(role == null ? currentUser?.role : role);
             if (pages === null) return true;
@@ -12909,22 +13004,66 @@
             if (r === ROLES.HQ_MANAGER) return ['profile', 'daily-report', 'approvals', 'reports'];
             if (r === ROLES.HR_MANAGER) return ['profile', 'attendance', 'approvals', 'reports'];
             if (r === ROLES.CASHIER) return ['profile', 'attendance', 'payment', 'exam'];
+            if (r === ROLES.FRONT_MANAGER) return ['profile', 'daily-report', 'approvals', 'attendance'];
             return ['profile', 'attendance', 'points', 'exam'];
         }
 
         function getHomePageName() {
             return 'profile';
         }
-        
-        // ---- role-modules UI ----
-        var _allMods=[{p:'profile',l:'我的档案'},{p:'employees',l:'员工管理'},{p:'attendance',l:'考勤管理'},{p:'daily-report',l:'营业日报'},{p:'approvals',l:'审批管理'},{p:'payment',l:'薪资管理'},{p:'rewards',l:'奖惩管理'},{p:'points',l:'积分管理'},{p:'reports',l:'报表中心'},{p:'agents',l:'智能助手'},{p:'exam',l:'考试管理'},{p:'knowledge',l:'知识库'},{p:'users',l:'用户管理'}];
-        var _edRoles=[{c:ROLES.STORE_MANAGER,l:'店长'},{c:ROLES.PRODUCTION_MANAGER,l:'出品经理'},{c:ROLES.HQ_MANAGER,l:'总部经理'},{c:ROLES.HR_MANAGER,l:'HR经理'},{c:ROLES.CASHIER,l:'收银员'},{c:ROLES.EMPLOYEE,l:'普通员工'}];
+
+        // ---- 二次确认对话框 (替代原生 confirm，提供美化弹窗) ----
+        function hrmsConfirm({ title = '确认操作', message = '', okText = '确认删除', okStyle = '', icon = '⚠️' } = {}) {
+            return new Promise((resolve) => {
+                const modal = document.getElementById('hrms-confirm-modal');
+                if (!modal) { resolve(window.confirm(message || title)); return; }
+                document.getElementById('hrms-confirm-icon').textContent = icon;
+                document.getElementById('hrms-confirm-title').textContent = title;
+                document.getElementById('hrms-confirm-msg').textContent = message;
+                const okBtn = document.getElementById('hrms-confirm-ok');
+                okBtn.textContent = okText;
+                if (okStyle) okBtn.style.cssText += ';' + okStyle;
+                modal.style.display = 'flex';
+                const cleanup = (result) => {
+                    modal.style.display = 'none';
+                    okBtn.onclick = null;
+                    document.getElementById('hrms-confirm-cancel').onclick = null;
+                    modal.onclick = null;
+                    resolve(result);
+                };
+                okBtn.onclick = () => cleanup(true);
+                document.getElementById('hrms-confirm-cancel').onclick = () => cleanup(false);
+                modal.onclick = (e) => { if (e.target === modal) cleanup(false); };
+            });
+        }
+
+        // ---- role-modules UI（8个核心模块，6个角色）----
+        var _allMods=[
+          {p:'employees',l:'员工管理'},
+          {p:'attendance',l:'考勤打卡'},
+          {p:'exam',l:'考试测评'},
+          {p:'points',l:'员工积分'},
+          {p:'daily-report',l:'营业日报'},
+          {p:'approvals',l:'待审批'},
+          {p:'payment',l:'请款'},
+          {p:'knowledge',l:'知识库'},
+          {p:'rewards',l:'奖惩管理'},
+          {p:'reports',l:'分析报表'}
+        ];
+        var _edRoles=[
+          {c:ROLES.STORE_MANAGER,l:'店长'},
+          {c:ROLES.PRODUCTION_MANAGER,l:'出品经理'},
+          {c:ROLES.HQ_MANAGER,l:'总部营运'},
+          {c:ROLES.HR_MANAGER,l:'总部HR'},
+          {c:ROLES.CASHIER,l:'出纳'},
+          {c:ROLES.EMPLOYEE,l:'普通员工'}
+        ];
         function renderRoleModulesGrid(){var c=document.getElementById('role-modules-grid');if(!c)return;var s=_serverRoleModules||_defaultRoleModules;var h='<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr><th style="text-align:left;padding:6px 8px;border-bottom:1px solid rgba(255,255,255,.15);color:rgba(255,255,255,.6)">模块</th>';for(var i=0;i<_edRoles.length;i++)h+='<th style="text-align:center;padding:6px 4px;border-bottom:1px solid rgba(255,255,255,.15);color:rgba(255,255,255,.6);font-size:11px">'+_edRoles[i].l+'</th>';h+='</tr></thead><tbody>';for(var j=0;j<_allMods.length;j++){var m=_allMods[j];h+='<tr><td style="padding:5px 8px;border-bottom:1px solid rgba(255,255,255,.06);color:#e0e8f0">'+m.l+'</td>';for(var k=0;k<_edRoles.length;k++){var r=_edRoles[k],ck=(s[r.c]||[]).includes(m.p)?'checked':'';h+='<td style="text-align:center;padding:5px 4px;border-bottom:1px solid rgba(255,255,255,.06)"><input type=checkbox data-role="'+r.c+'" data-page="'+m.p+'" '+ck+' style="accent-color:#4f8cff"></td>';}h+='</tr>';}h+='</tbody></table>';c.innerHTML=h;}
 function collectRoleModulesFromUI(){var cfg={};_edRoles.forEach(function(r){cfg[r.c]=[];});var boxes=document.querySelectorAll('#role-modules-grid input[type=checkbox]');boxes.forEach(function(b){if(b.checked)cfg[b.dataset.role].push(b.dataset.page);});return cfg;}
-async function saveRoleModulesConfig(){try{var cfg=collectRoleModulesFromUI();var r=await fetch('/api/role-modules',{method:'PUT',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({config:cfg})});if(!r.ok)throw new Error('HTTP '+r.status);_serverRoleModules=cfg;updateUserInfo();showNotification('角色模块权限已保存','success');}catch(e){showNotification('保存失败: '+e.message,'error');}}
-function resetRoleModulesConfig(){if(!confirm('确定恢复为默认权限配置？'))return;_serverRoleModules=null;renderRoleModulesGrid();showNotification('已恢复默认配置，请点击保存生效','info');}
+async function saveRoleModulesConfig(){try{var cfg=collectRoleModulesFromUI();var tok=localStorage.getItem('hrms_token')||'';var r=await fetch('/api/role-modules',{method:'PUT',headers:{'Content-Type':'application/json','Authorization':'Bearer '+tok},body:JSON.stringify({config:cfg})});if(!r.ok)throw new Error('HTTP '+r.status);_serverRoleModules=cfg;updateUserInfo();showNotification('角色模块权限已保存','success');}catch(e){showNotification('保存失败: '+e.message,'error');}}
+async function resetRoleModulesConfig(){const _okRC=await hrmsConfirm({title:'重置权限配置',message:'确定恢复为默认权限配置？此操作将覆盖当前配置。',okText:'确认重置',icon:'🔄'});if(!_okRC)return;_serverRoleModules=null;renderRoleModulesGrid();showNotification('已恢复默认配置，请点击保存生效','info');}
 async function loadDedupStats(){var el=document.getElementById('dedup-stats-content');if(!el)return;el.textContent='加载中...';try{var r=await fetch('/api/dedup/stats',{credentials:'include'});if(!r.ok)throw new Error('HTTP '+r.status);var d=await r.json();var t=d.tables||{};el.innerHTML='<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;font-size:13px;"><span>消息记录重复组:</span><span style="font-weight:600;color:'+(t.agent_messages_dup_groups>0?'#ef5350':'#66bb6a')+'">'+t.agent_messages_dup_groups+'</span><span>飞书通用记录:</span><span>'+t.feishu_generic_records+'</span><span>销售明细:</span><span>'+t.sales_raw+'</span><span>桌访记录:</span><span>'+t.table_visit_records+'</span></div>';}catch(e){el.textContent='加载失败: '+e.message;}}
-async function runDedupCleanup(){if(!confirm('确定清理重复数据？'))return;try{var r=await fetch('/api/dedup/cleanup',{method:'POST',credentials:'include'});if(!r.ok)throw new Error('HTTP '+r.status);var d=await r.json();showNotification('清理完成，删除 '+d.deleted+' 条重复记录','success');loadDedupStats();}catch(e){showNotification('清理失败: '+e.message,'error');}}
+async function runDedupCleanup(){const _okDD=await hrmsConfirm({title:'清理重复数据',message:'确定清理重复数据？此操作将永久删除重复记录。',okText:'确认清理',icon:'🧹'});if(!_okDD)return;try{var r=await fetch('/api/dedup/cleanup',{method:'POST',credentials:'include'});if(!r.ok)throw new Error('HTTP '+r.status);var d=await r.json();showNotification('清理完成，删除 '+d.deleted+' 条重复记录','success');loadDedupStats();}catch(e){showNotification('清理失败: '+e.message,'error');}}
 
         // 更新调试信息
         function updateDebug(message) {
@@ -13188,7 +13327,7 @@ async function runDedupCleanup(){if(!confirm('确定清理重复数据？'))retu
 
             if (pageName === 'approvals') {
                 const _apr = String(currentUser?.role || '').trim();
-                const canAccess = currentUser && (_apr === ROLES.ADMIN || _apr === ROLES.HQ_MANAGER || _apr === ROLES.HR_MANAGER || _apr === ROLES.STORE_MANAGER || _apr === ROLES.CASHIER || _apr === ROLES.HR_MANAGER || _apr.startsWith('custom_'));
+                const canAccess = currentUser && (_apr === ROLES.ADMIN || _apr === ROLES.HQ_MANAGER || _apr === ROLES.HR_MANAGER || _apr === ROLES.STORE_MANAGER || _apr === ROLES.CASHIER || _apr === ROLES.FRONT_MANAGER || _apr.startsWith('custom_'));
                 if (!canAccess) {
                     showNotification('您没有待审批权限', 'warning');
                     pageName = getHomePageName();
@@ -13196,7 +13335,7 @@ async function runDedupCleanup(){if(!confirm('确定清理重复数据？'))retu
             }
 
             if (pageName === 'daily-report') {
-                const canAccess = currentUser && (currentUser.role === ROLES.ADMIN || currentUser.role === ROLES.HQ_MANAGER || currentUser.role === ROLES.STORE_MANAGER);
+                const canAccess = currentUser && (currentUser.role === ROLES.ADMIN || currentUser.role === ROLES.HQ_MANAGER || currentUser.role === ROLES.STORE_MANAGER || currentUser.role === ROLES.FRONT_MANAGER);
                 if (!canAccess) {
                     showNotification('您没有营业日报权限', 'warning');
                     pageName = getHomePageName();
@@ -13290,6 +13429,7 @@ async function runDedupCleanup(){if(!confirm('确定清理重复数据？'))retu
                         employees: '员工管理',
                         users: '用户管理',
                         knowledge: '知识库',
+                        files: '文件中心',
                         agents: 'Agent中心',
                         flashcards: '自我测验',
                         stores: '门店管理',
@@ -13381,6 +13521,14 @@ async function runDedupCleanup(){if(!confirm('确定清理重复数据？'))retu
                     break;
                 case 'knowledge':
                     loadKnowledgeData();
+                    break;
+                case 'files':
+                    if (currentUser?.role !== 'admin') {
+                        showNotification('仅管理员可访问文件中心', 'warning');
+                        pageName = getHomePageName();
+                        break;
+                    }
+                    loadFilesList();
                     break;
                 case 'agents':
                     loadAgentsData();
@@ -14708,8 +14856,9 @@ async function runDedupCleanup(){if(!confirm('确定清理重复数据？'))retu
             }
         }
 
-        function markResignationHandled(notificationId) {
-            if (!confirm('确认已处理该离职员工的权限关停？')) return;
+        async function markResignationHandled(notificationId) {
+            const _okRH = await hrmsConfirm({ title: '确认处理', message: '确认已处理该离职员工的权限关停？', okText: '确认处理', icon: '✅' });
+            if (!_okRH) return;
             
             const notifications = HRMS_STORE.getNotifications();
             const idx = notifications.findIndex(n => n.id === notificationId);
@@ -14844,14 +14993,15 @@ ${r.approvalNote ? '审批备注：' + r.approvalNote : ''}
             showNotification('公告已发布', 'success');
         }
 
-        function deleteAnnouncement(annId) {
+        async function deleteAnnouncement(annId) {
             if (!isAdminUser()) {
                 showNotification('仅管理员可删除公告', 'warning');
                 return;
             }
             const id = String(annId || '').trim();
             if (!id) return;
-            if (!confirm('确定删除该公告？删除后不可恢复。')) return;
+            const _okAnn = await hrmsConfirm({ title: '删除公告', message: '确定删除该公告？删除后不可恢复。', okText: '确认删除', icon: '📢' });
+            if (!_okAnn) return;
 
             const data = HRMS_STORE.ensure();
             const anns = Array.isArray(data.announcements) ? data.announcements : [];
@@ -14877,9 +15027,8 @@ ${r.approvalNote ? '审批备注：' + r.approvalNote : ''}
                 return;
             }
 
-            if (!confirm(`确定要删除「${item.title || '该资料'}」吗？此操作不可撤销。`)) {
-                return;
-            }
+            const _okKn = await hrmsConfirm({ title: '删除知识资料', message: `确定要删除「${item.title || '该资料'}」吗？此操作不可撤销。`, okText: '确认删除', icon: '📚' });
+            if (!_okKn) return;
 
             try {
                 await HRMS_API.deleteKnowledge(id);
@@ -16365,8 +16514,8 @@ ${r.approvalNote ? '审批备注：' + r.approvalNote : ''}
             }).join('');
         }
 
-        function clearKnowledgeFlashcardHistory() {
-            const ok = confirm('确认清空自我测验历史记录？');
+        async function clearKnowledgeFlashcardHistory() {
+            const ok = await hrmsConfirm({ title: '清空历史记录', message: '确认清空自我测验历史记录？', okText: '确认清空', icon: '🗑️' });
             if (!ok) return;
             setKbFlashcardsHistory([]);
             renderKnowledgeFlashcardHistory();
@@ -17774,7 +17923,8 @@ ${knowledgeContent.slice(0, 30000)}`;
         }
 
         async function deleteAgentTemplate(id) {
-            if (!confirm('确定删除该模板？')) return;
+            const _okTpl = await hrmsConfirm({ title: '删除模板', message: '确定删除该模板？此操作不可恢复。', okText: '确认删除', icon: '🗑️' });
+            if (!_okTpl) return;
             try {
                 const token = localStorage.getItem('hrms_token');
                 const apiPath = __AGENT_TEMPLATE_KIND === 'reply' ? '/api/admin/agents/reply-templates/' : '/api/admin/agents/templates/';
@@ -19199,14 +19349,14 @@ ${knowledgeContent.slice(0, 30000)}`;
             renderKnowledgeFlashcard();
         }
 
-        function resetKnowledgeFlashcardsProgress() {
+        async function resetKnowledgeFlashcardsProgress() {
             if (!currentUser) return;
             const itemId = String(document.getElementById('kb-fc-source')?.value || '').trim();
             if (!itemId) {
                 showNotification('请选择知识资料', 'warning');
                 return;
             }
-            const ok = confirm('确定重置该资料的闪卡进度？');
+            const ok = await hrmsConfirm({ title: '重置闪卡进度', message: '确定重置该资料的闪卡进度？', okText: '确认重置', icon: '🔄' });
             if (!ok) return;
             try {
                 localStorage.removeItem(getKbFlashcardsProgressKey(itemId));
@@ -19434,7 +19584,7 @@ ${knowledgeContent.slice(0, 30000)}`;
             showNotification('当前岗位能力要求已更新', 'success');
         }
 
-        function promoRemoveAbilityPosition() {
+        async function promoRemoveAbilityPosition() {
             if (!currentUser || String(currentUser.role || '') !== ROLES.ADMIN) {
                 showNotification('仅管理员可配置能力要求', 'warning');
                 return;
@@ -19443,7 +19593,8 @@ ${knowledgeContent.slice(0, 30000)}`;
             if (!posSel) return;
             const name = String(posSel.value || '').trim();
             if (!name) return;
-            if (!confirm(`确定删除岗位「${name}」的能力配置？`)) return;
+            const _okAbility = await hrmsConfirm({ title: '删除能力配置', message: `确定删除岗位「${name}」的能力配置？`, okText: '确认删除', icon: '⚙️' });
+            if (!_okAbility) return;
             const data = HRMS_STORE.ensure ? HRMS_STORE.ensure() : {};
             const map = promoGetAbilityRequirementsMap();
             delete map[name];
@@ -19675,7 +19826,7 @@ ${knowledgeContent.slice(0, 30000)}`;
             const feedback = String(input || '');
             try {
                 let evidenceUrls = [];
-                if (confirm('是否上传图片/视频培训资料？')) {
+                if (await hrmsConfirm({ title: '上传培训资料', message: '是否上传图片/视频培训资料？', okText: '上传', icon: '📎' })) {
                     evidenceUrls = await promoPickEvidenceUrls();
                 }
                 await HRMS_API.completePromotionTrainingSession(trackId, sessionId, feedback, evidenceUrls);
@@ -19696,7 +19847,7 @@ ${knowledgeContent.slice(0, 30000)}`;
             }
             try {
                 let evidenceUrls = [];
-                if (confirm('是否上传图片/视频考核资料？')) {
+                if (await hrmsConfirm({ title: '上传考核资料', message: '是否上传图片/视频考核资料？', okText: '上传', icon: '📎' })) {
                     evidenceUrls = await promoPickEvidenceUrls();
                 }
                 await HRMS_API.submitPromotionAssessment(trackId, result, comment, evidenceUrls);
@@ -21568,10 +21719,11 @@ ${knowledgeContent.slice(0, 30000)}`;
             deletedBuiltInRoles = Array.isArray(st?.deletedBuiltInRoles) ? st.deletedBuiltInRoles : [];
         } catch (e) {}
 
-        function deleteBuiltInRole(code) {
+        async function deleteBuiltInRole(code) {
             if (!isAdminUser()) { showNotification('仅管理员可操作', 'warning'); return; }
             if (code === 'admin') { showNotification('不能删除管理员角色', 'warning'); return; }
-            if (!confirm(`确定删除内置角色「${code}」？`)) return;
+            const _okBR = await hrmsConfirm({ title: '删除内置角色', message: `确定删除内置角色「${code}」？`, okText: '确认删除', icon: '🗑️' });
+            if (!_okBR) return;
             if (!deletedBuiltInRoles.includes(code)) deletedBuiltInRoles.push(code);
             try {
                 const st = HRMS_STORE.get() || HRMS_STORE.ensure();
@@ -21673,7 +21825,7 @@ ${knowledgeContent.slice(0, 30000)}`;
             showNotification(`角色已重命名为「${val}」`, 'success');
         }
 
-        function deleteCustomRole(idx) {
+        async function deleteCustomRole(idx) {
             if (!isAdminUser()) {
                 showNotification('仅管理员可删除角色', 'warning');
                 return;
@@ -21682,7 +21834,8 @@ ${knowledgeContent.slice(0, 30000)}`;
             const arr = Array.isArray(dict.roles) ? dict.roles.slice() : [];
             if (idx < 0 || idx >= arr.length) return;
             const roleName = arr[idx];
-            if (!confirm(`确定删除自定义角色「${roleName}」？\n删除后该角色的权限配置也会被清除。`)) return;
+            const _okCR = await hrmsConfirm({ title: '删除自定义角色', message: `确定删除自定义角色「${roleName}」？删除后该角色的权限配置也会被清除。`, okText: '确认删除', icon: '🗑️' });
+            if (!_okCR) return;
             const roleCode = 'custom_' + roleName.replace(/\s+/g, '_');
             const rolePerms = getRolePermissions();
             if (rolePerms[roleCode]) {
@@ -21696,7 +21849,7 @@ ${knowledgeContent.slice(0, 30000)}`;
             showNotification(`角色「${roleName}」已删除`, 'success');
         }
 
-        function toggleRoleStatus(roleId) {
+        async function toggleRoleStatus(roleId) {
             if (!isAdminUser()) {
                 showNotification('仅管理员可操作', 'warning');
                 return;
@@ -21711,7 +21864,8 @@ ${knowledgeContent.slice(0, 30000)}`;
             }
             const cur = roles[idx];
             const next = String(cur.status || 'active') === 'active' ? 'inactive' : 'active';
-            if (!confirm(`确定要将角色 ${cur.name || id} ${next === 'active' ? '启用' : '禁用'} 吗？`)) return;
+            const _okRS = await hrmsConfirm({ title: '修改角色状态', message: `确定要将角色「${cur.name || id}」${next === 'active' ? '启用' : '禁用'}吗？`, okText: next === 'active' ? '确认启用' : '确认禁用', icon: next === 'active' ? '✅' : '🚫' });
+            if (!_okRS) return;
             roles[idx] = { ...cur, status: next };
             HRMS_STORE.setRoles(roles);
             loadRolesData();
@@ -22530,6 +22684,7 @@ ${knowledgeContent.slice(0, 30000)}`;
             { key: 'badDianping',     label: '大众点评差评',  unit: '条', group: '差评' },
             { key: 'badMeituan',      label: '美团差评',      unit: '条', group: '差评' },
             { key: 'badEleme',        label: '饿了么差评',    unit: '条', group: '差评' },
+            { key: 'wechatMonthNew',  label: '本月企微新增数量', unit: '人', group: '企微' },
         ];
         const MT_FIELD_MAP = {};
         MT_ALL_FIELDS.forEach(f => { MT_FIELD_MAP[f.key] = f; });
@@ -22674,9 +22829,10 @@ ${knowledgeContent.slice(0, 30000)}`;
             el.innerHTML = lines.join('');
         }
 
-        function mtDeleteTarget(ym, store) {
+        async function mtDeleteTarget(ym, store) {
             if (!isAdminUser()) return;
-            if (!confirm(`确认删除 ${ym} ${store} 的目标？`)) return;
+            const _okMT = await hrmsConfirm({ title: '删除月度目标', message: `确定删除 ${ym} ${store} 的月度目标？`, okText: '确认删除', icon: '🎯' });
+            if (!_okMT) return;
             const key = mtGetKey(ym, store);
             const list = mtGetAll().filter(x => mtGetKey(x?.ym, x?.store) !== key);
             HRMS_STORE.updateSettings({ monthlyTargets: list });
@@ -23650,7 +23806,7 @@ ${knowledgeContent.slice(0, 30000)}`;
             showNotification('已加载资料', 'success');
         }
 
-        function deleteSelectedTrainingMaterial() {
+        async function deleteSelectedTrainingMaterial() {
             if (!isAdminUser()) {
                 showNotification('仅管理员可操作', 'warning');
                 return;
@@ -23661,7 +23817,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                 showNotification('请选择资料', 'warning');
                 return;
             }
-            const ok = confirm('确定删除该培训资料？删除后不可恢复。');
+            const ok = await hrmsConfirm({ title: '删除培训资料', message: '确定删除该培训资料？删除后不可恢复。', okText: '确认删除', icon: '📋' });
             if (!ok) return;
 
             const materials = HRMS_STORE.getTrainingMaterials();
@@ -24006,7 +24162,7 @@ ${knowledgeContent.slice(0, 30000)}`;
             showNotification('考试已开始', 'info');
         }
 
-        function submitExam(autoSubmit) {
+        async function submitExam(autoSubmit) {
             if (window.__EXAM_SUBMITTED) return;
             window.__EXAM_SUBMITTED = true;
             clearExamTimer();
@@ -24125,7 +24281,7 @@ ${knowledgeContent.slice(0, 30000)}`;
             if (!autoSubmit && unanswered > 0 && !window.__EXAM_SUBMIT_CONFIRMED) {
                 window.__EXAM_SUBMITTED = false;
                 window.__EXAM_SUBMIT_CONFIRMED = true;
-                const ok = confirm(`还有 ${unanswered} 道题未作答，确定要提交吗？`);
+                const ok = await hrmsConfirm({ title: '提交确认', message: `还有 ${unanswered} 道题未作答，确定要提交吗？`, okText: '确认提交', icon: '⚠️' });
                 if (!ok) {
                     window.__EXAM_SUBMIT_CONFIRMED = false;
                     return;
@@ -25217,6 +25373,7 @@ ${knowledgeContent.slice(0, 30000)}`;
             if (roleEl) {
                 const fixedRoles = [
                     { value: 'store_employee', label: '门店员工' },
+                    { value: 'front_manager', label: '前厅经理' },
                     { value: 'store_production_manager', label: '出品经理' },
                     { value: 'store_manager', label: '店长' },
                     { value: 'cashier', label: '总部出纳' },
@@ -25553,7 +25710,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                     if (sid && sid !== sessionId) return;
                 } catch (e) {}
 
-                const applyIdInfo = (idNo, nameFromOcr) => {
+                const applyIdInfo = async (idNo, nameFromOcr) => {
                     try {
                         const v = hrmsNormalizeIdCardNumber(idNo || '');
                         if (!v) return;
@@ -25562,7 +25719,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                             if (!oldNo) {
                                 idCardNumberEl.value = v;
                             } else if (oldNo !== v) {
-                                const ok = confirm(`识别到身份证号：${v}\n当前填写：${oldNo}\n是否使用识别结果覆盖？`);
+                                const ok = await hrmsConfirm({ title: '覆盖身份证号', message: `识别到身份证号：${v}，当前填写：${oldNo}，是否使用识别结果覆盖？`, okText: '覆盖', icon: '🪪' });
                                 if (ok) idCardNumberEl.value = v;
                             }
                         }
@@ -25577,7 +25734,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                             if (!oldName) {
                                 nameEl.value = nm;
                             } else if (oldName !== nm) {
-                                const ok = confirm(`识别到姓名：${nm}\n当前填写：${oldName}\n是否使用识别结果覆盖？`);
+                                const ok = await hrmsConfirm({ title: '覆盖姓名', message: `识别到姓名：${nm}，当前填写：${oldName}，是否使用识别结果覆盖？`, okText: '覆盖', icon: '👤' });
                                 if (ok) nameEl.value = nm;
                             }
                         }
@@ -25607,8 +25764,9 @@ ${knowledgeContent.slice(0, 30000)}`;
             }
         }
 
-        function deleteIdCardImage(side) {
-            if (!confirm('确定要删除该证件照片吗？')) return;
+        async function deleteIdCardImage(side) {
+            const _okDel = await hrmsConfirm({ title: '删除证件照片', message: '确定要删除该证件照片吗？', okText: '确认删除', icon: '🗑️' });
+            if (!_okDel) return;
             const urlEl = document.getElementById('employee-form-idcard-' + side + '-url');
             const prevEl = document.getElementById('employee-form-idcard-' + side + '-preview');
             const delBtn = document.getElementById('employee-form-idcard-' + side + '-delete');
@@ -25865,7 +26023,7 @@ ${knowledgeContent.slice(0, 30000)}`;
             openEmployeeFormModal('view', empId);
         }
         
-        function resetPassword(empId) {
+        async function resetPassword(empId) {
             if (!hasPermission(PERMISSIONS.EDIT_CONTENT)) {
                 showNotification('您没有密码重置权限', 'warning');
                 return;
@@ -25879,13 +26037,14 @@ ${knowledgeContent.slice(0, 30000)}`;
                 showNotification('未找到员工', 'error');
                 return;
             }
-            if (!confirm(`确定要重置账号 ${key} 的密码为默认 123456 吗？`)) return;
+            const _okRP = await hrmsConfirm({ title: '重置密码', message: `确定要重置账号 ${key} 的密码为默认 123456 吗？`, okText: '确认重置', icon: '🔑' });
+            if (!_okRP) return;
             employees[idx] = { ...employees[idx], password: '123456' };
             HRMS_STORE.setEmployees(employees);
             showNotification('密码已重置', 'success');
         }
         
-        function toggleEmployeeStatus(empId) {
+        async function toggleEmployeeStatus(empId) {
             if (!hasPermission(PERMISSIONS.EDIT_CONTENT)) {
                 showNotification('您没有员工管理权限', 'warning');
                 return;
@@ -25901,7 +26060,7 @@ ${knowledgeContent.slice(0, 30000)}`;
             }
             const emp = employees[idx];
             const nextStatus = emp.status === 'active' ? 'inactive' : 'active';
-            const ok = confirm(`确定要将账号 ${emp.username || key} 状态切换为 ${nextStatus === 'active' ? '启用' : '禁用'} 吗？`);
+            const ok = await hrmsConfirm({ title: '切换员工状态', message: `确定要将账号 ${emp.username || key} 状态切换为 ${nextStatus === 'active' ? '启用' : '禁用'} 吗？`, okText: nextStatus === 'active' ? '确认启用' : '确认禁用', icon: nextStatus === 'active' ? '✅' : '🚫' });
             if (!ok) return;
 
             employees[idx] = { ...emp, status: nextStatus };
@@ -25917,7 +26076,8 @@ ${knowledgeContent.slice(0, 30000)}`;
             }
             const key = String(empId || '').trim();
             if (!key) return;
-            if (!confirm(`确定删除账号 ${key}？删除后不可恢复。`)) return;
+            const _ok1 = await hrmsConfirm({ title: '删除员工', message: `确定删除账号「${key}」？此操作不可恢复，员工数据将永久删除。`, okText: '确认删除', icon: '🗑️' });
+            if (!_ok1) return;
             const keyLower = key.toLowerCase();
             const employees = HRMS_STORE.getEmployees();
             const users = HRMS_STORE.getUsers ? HRMS_STORE.getUsers() : [];
@@ -26207,7 +26367,7 @@ ${knowledgeContent.slice(0, 30000)}`;
             openUserFormModal('edit', username);
         }
         
-        function resetUserPassword(username) {
+        async function resetUserPassword(username) {
             if (!isAdminUser()) {
                 showNotification('您没有密码重置权限', 'warning');
                 return;
@@ -26220,14 +26380,15 @@ ${knowledgeContent.slice(0, 30000)}`;
                 showNotification('未找到用户', 'error');
                 return;
             }
-            if (!confirm(`确定要将用户 ${username} 密码重置为：${newPwd} 吗？`)) return;
+            const _okUP = await hrmsConfirm({ title: '重置用户密码', message: `确定要将用户 ${username} 密码重置为：${newPwd} 吗？`, okText: '确认重置', icon: '🔑' });
+            if (!_okUP) return;
 
             users[idx] = { ...users[idx], password: newPwd };
             HRMS_STORE.setUsers(users);
             showNotification('密码已重置', 'success');
         }
         
-        function toggleUserStatus(username) {
+        async function toggleUserStatus(username) {
             if (!isAdminUser()) {
                 showNotification('您没有用户管理权限', 'warning');
                 return;
@@ -26241,7 +26402,8 @@ ${knowledgeContent.slice(0, 30000)}`;
             }
             const u = users[idx];
             const nextStatus = (u.status || 'active') === 'active' ? 'inactive' : 'active';
-            if (!confirm(`确定要将用户 ${username} ${nextStatus === 'active' ? '启用' : '禁用'} 吗？`)) return;
+            const _okUS = await hrmsConfirm({ title: '切换用户状态', message: `确定要将用户 ${username} ${nextStatus === 'active' ? '启用' : '禁用'} 吗？`, okText: nextStatus === 'active' ? '确认启用' : '确认禁用', icon: nextStatus === 'active' ? '✅' : '🚫' });
+            if (!_okUS) return;
 
             users[idx] = { ...u, status: nextStatus };
             HRMS_STORE.setUsers(users);
@@ -26256,7 +26418,8 @@ ${knowledgeContent.slice(0, 30000)}`;
             }
             const uname = String(username || '').trim();
             if (!uname) return;
-            if (!confirm(`确定删除用户 ${uname}？删除后不可恢复。`)) return;
+            const _ok2 = await hrmsConfirm({ title: '删除用户', message: `确定删除用户「${uname}」？此操作不可恢复。`, okText: '确认删除', icon: '🗑️' });
+            if (!_ok2) return;
             const unameLower = uname.toLowerCase();
             const users = HRMS_STORE.getUsers();
             const employees = HRMS_STORE.getEmployees ? HRMS_STORE.getEmployees() : [];
@@ -26409,9 +26572,12 @@ ${knowledgeContent.slice(0, 30000)}`;
             }).join('');
         }
 
-        function deleteStore(storeId) {
-            if (!confirm('确定删除该门店？')) return;
+        async function deleteStore(storeId) {
             const stores = HRMS_STORE.getStores() || [];
+            const st = stores.find(s => s.id === storeId);
+            const stName = st?.name || storeId;
+            const _ok3 = await hrmsConfirm({ title: '删除门店', message: `确定删除门店「${stName}」？删除后相关数据将无法恢复。`, okText: '确认删除', icon: '🏪' });
+            if (!_ok3) return;
             HRMS_STORE.setStores(stores.filter(s => s.id !== storeId));
             loadStoresData();
             showNotification('已删除', 'success');
@@ -27932,7 +28098,8 @@ ${knowledgeContent.slice(0, 30000)}`;
             if (!approved) {
                 note = prompt('请输入拒绝原因（可选）：') || '';
             }
-            if (!confirm(`确认${action}该审批？`)) return;
+            const _okApprove = await hrmsConfirm({ title: `${action}审批`, message: `确认${action}该审批？`, okText: `确认${action}`, icon: approved ? '✅' : '❌' });
+            if (!_okApprove) return;
             try {
                 await HRMS_API.decideApproval(id, !!approved, note || '');
                 showNotification(`审批已${action}`, 'success');
@@ -27971,7 +28138,8 @@ ${knowledgeContent.slice(0, 30000)}`;
                 showNotification('仅管理员可删除通知', 'warning');
                 return;
             }
-            if (!confirm('确定删除此通知？')) return;
+            const _okDN = await hrmsConfirm({ title: '删除通知', message: '确定删除此通知？', okText: '确认删除', icon: '🗑️' });
+            if (!_okDN) return;
             try {
                 const visible = _getProfileVisibleNotifs();
                 const target = visible[idx];
@@ -29321,7 +29489,7 @@ ${knowledgeContent.slice(0, 30000)}`;
             return { budget, gross, actual, labor, eff };
         }
 
-        function deleteDailyReport() {
+        async function deleteDailyReport() {
             if (!currentUser) return;
             if (!hrmsIsRoleAdmin(String(currentUser?.role || '').trim())) {
                 showNotification('仅管理员可删除日报', 'warning');
@@ -29333,7 +29501,8 @@ ${knowledgeContent.slice(0, 30000)}`;
                 showNotification('请选择门店与日期', 'warning');
                 return;
             }
-            if (!confirm(`确认删除 ${store} ${date} 的日报？`)) return;
+            const _okDR = await hrmsConfirm({ title: '删除营业日报', message: `确定删除 ${store} ${date} 的日报？此操作不可恢复。`, okText: '确认删除', icon: '📊' });
+            if (!_okDR) return;
             HRMS_API.deleteDailyReport({ store, date })
                 .then(() => {
                     showNotification('已删除', 'success');
@@ -29488,7 +29657,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                 });
         }
 
-        function submitDailyReport() {
+        async function submitDailyReport() {
             if (!currentUser) return;
             const role = String(currentUser?.role || '').trim();
             if (!hrmsIsRoleCanWriteDailyReport(role)) {
@@ -29507,9 +29676,8 @@ ${knowledgeContent.slice(0, 30000)}`;
                 return;
             }
             if (role === ROLES.STORE_MANAGER) {
-                if (!confirm('确认提交日报？提交后将不可再修改。')) {
-                    return;
-                }
+                const _okDR = await hrmsConfirm({ title: '提交日报', message: '确认提交日报？提交后将不可再修改。', okText: '确认提交', icon: '📊' });
+                if (!_okDR) return;
             }
 
             HRMS_API.saveDailyReport({ ...payload, submitted: true })
@@ -32960,8 +33128,9 @@ ${knowledgeContent.slice(0, 30000)}`;
             }).join('');
         }
 
-        function deleteReward(id) {
-            if (!confirm('确定删除该记录？')) return;
+        async function deleteReward(id) {
+            const _ok4 = await hrmsConfirm({ title: '删除奖惩记录', message: '确定删除该奖惩记录？此操作不可恢复。', okText: '确认删除', icon: '📋' });
+            if (!_ok4) return;
             const data = HRMS_STORE.ensure();
             data.rewards = (data.rewards || []).filter(r => r.id !== id);
             HRMS_STORE.set(data);
@@ -33485,7 +33654,8 @@ ${knowledgeContent.slice(0, 30000)}`;
         }
 
         async function attConfirmRecord(id) {
-            if (!confirm('确认该打卡记录？')) return;
+            const _okCR = await hrmsConfirm({ title: '确认打卡记录', message: '确认该打卡记录？', okText: '确认', icon: '✅' });
+            if (!_okCR) return;
             try {
                 await HRMS_API.confirmCheckin(id, { status: 'confirmed' });
                 showNotification('已确认', 'success');
@@ -33657,7 +33827,8 @@ ${knowledgeContent.slice(0, 30000)}`;
             const month = btn?.dataset?.month || '';
             const store = btn?.dataset?.store || '';
             if (!month) { showNotification('请先选择月份并查询', 'warning'); return; }
-            if (!confirm(`确认提交 ${month} ${store || '全部门店'} 的月度考勤确认？\n\n提交后将进入审批流程：\n直属上级审批 → HR确认 → 自动生成工资数据`)) return;
+            const _okMC = await hrmsConfirm({ title: '月度考勤确认', message: `确认提交 ${month} ${store || '全部门店'} 的月度考勤确认？提交后将进入审批流程：直属上级审批 → HR确认 → 自动生成工资数据`, okText: '确认提交', icon: '📋' });
+            if (!_okMC) return;
             try {
                 btn.disabled = true;
                 btn.textContent = '提交中...';
@@ -33742,7 +33913,8 @@ ${knowledgeContent.slice(0, 30000)}`;
                 showNotification('请先等待定位完成', 'warning');
                 return;
             }
-            if (!confirm(`将门店"${storeName}"的位置设为当前GPS坐标？\n(${__attGpsLat.toFixed(6)}, ${__attGpsLng.toFixed(6)})`)) return;
+            const _okGPS = await hrmsConfirm({ title: '设置门店定位', message: `将门店"${storeName}"的位置设为当前GPS坐标？(${__attGpsLat.toFixed(6)}, ${__attGpsLng.toFixed(6)})`, okText: '确认设置', icon: '📍' });
+            if (!_okGPS) return;
             try {
                 await HRMS_API.setStoreLocation(storeName, { latitude: __attGpsLat, longitude: __attGpsLng });
                 showNotification('门店定位已更新', 'success');
@@ -33791,7 +33963,7 @@ ${knowledgeContent.slice(0, 30000)}`;
 
         // 登出函数
         async function logout() {
-            if (confirm('确定要登出吗？')) {
+            if (await hrmsConfirm({ title: '确认登出', message: '确定要登出吗？', okText: '确认登出', icon: '🚪' })) {
                 try { await hrmsFlushStateSave(); } catch (e) {}
                 isLoggedIn = false;
                 currentUser = null;
@@ -33858,17 +34030,18 @@ ${knowledgeContent.slice(0, 30000)}`;
             const roleEl = document.getElementById('mobile-more-role');
             if (nameEl && currentUser) nameEl.textContent = currentUser.name || currentUser.username || '-';
             if (roleEl && currentUser) {
-                const roleMap = { admin:'系统管理员', hr_manager:'人事经理', hq_manager:'总部营运', store_manager:'店长', store_employee:'员工', cashier:'出纳', store_production_manager:'出品经理' };
+                const roleMap = { admin:'系统管理员', hr_manager:'人事经理', hq_manager:'总部营运', store_manager:'店长', front_manager:'前厅经理', store_employee:'员工', cashier:'出纳', store_production_manager:'出品经理' };
                 roleEl.textContent = (currentUser.store ? currentUser.store + ' · ' : '') + (roleMap[currentUser.role] || currentUser.role || '-');
             }
 
             const allItems = [
                 { icon:'👤', label:'我的档案', page:'profile' },
                 { icon:'👥', label:'员工管理', page:'employees', roles:['admin','hr_manager','hq_manager','store_manager'] },
-                { icon:'📋', label:'营业日报', page:'daily-report', roles:['admin','hq_manager','store_manager'] },
-                { icon:'✅', label:'待审批', page:'approvals', roles:['admin','hr_manager','hq_manager','store_manager'] },
+                { icon:'📋', label:'营业日报', page:'daily-report', roles:['admin','hq_manager','store_manager','front_manager'] },
+                { icon:'✅', label:'待审批', page:'approvals', roles:['admin','hr_manager','hq_manager','store_manager','front_manager'] },
                 { icon:'💰', label:'请款', page:'payment', roles:['admin','hq_manager','store_manager','cashier'] },
                 { icon:'📚', label:'知识库', page:'knowledge' },
+                { icon:'📁', label:'文件中心', page:'files', roles:['admin'] },
                 { icon:'🤖', label:'Agent中心', page:'agents', roles:['admin'] },
                 { icon:'📝', label:'考试测评', page:'exam' },
                 { icon:'🏆', label:'奖惩管理', page:'rewards', roles:['admin','hr_manager','hq_manager','store_manager'] },
@@ -34678,6 +34851,413 @@ ${knowledgeContent.slice(0, 30000)}`;
                 }
             })();
         });
+
+        // ==================== 文件管理功能 ====================
+        let currentFilesPage = 1;
+        const filesPerPage = 20;
+
+        async function loadFilesList(page = 1) {
+            try {
+                currentFilesPage = page;
+                const filters = {
+                    type: document.getElementById('file-filter-type')?.value || '',
+                    store: document.getElementById('file-filter-store')?.value || '',
+                    validation_status: document.getElementById('file-filter-validation')?.value || '',
+                    uploader: document.getElementById('file-filter-uploader')?.value || ''
+                };
+
+                const params = new URLSearchParams({
+                    page: page,
+                    limit: filesPerPage,
+                    ...Object.fromEntries(Object.entries(filters).filter(([_, v]) => v))
+                });
+
+                const res = await fetch(`/api/files?${params}`, {
+                    headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+                });
+
+                if (!res.ok) throw new Error('获取文件列表失败');
+                const data = await res.json();
+
+                renderFilesList(data.files || []);
+                renderFilesPagination(data.total, data.page, data.limit);
+            } catch (e) {
+                console.error('[files] loadFilesList error:', e);
+                showNotification('加载文件列表失败: ' + e.message, 'error');
+            }
+        }
+
+        let selectedFiles = new Set();
+        let isSearchMode = false;
+
+        function renderFilesList(files) {
+            const container = document.getElementById('files-list-container');
+            if (!files || files.length === 0) {
+                container.innerHTML = '<div class="card" style="text-align:center;padding:40px;color:#999;">暂无文件</div>';
+                return;
+            }
+
+            const html = files.map(file => {
+                const validationBadge = {
+                    'pending': '<span style="background:#fbbf24;color:#fff;padding:2px 8px;border-radius:4px;font-size:11px;">待校验</span>',
+                    'passed': '<span style="background:#10b981;color:#fff;padding:2px 8px;border-radius:4px;font-size:11px;">✓ 已通过</span>',
+                    'failed': '<span style="background:#ef4444;color:#fff;padding:2px 8px;border-radius:4px;font-size:11px;">✗ 未通过</span>'
+                }[file.validation_status] || '';
+
+                const fileTypeLabel = {
+                    'pos_sales': 'POS销售',
+                    'feishu_export': '飞书导出',
+                    'daily_report': '营业日报'
+                }[file.file_type] || file.file_type;
+
+                const fileSize = formatFileSize(file.file_size);
+                const uploadTime = new Date(file.created_at).toLocaleString('zh-CN');
+                const isSelected = selectedFiles.has(file.file_id);
+
+                return `
+                    <div class="card" style="margin-bottom:12px;${isSelected ? 'border:2px solid #3b82f6;' : ''}">
+                        <div style="display:flex;justify-content:space-between;align-items:start;gap:12px;">
+                            <div style="display:flex;align-items:start;gap:12px;flex:1;min-width:0;">
+                                <input type="checkbox" ${isSelected ? 'checked' : ''} onchange="toggleFileSelection('${file.file_id}')" style="margin-top:4px;">
+                                <div style="flex:1;min-width:0;">
+                                    <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+                                        <span style="font-size:20px;">📄</span>
+                                        <strong style="font-size:14px;">${file.original_name}</strong>
+                                        ${validationBadge}
+                                    </div>
+                                    <div style="font-size:12px;color:#666;display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;">
+                                        <div>类型: ${fileTypeLabel}</div>
+                                        <div>大小: ${fileSize}</div>
+                                        <div>上传人: ${file.uploader_name || file.uploader_username}</div>
+                                        <div>上传时间: ${uploadTime}</div>
+                                        ${file.store ? `<div>门店: ${file.store}</div>` : ''}
+                                        ${file.download_count > 0 ? `<div>下载: ${file.download_count}次</div>` : ''}
+                                    </div>
+                                    ${file.upload_note ? `<div style="margin-top:8px;padding:8px;background:#f3f4f6;border-radius:6px;font-size:12px;color:#666;">备注: ${file.upload_note}</div>` : ''}
+                                    ${file.validation_status === 'failed' && file.validation_result?.errors ? `
+                                        <div style="margin-top:8px;padding:8px;background:#fee;border-radius:6px;font-size:12px;color:#c00;">
+                                            校验失败: ${file.validation_result.errors.join('; ')}
+                                        </div>
+                                    ` : ''}
+                                </div>
+                            </div>
+                            <div style="display:flex;gap:8px;flex-shrink:0;">
+                                <button class="btn btn-sm" onclick="downloadFile('${file.file_id}', '${file.original_name}')">
+                                    <i>⬇️</i> 下载
+                                </button>
+                                ${file.validation_status === 'pending' ? `
+                                    <button class="btn btn-sm btn-secondary" onclick="validateFile('${file.file_id}')">
+                                        <i>✓</i> 校验
+                                    </button>
+                                ` : ''}
+                                ${currentUser?.role === 'admin' || currentUser?.username === file.uploader_username ? `
+                                    <button class="btn btn-sm btn-danger" onclick="deleteFile('${file.file_id}')">
+                                        <i>🗑️</i>
+                                    </button>
+                                ` : ''}
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            container.innerHTML = html;
+        }
+
+        function toggleFileSelection(fileId) {
+            if (selectedFiles.has(fileId)) {
+                selectedFiles.delete(fileId);
+            } else {
+                selectedFiles.add(fileId);
+            }
+            updateBatchDownloadButton();
+            // 重新渲染以更新复选框状态
+            const container = document.getElementById('files-list-container');
+            const checkbox = container.querySelector(`input[onchange*="${fileId}"]`);
+            if (checkbox) {
+                const card = checkbox.closest('.card');
+                if (selectedFiles.has(fileId)) {
+                    card.style.border = '2px solid #3b82f6';
+                } else {
+                    card.style.border = '';
+                }
+            }
+        }
+
+        function updateBatchDownloadButton() {
+            const btn = document.getElementById('batch-download-btn');
+            const count = document.getElementById('selected-count');
+            if (selectedFiles.size > 0) {
+                btn.style.display = 'block';
+                count.textContent = selectedFiles.size;
+            } else {
+                btn.style.display = 'none';
+            }
+        }
+
+        async function searchFiles() {
+            const query = document.getElementById('file-search-input').value.trim();
+            if (!query) {
+                showNotification('请输入搜索关键词', 'warning');
+                return;
+            }
+
+            try {
+                isSearchMode = true;
+                const res = await fetch(`/api/files/search?q=${encodeURIComponent(query)}`, {
+                    headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+                });
+
+                if (!res.ok) throw new Error('搜索失败');
+                const data = await res.json();
+
+                renderFilesList(data.files || []);
+                renderFilesPagination(data.total, data.page, data.limit);
+                showNotification(`找到 ${data.total} 个文件`, 'success');
+            } catch (e) {
+                console.error('[files] searchFiles error:', e);
+                showNotification('搜索失败: ' + e.message, 'error');
+            }
+        }
+
+        function clearSearch() {
+            document.getElementById('file-search-input').value = '';
+            isSearchMode = false;
+            loadFilesList(1);
+        }
+
+        async function batchDownloadFiles() {
+            if (selectedFiles.size === 0) {
+                showNotification('请先选择要下载的文件', 'warning');
+                return;
+            }
+
+            if (selectedFiles.size > 50) {
+                showNotification('一次最多下载50个文件', 'warning');
+                return;
+            }
+
+            try {
+                const res = await fetch('/api/files/batch-download', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${localStorage.getItem('token')}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ file_ids: Array.from(selectedFiles) })
+                });
+
+                if (!res.ok) throw new Error('批量下载失败');
+
+                const blob = await res.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'files.zip';
+                document.body.appendChild(a);
+                a.click();
+                window.URL.revokeObjectURL(url);
+                document.body.removeChild(a);
+
+                showNotification(`成功下载 ${selectedFiles.size} 个文件`, 'success');
+                selectedFiles.clear();
+                updateBatchDownloadButton();
+            } catch (e) {
+                console.error('[files] batchDownloadFiles error:', e);
+                showNotification('批量下载失败: ' + e.message, 'error');
+            }
+        }
+
+        function renderFilesPagination(total, page, limit) {
+            const totalPages = Math.ceil(total / limit);
+            const container = document.getElementById('files-pagination');
+            
+            if (totalPages <= 1) {
+                container.innerHTML = '';
+                return;
+            }
+
+            let html = '';
+            if (page > 1) {
+                html += `<button class="btn btn-sm" onclick="loadFilesList(${page - 1})">上一页</button>`;
+            }
+            
+            html += `<span style="padding:8px 16px;color:#666;">第 ${page} / ${totalPages} 页 (共 ${total} 个文件)</span>`;
+            
+            if (page < totalPages) {
+                html += `<button class="btn btn-sm" onclick="loadFilesList(${page + 1})">下一页</button>`;
+            }
+
+            container.innerHTML = html;
+        }
+
+        function formatFileSize(bytes) {
+            if (!bytes) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return (bytes / Math.pow(k, i)).toFixed(1) + ' ' + sizes[i];
+        }
+
+        async function downloadFile(fileId, fileName) {
+            try {
+                const res = await fetch(`/api/files/${fileId}/download`, {
+                    headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+                });
+
+                if (!res.ok) throw new Error('下载失败');
+
+                const blob = await res.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = fileName;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                window.URL.revokeObjectURL(url);
+
+                showNotification('文件下载成功', 'success');
+                loadFilesList(currentFilesPage);
+            } catch (e) {
+                console.error('[files] download error:', e);
+                showNotification('下载失败: ' + e.message, 'error');
+            }
+        }
+
+        async function validateFile(fileId) {
+            try {
+                const res = await fetch(`/api/files/${fileId}/validate`, {
+                    method: 'POST',
+                    headers: { 
+                        'Authorization': `Bearer ${localStorage.getItem('token')}`,
+                        'Content-Type': 'application/json'
+                    }
+                });
+
+                if (!res.ok) throw new Error('校验失败');
+                const data = await res.json();
+
+                showNotification(data.message || '校验完成', data.validation?.passed ? 'success' : 'warning');
+                loadFilesList(currentFilesPage);
+            } catch (e) {
+                console.error('[files] validate error:', e);
+                showNotification('校验失败: ' + e.message, 'error');
+            }
+        }
+
+        async function deleteFile(fileId) {
+            if (!confirm('确定要删除此文件吗？')) return;
+
+            try {
+                const res = await fetch(`/api/files/${fileId}`, {
+                    method: 'DELETE',
+                    headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+                });
+
+                if (!res.ok) throw new Error('删除失败');
+
+                showNotification('文件已删除', 'success');
+                loadFilesList(currentFilesPage);
+            } catch (e) {
+                console.error('[files] delete error:', e);
+                showNotification('删除失败: ' + e.message, 'error');
+            }
+        }
+
+        function showUploadFileDialog() {
+            const html = `
+                <div class="modal-backdrop" onclick="closeUploadFileDialog()"></div>
+                <div class="modal" style="max-width:600px;">
+                    <div class="modal-header">
+                        <h3>上传文件</h3>
+                        <button class="btn-close" onclick="closeUploadFileDialog()">×</button>
+                    </div>
+                    <div class="modal-body">
+                        <div style="margin-bottom:16px;">
+                            <label>选择文件</label>
+                            <input type="file" id="upload-file-input" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:8px;">
+                        </div>
+                        <div style="margin-bottom:16px;">
+                            <label>文件类型</label>
+                            <select id="upload-file-type" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:8px;">
+                                <option value="pos_sales">POS销售数据</option>
+                                <option value="feishu_export">飞书导出</option>
+                                <option value="daily_report">营业日报</option>
+                            </select>
+                        </div>
+                        <div style="margin-bottom:16px;">
+                            <label>关联门店（可选）</label>
+                            <select id="upload-file-store" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:8px;">
+                                <option value="">不关联</option>
+                            </select>
+                        </div>
+                        <div style="margin-bottom:16px;">
+                            <label>上传说明（可选）</label>
+                            <textarea id="upload-file-note" rows="3" placeholder="备注信息..." style="width:100%;padding:8px;border:1px solid #ddd;border-radius:8px;"></textarea>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn btn-secondary" onclick="closeUploadFileDialog()">取消</button>
+                        <button class="btn btn-primary" onclick="submitFileUpload()">上传</button>
+                    </div>
+                </div>
+            `;
+
+            const container = document.createElement('div');
+            container.id = 'upload-file-dialog';
+            container.innerHTML = html;
+            document.body.appendChild(container);
+
+            // 填充门店选项
+            const storeSelect = document.getElementById('upload-file-store');
+            const stores = ['洪潮大宁久光店', '马己仙上海音乐广场店'];
+            stores.forEach(store => {
+                const option = document.createElement('option');
+                option.value = store;
+                option.textContent = store;
+                storeSelect.appendChild(option);
+            });
+        }
+
+        function closeUploadFileDialog() {
+            const dialog = document.getElementById('upload-file-dialog');
+            if (dialog) dialog.remove();
+        }
+
+        async function submitFileUpload() {
+            try {
+                const fileInput = document.getElementById('upload-file-input');
+                const file = fileInput?.files?.[0];
+                
+                if (!file) {
+                    showNotification('请选择文件', 'warning');
+                    return;
+                }
+
+                const formData = new FormData();
+                formData.append('file', file);
+                formData.append('file_type', document.getElementById('upload-file-type').value);
+                formData.append('store', document.getElementById('upload-file-store').value);
+                formData.append('upload_note', document.getElementById('upload-file-note').value);
+
+                const res = await fetch('/api/files/upload', {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` },
+                    body: formData
+                });
+
+                if (!res.ok) throw new Error('上传失败');
+                const data = await res.json();
+
+                showNotification(data.message || '文件上传成功', 'success');
+                closeUploadFileDialog();
+                loadFilesList(currentFilesPage);
+            } catch (e) {
+                console.error('[files] upload error:', e);
+                showNotification('上传失败: ' + e.message, 'error');
+            }
+        }
     </script>
 
     <!-- Mobile Bottom Navigation -->

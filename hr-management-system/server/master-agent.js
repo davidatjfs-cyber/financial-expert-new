@@ -92,7 +92,7 @@ import { getCategoryAssigneeRoleMap } from './agent-config-manager.js';
 
 // 状态机定义
 const STATUS_FLOW = {
-  pending_audit:      { next: ['auditing'],           agent: 'data_auditor' },
+  pending_audit:      { next: ['auditing', 'pending_dispatch'],           agent: 'data_auditor' },
   auditing:           { next: ['pending_dispatch', 'closed'], agent: 'data_auditor' },
   pending_dispatch:   { next: ['dispatched'],         agent: 'master' },
   dispatched:         { next: ['pending_response'],   agent: 'ops_supervisor' },
@@ -424,21 +424,36 @@ async function createTask({ source, sourceRef, category, severity, store, brand,
 
 // 根据异常类型和门店找到责任人
 async function resolveAssignee(category, store, existingAssignee) {
-  // 如果任务已有 assignee，直接使用
-  if (existingAssignee) {
-    return { username: existingAssignee, name: '', role: '', store };
-  }
-
   const state = await getSharedState();
-  const roleMap = await getCategoryAssigneeRoleMap();
-  const targetRole = roleMap[category] || 'store_manager';
   const normalizedStore = normalizeStoreKey(store);
-
+  
   const all = [
     ...(Array.isArray(state?.employees) ? state.employees : []),
     ...(Array.isArray(state?.users) ? state.users : [])
   ];
 
+  // 如果有指定责任人，验证其是否属于目标门店
+  if (existingAssignee) {
+    const user = all.find(u => String(u?.username || '').trim() === String(existingAssignee).trim());
+    
+    // 验证门店匹配
+    if (user && normalizeStoreKey(user.store) === normalizedStore) {
+      return { 
+        username: String(user.username || '').trim(),
+        name: String(user.name || '').trim(),
+        role: String(user.role || '').trim(),
+        store 
+      };
+    } else if (user) {
+      console.warn(`[resolveAssignee] ⚠️ 跨门店分派告警: 用户 ${existingAssignee}(${user.name}) 属于 ${user.store}，不属于目标门店 ${store}。自动重新匹配...`);
+      // 继续按门店自动匹配
+    } else {
+      console.warn(`[resolveAssignee] ⚠️ 用户 ${existingAssignee} 不存在，自动重新匹配...`);
+    }
+  }
+
+  const roleMap = await getCategoryAssigneeRoleMap();
+  const targetRole = roleMap[category] || 'store_manager';
   const storeMembers = all.filter(u => normalizeStoreKey(u?.store) === normalizedStore);
 
   // 先按目标角色找
@@ -455,7 +470,12 @@ async function resolveAssignee(category, store, existingAssignee) {
     assignee = storeMembers.find(u => ['store_manager', 'store_production_manager'].includes(String(u?.role || '').trim()));
   }
 
-  if (!assignee) return null;
+  if (!assignee) {
+    console.error(`[resolveAssignee] ❌ 未找到门店 ${store} 的责任人（目标角色: ${targetRole}）`);
+    return null;
+  }
+  
+  console.log(`[resolveAssignee] ✅ 已匹配责任人: ${assignee.name}(${assignee.username}) - ${assignee.role} @ ${store}`);
   return {
     username: String(assignee.username || '').trim(),
     name: String(assignee.name || '').trim(),
@@ -1146,15 +1166,31 @@ export async function handleTaskResponse(username, text, imageUrls, parentMessag
       console.log(`[master] Task lookup by parent_message_id: ${parentMessageId}, found: ${task?.task_id || 'none'}`);
     }
     
-    // 降级到老逻辑（最新一条）
-    if (!task) {
+    // 降级1：通过 parentMessageId 查找但忽略 feishu_msg_ids 检查（处理空数组情况）
+    if (!task && parentMessageId) {
       const r = await pool().query(
         `SELECT * FROM master_tasks
          WHERE assignee_username = $1 AND status = 'pending_response'
-         ORDER BY dispatched_at ASC LIMIT 1`,
+         ORDER BY dispatched_at DESC LIMIT 1`,
         [username]
       );
       task = r.rows?.[0];
+      console.log(`[master] Task lookup fallback (has parent_id): found: ${task?.task_id || 'none'}`);
+    }
+    
+    // 降级2：无 parentMessageId 时，只处理明确的回复关键词
+    if (!task && !parentMessageId) {
+      const hasReplyKeyword = /(已处理|已完成|已整改|已解决|处理完|整改完毕|情况说明|原因如下|马上处理|正在处理|立即处理)/.test(String(text || '').trim());
+      if (hasReplyKeyword || imageUrls.length > 0) {
+        const r = await pool().query(
+          `SELECT * FROM master_tasks
+           WHERE assignee_username = $1 AND status = 'pending_response'
+           ORDER BY dispatched_at DESC LIMIT 1`,
+          [username]
+        );
+        task = r.rows?.[0];
+        console.log(`[master] Task lookup by keyword/image: found: ${task?.task_id || 'none'}`);
+      }
     }
     
     if (!task) return null; // 不是任务回复，走正常agent路由
@@ -1171,7 +1207,7 @@ export async function handleTaskResponse(username, text, imageUrls, parentMessag
       return {
         handled: true,
         taskId: task.task_id,
-        response: `收到您对 [${task.task_id}] 的反馈，正在审核中，请等待审核结果...`
+        response: `✅ 已收到您对任务 [${task.task_id}] 的回复，正在审核中...\n\n📋 任务：${task.title}\n💬 您的回复：${String(text || '').slice(0, 100)}${text.length > 100 ? '...' : ''}\n📸 附件照片：${imageUrls.length}张\n\n请等待审核结果通知。`
       };
     }
     return null;
@@ -1267,6 +1303,26 @@ export function startMasterAgent() {
     try {
       const created = await dataAuditorListener();
       if (created > 0) console.log(`[master:tick] Data Auditor created ${created} tasks`);
+      
+      // 新增：处理手动创建的 pending_audit 任务（如营销活动）
+      const manualTasks = await pool().query(
+        `SELECT * FROM master_tasks 
+         WHERE status = 'pending_audit' 
+         AND source IN ('manual_campaign', 'manual', 'hq_planning')
+         ORDER BY created_at ASC LIMIT 5`
+      );
+      
+      for (const task of (manualTasks.rows || [])) {
+        // 自动推进到 pending_dispatch 状态
+        await transitionTask(task.task_id, 'pending_dispatch', 'data_auditor', {
+          audit_result: {
+            approved: true,
+            reason: '手动创建任务自动通过审计',
+            timestamp: new Date().toISOString()
+          }
+        });
+        console.log(`[master:audit] Auto-approved manual task ${task.task_id}`);
+      }
     } catch (e) {
       console.error('[master:tick] audit error:', e?.message);
     }
@@ -1275,6 +1331,28 @@ export function startMasterAgent() {
   // ── Tick 2: Master Dispatcher (每15秒扫描一次) ──
   const dispatchTick = async () => {
     try {
+      // 新增：动态调整任务优先级（超时任务自动升级）
+      await pool().query(`
+        UPDATE master_tasks 
+        SET severity = CASE 
+          WHEN severity = 'low' THEN 'medium'
+          WHEN severity = 'medium' THEN 'high'
+          ELSE severity
+        END,
+        escalation_level = escalation_level + 1,
+        escalation_history = COALESCE(escalation_history, '[]'::jsonb) || 
+          jsonb_build_object(
+            'timestamp', NOW()::text,
+            'from', severity,
+            'to', CASE WHEN severity = 'low' THEN 'medium' WHEN severity = 'medium' THEN 'high' ELSE severity END,
+            'reason', '任务超时自动升级'
+          )::jsonb
+        WHERE status IN ('pending_dispatch', 'dispatched', 'pending_response')
+        AND timeout_at IS NOT NULL 
+        AND timeout_at < NOW()
+        AND escalation_level < 3
+      `);
+      
       const d = await masterDispatcher();
       if (d > 0) console.log(`[master:tick] Dispatched ${d} tasks`);
     } catch (e) {
@@ -1422,7 +1500,7 @@ export function startMasterAgent() {
   };
 
   // 启动定时器
-  setInterval(auditTick, 30 * 60 * 1000);   // 30min
+  setInterval(auditTick, 15 * 1000);        // 15s (优化：从30min改为15s，快速处理手动创建的任务)
   setInterval(dispatchTick, 15 * 1000);     // 15s
   setInterval(opsTick, 20 * 1000);          // 20s
   setInterval(postResTick, 20 * 1000);      // 20s

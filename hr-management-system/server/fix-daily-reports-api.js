@@ -41,7 +41,8 @@ export function patchDailyReportsAPI(app) {
           actual_margin: row.actual_margin,
           target_margin: row.target_margin,
           dianping_rating: row.dianping_rating,
-          target_revenue: row.target_revenue
+          target_revenue: row.target_revenue,
+          wechat_month_total: row.wechat_month_total
         });
       });
       
@@ -57,7 +58,8 @@ export function patchDailyReportsAPI(app) {
             actual_margin: tableData.actual_margin,
             target_margin: tableData.target_margin,
             dianping_rating: tableData.dianping_rating,
-            target_revenue: tableData.target_revenue
+            target_revenue: tableData.target_revenue,
+            wechat_month_total: tableData.wechat_month_total
           }
         };
       });

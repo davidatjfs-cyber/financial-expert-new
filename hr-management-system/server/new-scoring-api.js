@@ -270,7 +270,7 @@ export function registerNewScoringRoutes(app) {
   // 更新营业日报
   app.post('/api/scoring/daily-reports', async (req, res) => {
     try {
-      const { store, brand, date, actual_revenue, actual_margin, dianping_rating, new_wechat_members } = req.body;
+      const { store, brand, date, actual_revenue, actual_margin, dianping_rating, new_wechat_members, wechat_month_total } = req.body;
       
       if (!store || !brand || !date) {
         return res.status(400).json({ 
@@ -280,16 +280,17 @@ export function registerNewScoringRoutes(app) {
       }
       
       await pool().query(`
-        INSERT INTO daily_reports (store, brand, date, actual_revenue, actual_margin, dianping_rating, new_wechat_members, submitted, submitted_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, true, NOW())
+        INSERT INTO daily_reports (store, brand, date, actual_revenue, actual_margin, dianping_rating, new_wechat_members, wechat_month_total, submitted, submitted_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true, NOW())
         ON CONFLICT (store, date)
         DO UPDATE SET 
           actual_revenue = EXCLUDED.actual_revenue,
           actual_margin = EXCLUDED.actual_margin,
           dianping_rating = EXCLUDED.dianping_rating,
           new_wechat_members = EXCLUDED.new_wechat_members,
+          wechat_month_total = EXCLUDED.wechat_month_total,
           updated_at = NOW()
-      `, [store, brand, date, actual_revenue, actual_margin, dianping_rating, new_wechat_members || 0]);
+      `, [store, brand, date, actual_revenue, actual_margin, dianping_rating, new_wechat_members || 0, wechat_month_total || 0]);
       
       res.json({
         success: true,
