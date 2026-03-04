@@ -89,6 +89,7 @@ check_syntax() {
         "hq-brain-config.js"
         "llm-config-enhanced.js"
         "master-agent.js"
+        "data-executor.js"
         "index.js"
     )
     

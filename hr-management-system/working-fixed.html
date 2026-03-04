@@ -8441,9 +8441,25 @@
                 <div class="page-header" style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
                     <div>
                         <h2 style="margin:0;">数据中心</h2>
-                        <div style="margin-top:6px;color:#777;font-size:12px;">监控运营态势 · 配置智能规则</div>
+                        <div id="dc-subtitle" style="margin-top:6px;color:#777;font-size:12px;">系统健康 · 数据监控 · 智能分析</div>
+                    </div>
+                    <button class="btn btn-secondary" onclick="loadDataCenterDashboard()" style="font-size:12px;padding:5px 14px;">刷新</button>
+                </div>
+                <!-- 系统健康状态条 -->
+                <div id="dc-health-bar" style="margin-bottom:14px;padding:10px 14px;border-radius:10px;background:rgba(0,0,0,0.25);border:1px solid rgba(255,255,255,0.06);display:flex;flex-wrap:wrap;gap:12px 18px;align-items:center;font-size:12px;color:#94a3b8;">
+                    <span style="color:#64748b;">加载中...</span>
+                </div>
+                <!-- 统计卡片 -->
+                <div id="dc-stats-grid" style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:18px;"></div>
+                <!-- 数据源同步状态 -->
+                <div style="margin-bottom:18px;">
+                    <div style="font-size:13px;font-weight:700;color:#94a3b8;margin-bottom:8px;letter-spacing:.5px;">📁 数据源同步状态</div>
+                    <div id="dc-sync-list" style="background:rgba(0,0,0,0.2);border-radius:10px;overflow:hidden;border:1px solid rgba(255,255,255,0.05);">
+                        <div style="padding:12px;text-align:center;color:#64748b;font-size:12px;">加载中...</div>
                     </div>
                 </div>
+                <!-- 快捷操作 -->
+                <div style="font-size:13px;font-weight:700;color:#94a3b8;margin-bottom:8px;letter-spacing:.5px;">⚡ 快捷操作</div>
                 <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px;">
                     <div class="card" style="cursor:pointer;text-align:center;padding:16px 10px;" onclick="openAgentMonitorModal();setTimeout(()=>switchAmTab('overview'),100)">
                         <div style="font-size:24px;margin-bottom:6px;">📡</div>
@@ -8466,7 +8482,7 @@
                         <div style="font-size:11px;color:#64748b;margin-top:4px;">图片/视觉审核</div>
                     </div>
                     <div class="card" style="cursor:pointer;text-align:center;padding:16px 10px;" onclick="openAgentMonitorModal();setTimeout(()=>switchAmTab('messages'),100)">
-                        <div style="font-size:24px;margin-bottom:6px;">��</div>
+                        <div style="font-size:24px;margin-bottom:6px;">💬</div>
                         <div style="font-size:13px;font-weight:600;color:#e2e8f0;">消息日志</div>
                         <div style="font-size:11px;color:#64748b;margin-top:4px;">Agent收发记录</div>
                     </div>
@@ -16224,6 +16240,89 @@ ${r.approvalNote ? '审批备注：' + r.approvalNote : ''}
             if (btnCard) btnCard.style.display = canManageAgents ? '' : 'none';
             if (lockTip) lockTip.style.display = canManageAgents ? 'none' : '';
             if (cfgSection) cfgSection.style.display = canManageAgents ? '' : 'none';
+            loadDataCenterDashboard();
+        }
+
+        async function loadDataCenterDashboard() {
+            const hdr = { 'Authorization': 'Bearer ' + localStorage.getItem('token') };
+            // Fetch health + dashboard + bitable-sync in parallel
+            const [healthRes, dashRes, syncRes] = await Promise.allSettled([
+                fetch('/api/health', { headers: hdr }).then(r => r.json()).catch(() => null),
+                fetch('/api/agents/dashboard', { headers: hdr }).then(r => r.json()).catch(() => null),
+                fetch('/api/agents/bitable-sync', { headers: hdr }).then(r => r.json()).catch(() => null)
+            ]);
+            const health = healthRes.status === 'fulfilled' ? healthRes.value : null;
+            const dash = dashRes.status === 'fulfilled' ? dashRes.value : null;
+            const sync = syncRes.status === 'fulfilled' ? syncRes.value : null;
+
+            // ── Health bar ──
+            const hBar = document.getElementById('dc-health-bar');
+            if (hBar && health) {
+                const ag = health.agents || {};
+                const dbOk = health.database === true || health.database === 'ok';
+                const schedOk = ag.schedulerRunning === true;
+                const llmOk = ag.llmHealthy === true;
+                const dot = (ok) => `<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${ok ? '#22c55e' : '#ef4444'};margin-right:4px;"></span>`;
+                hBar.innerHTML = `
+                    ${dot(dbOk)}<span>数据库</span>
+                    ${dot(schedOk)}<span>调度器</span>
+                    ${dot(llmOk)}<span>LLM</span>
+                    <span style="margin-left:auto;color:#475569;font-size:11px;">${new Date().toLocaleTimeString('zh-CN')}</span>
+                `;
+            }
+
+            // ── Stats cards ──
+            const grid = document.getElementById('dc-stats-grid');
+            if (grid && dash) {
+                const cards = [
+                    { icon: '🚨', label: '待处理异常', value: dash.openIssues ?? '-', color: (dash.openIssues > 0 ? '#ef4444' : '#22c55e') },
+                    { icon: '📊', label: '平均绩效', value: dash.avgScore != null ? Number(dash.avgScore).toFixed(1) : '-', color: '#3b82f6' },
+                    { icon: '🔍', label: '审核记录', value: dash.totalAudits ?? '-', color: '#a855f7' },
+                    { icon: '💬', label: '飞书消息', value: dash.totalMessages ?? '-', color: '#06b6d4' },
+                    { icon: '👥', label: '飞书用户', value: dash.totalFeishuUsers ?? '-', color: '#f59e0b' },
+                    { icon: '📁', label: '数据记录', value: dash.totalGenericRecords ?? '-', color: '#10b981' }
+                ];
+                grid.innerHTML = cards.map(c => `
+                    <div style="background:rgba(0,0,0,0.2);border-radius:10px;padding:14px;border:1px solid rgba(255,255,255,0.05);">
+                        <div style="font-size:20px;margin-bottom:6px;">${c.icon}</div>
+                        <div style="font-size:20px;font-weight:700;color:${c.color};margin-bottom:2px;">${c.value}</div>
+                        <div style="font-size:11px;color:#64748b;">${c.label}</div>
+                    </div>
+                `).join('');
+            }
+
+            // ── Sync list ──
+            const sList = document.getElementById('dc-sync-list');
+            const syncItems = sync?.items || sync?.sources || [];
+            if (sList && Array.isArray(syncItems)) {
+                if (syncItems.length === 0) {
+                    sList.innerHTML = '<div style="padding:12px;text-align:center;color:#64748b;font-size:12px;">暂无数据源</div>';
+                } else {
+                    sList.innerHTML = syncItems.map(s => {
+                        const ago = s.lastSync ? _dcTimeAgo(s.lastSync) : '从未同步';
+                        const ok = s.count > 0;
+                        return `<div style="display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid rgba(255,255,255,0.04);font-size:12px;">
+                            <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${ok ? '#22c55e' : '#f59e0b'};flex-shrink:0;"></span>
+                            <span style="color:#e2e8f0;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${_dcEsc(s.name)}</span>
+                            <span style="color:#64748b;white-space:nowrap;">${s.count}条</span>
+                            <span style="color:#475569;white-space:nowrap;">${ago}</span>
+                        </div>`;
+                    }).join('');
+                }
+            } else if (sList) {
+                sList.innerHTML = '<div style="padding:12px;text-align:center;color:#64748b;font-size:12px;">无法获取同步状态</div>';
+            }
+        }
+
+        function _dcEsc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+        function _dcTimeAgo(iso) {
+            try {
+                const diff = Date.now() - new Date(iso).getTime();
+                if (diff < 60000) return '刚刚';
+                if (diff < 3600000) return Math.floor(diff / 60000) + '分钟前';
+                if (diff < 86400000) return Math.floor(diff / 3600000) + '小时前';
+                return Math.floor(diff / 86400000) + '天前';
+            } catch { return ''; }
         }
 
         function applyKnowledgeFiltersVisibility() {

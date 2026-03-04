@@ -9851,6 +9851,36 @@ app.post('/api/promotion/tracks/:id/assessment', authRequired, async (req, res) 
   }
 });
 
+// ── Bitable Sync Status (for 数据中心 dashboard) ──
+const BITABLE_TABLE_NAMES = {
+  'tblpx5Efqc6eHo3L': '桌访表',
+  'tblz4kW1cY22XRlL': '马己仙原料收货日报',
+  'tblZXgaU0LpSye2m': '例会报告',
+  'tbl32E6d0CyvLvfi': '开档报告',
+  'tblgReexNjWJOJB6': '差评报告DB',
+  'tbllcV1evqTJyzlN': '洪潮原料收货日报',
+  'tblXYfSBRrgNGohN': '收档报告DB',
+  'tblLCxLO0ZbV7uyo': '报损单',
+  'tblxHI9ZAKONOTpp': '运营检查表(含开收档)',
+  'tblT86H1uuTJydne': '异常任务回复'
+};
+app.get('/api/agents/bitable-sync', authRequired, async (req, res) => {
+  const role = String(req.user?.role || '').trim();
+  if (!['admin', 'hq_manager', 'hr_manager'].includes(role)) return res.status(403).json({ error: 'forbidden' });
+  try {
+    const r = await pool.query(`SELECT table_id, COUNT(*) as cnt, MAX(updated_at) as last_sync FROM feishu_generic_records GROUP BY table_id ORDER BY last_sync DESC`);
+    const items = (r.rows || []).map(row => ({
+      tableId: row.table_id,
+      name: BITABLE_TABLE_NAMES[row.table_id] || row.table_id,
+      count: Number(row.cnt),
+      lastSync: row.last_sync
+    }));
+    return res.json({ items });
+  } catch (e) {
+    return res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
 app.get('/api/health', async (req, res) => {
   const missing = requireEnv();
   if (missing.length) {

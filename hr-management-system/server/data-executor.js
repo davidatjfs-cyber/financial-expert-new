@@ -228,6 +228,10 @@ async function executeOneMetric(metricId, timeRange, store, depResults) {
     else if (def.data_source === 'sales_raw') {
       value = await querySalesRaw(def, start, end, store);
     }
+    // daily_reports 型指标
+    else if (def.data_source === 'daily_reports') {
+      value = await queryDailyReports(def, start, end, store);
+    }
     // schedules 型指标
     else if (def.data_source === 'schedules') {
       value = await querySchedules(def, start, end, store);
@@ -268,13 +272,15 @@ async function executeOneMetric(metricId, timeRange, store, depResults) {
 // 收货日期字段存的是字符串 'YYYY-MM-DD'
 
 // 统一的日期过滤条件片段（兼容毫秒时间戳和字符串两种格式）
-function buildFeishuDateFilter(alias) {
+function buildFeishuDateFilter(alias, startParamIdx = 2) {
   const f = alias ? `${alias}.fields` : 'fields';
+  const p1 = `$${startParamIdx}`;
+  const p2 = `$${startParamIdx + 1}`;
   return `(
-    to_timestamp((${f}->>'日期')::bigint/1000)::date BETWEEN $2::date AND $3::date
-    OR (${f}->>'收货日期')::date BETWEEN $2::date AND $3::date
-    OR (${f}->>'创建日期')::date BETWEEN $2::date AND $3::date
-    OR to_timestamp((${f}->>'提交时间')::bigint/1000)::date BETWEEN $2::date AND $3::date
+    to_timestamp((${f}->>'日期')::bigint/1000)::date BETWEEN ${p1}::date AND ${p2}::date
+    OR (${f}->>'收货日期')::date BETWEEN ${p1}::date AND ${p2}::date
+    OR (${f}->>'创建日期')::date BETWEEN ${p1}::date AND ${p2}::date
+    OR to_timestamp((${f}->>'提交时间')::bigint/1000)::date BETWEEN ${p1}::date AND ${p2}::date
   )`;
 }
 
@@ -298,6 +304,7 @@ async function queryFeishuGenericRecords(def, start, end, store) {
   }
   const tableIdPlaceholders = tableIds.map((_, i) => `$${i + 1}`).join(', ');
 
+  const dateStartParamIdx = tableIds.length + 1; // dates start after table IDs
   const storeParamIdx = tableIds.length + 3; // $1...$N = tableIds, $N+1=start, $N+2=end, $N+3=store
 
   // COUNT(*)
@@ -305,7 +312,7 @@ async function queryFeishuGenericRecords(def, start, end, store) {
     const params = [...tableIds, start, end];
     let sql = `SELECT COUNT(*)::int AS val FROM feishu_generic_records
                WHERE table_id IN (${tableIdPlaceholders})
-                 AND ${buildFeishuDateFilter()}`;
+                 AND ${buildFeishuDateFilter(null, dateStartParamIdx)}`;
 
     if (store) {
       const n = normalizeStore(store);
@@ -330,7 +337,7 @@ async function queryFeishuGenericRecords(def, start, end, store) {
     let sql = `SELECT AVG(NULLIF(fields->>'${field}', '')::numeric)::numeric(8,2) AS val
                FROM feishu_generic_records
                WHERE table_id IN (${tableIdPlaceholders})
-                 AND ${buildFeishuDateFilter()}
+                 AND ${buildFeishuDateFilter(null, dateStartParamIdx)}
                  AND (fields->>'${field}') ~ '^[0-9.]+$'`;
     if (store) {
       const n = normalizeStore(store);
@@ -353,7 +360,7 @@ async function queryFeishuGenericRecords(def, start, end, store) {
     ) AS val
     FROM feishu_generic_records
     WHERE table_id IN (${tableIdPlaceholders})
-      AND ${buildFeishuDateFilter()}`;
+      AND ${buildFeishuDateFilter(null, dateStartParamIdx)}`;
     if (store) {
       const n = normalizeStore(store);
       sql += ` AND ${buildFeishuStoreFilter(storeParamIdx)}`;
@@ -375,7 +382,7 @@ async function queryFeishuGenericRecords(def, start, end, store) {
     )::int AS val
     FROM feishu_generic_records
     WHERE table_id IN (${tableIdPlaceholders})
-      AND ${buildFeishuDateFilter()}`;
+      AND ${buildFeishuDateFilter(null, dateStartParamIdx)}`;
     if (store) {
       const n = normalizeStore(store);
       sql += ` AND ${buildFeishuStoreFilter(storeParamIdx)}`;
@@ -434,6 +441,28 @@ async function querySalesRaw(def, start, end, store) {
   }
   const r = await pool().query(sql, params);
   return Number(r.rows?.[0]?.val || 0);
+}
+
+// ── 7b. 子查询：daily_reports ─────────────────────────────────
+
+async function queryDailyReports(def, start, end, store) {
+  const formula = def.formula || '';
+
+  // 支持 SUM(col), AVG(col), MAX(col), AVG(expr)
+  const aggMatch = formula.match(/^(SUM|AVG|MAX)\((.+)\)$/i);
+  if (!aggMatch) return null;
+  const [, agg, expr] = aggMatch;
+
+  const params = [start, end];
+  let sql = `SELECT ${agg.toUpperCase()}(${expr})::numeric(12,2) AS val FROM daily_reports WHERE date BETWEEN $1::date AND $2::date`;
+  if (store) {
+    const n = normalizeStore(store);
+    sql += ` AND lower(regexp_replace(coalesce(store,''), '\\s+', '', 'g')) LIKE $3`;
+    params.push(`%${n}%`);
+  }
+  const r = await pool().query(sql, params);
+  const v = r.rows?.[0]?.val;
+  return v !== null && v !== undefined ? Number(v) : null;
 }
 
 // ── 8. 子查询：schedules ──────────────────────────────────────
