@@ -12073,7 +12073,17 @@ app.listen(PORT, HOST, async () => {
       if (before > 0) { changed = true; console.log(`[migration] Cleared ${before} custom roles from orgDict`); }
     }
     if (changed) {
-      await saveSharedState(state);
+      // CRITICAL: Re-read fresh state and merge only the modified arrays
+      // to avoid overwriting dailyReports or other data changed concurrently.
+      const freshState = (await getSharedState()) || {};
+      if (state.users) freshState.users = state.users;
+      if (state.employees) freshState.employees = state.employees;
+      if (state.approvalFlows) freshState.approvalFlows = state.approvalFlows;
+      if (state.orgDict) freshState.orgDict = state.orgDict;
+      if (state.pointRecords) freshState.pointRecords = state.pointRecords;
+      if (state.salaryAdjustments) freshState.salaryAdjustments = state.salaryAdjustments;
+      if (state.payrollAdjustments) freshState.payrollAdjustments = state.payrollAdjustments;
+      await saveSharedState(freshState);
       console.log('[migration] Role cleanup complete');
     }
   } catch (e) {
