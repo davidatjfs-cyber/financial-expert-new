@@ -17,7 +17,7 @@ import { Readable } from 'stream';
 import zlib from 'zlib';
 import XLSX from 'xlsx';
 import axios from 'axios';
-import { setPool as setAgentPool, ensureAgentTables, registerAgentRoutes, startAgentScheduler, setTaskResponseHook, startBitablePolling, startScheduledTasks, assertCriticalFunctions, verifyLLMHealth, getAgentHealthStatus, startWeeklyReportScheduler, sendWeeklyReports, sendMonthlyReports, sendTestReportsToUser } from './agents.js';
+import { setPool as setAgentPool, ensureAgentTables, registerAgentRoutes, startAgentScheduler, setTaskResponseHook, startBitablePolling, startScheduledTasks, assertCriticalFunctions, verifyLLMHealth, getAgentHealthStatus, startWeeklyReportScheduler, sendWeeklyReports, sendMonthlyReports, sendTestReportsToUser, lookupFeishuUserByUsername, sendLarkMessage } from './agents.js';
 import { ensureAgentConfigTables, registerAgentConfigRoutes } from "./agent-config-manager.js";
 
 import { setMasterPool, ensureMasterTables, startMasterAgent, registerMasterRoutes, handleTaskResponse } from './master-agent.js';
@@ -4866,7 +4866,7 @@ app.get('/api/daily-reports', authRequired, async (req, res) => {
     });
     const resolveRealName = (uname) => { const k = String(uname || '').trim().toLowerCase(); return nameMap.get(k) || String(uname || '').trim() || ''; };
 
-    const store = (role === 'store_manager' || role === 'store_production_manager') ? myStore : storeQ;
+    const store = (role === 'store_manager' || role === 'store_production_manager' || role === 'front_manager') ? myStore : storeQ;
     let items = Array.isArray(state0.dailyReports) ? state0.dailyReports.slice() : [];
     if (store) items = items.filter(r => String(r?.store || '').trim() === String(store).trim());
     if (date) {
@@ -4883,7 +4883,7 @@ app.get('/api/daily-reports', authRequired, async (req, res) => {
     if (items.length > 0) {
       const storeDatePairs = items.map(item => `('${item.store}','${item.date}')`).join(',');
       const dbResult = await pool.query(`
-        SELECT store, date, dianping_rating
+        SELECT store, date, dianping_rating, new_wechat_members, wechat_month_total
         FROM daily_reports
         WHERE (store, date) IN (${storeDatePairs})
       `);
@@ -4911,7 +4911,8 @@ app.get('/api/daily-reports', authRequired, async (req, res) => {
           data: {
             ...(item.data || {}),
             target_margin: targetConfig?.targets?.margin || null,
-            dianping_rating: dbData?.dianping_rating ?? item?.data?.dianping_rating ?? null
+            dianping_rating: dbData?.dianping_rating ?? item?.data?.dianping_rating ?? null,
+            wechat_month_total: dbData?.wechat_month_total ?? item?.data?.wechat_month_total ?? 0
           }
         };
       });
@@ -4919,7 +4920,21 @@ app.get('/api/daily-reports', authRequired, async (req, res) => {
     
     items.sort((a, b) => String(b?.date || '').localeCompare(String(a?.date || '')) || String(b?.updatedAt || b?.createdAt || '').localeCompare(String(a?.updatedAt || a?.createdAt || '')));
     items = items.slice(0, limit);
-    return res.json({ items });
+
+    // 企微累计基数: 当查询指定门店+日期时，返回该月其他日期的企微新增合计
+    let wechat_month_base = 0;
+    if (store && date) {
+      try {
+        const monthStart = date.slice(0, 7) + '-01';
+        const monthEnd = date.slice(0, 7) + '-31';
+        const baseR = await pool.query(
+          `SELECT COALESCE(SUM(new_wechat_members), 0) AS base FROM daily_reports WHERE store = $1 AND date >= $2 AND date <= $3 AND date <> $4`,
+          [store, monthStart, monthEnd, date]
+        );
+        wechat_month_base = Number(baseR.rows?.[0]?.base || 0);
+      } catch (_e) {}
+    }
+    return res.json({ items, wechat_month_base });
   } catch (e) {
     return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
   }
@@ -4940,7 +4955,7 @@ app.post('/api/daily-reports', authRequired, async (req, res) => {
     const myStore = String(me?.store || '').trim();
 
     let store = String(req.body?.store || '').trim();
-    if (role === 'store_manager' || role === 'store_production_manager') {
+    if (role === 'store_manager' || role === 'store_production_manager' || role === 'front_manager') {
       store = myStore;
     }
     if (!store) return res.status(400).json({ error: 'missing_store' });
@@ -11224,6 +11239,43 @@ app.post('/api/feishu/test-connection', authRequired, async (req, res) => {
   }
 });
 
+// 发送飞书测试消息（轻量验收：token可用 + 至少一条消息可送达）
+app.post('/api/feishu/send-test-message', authRequired, async (req, res) => {
+  const role = String(req.user?.role || '').trim();
+  if (!['admin', 'hq_manager', 'store_manager'].includes(role)) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
+
+  try {
+    const username = String(req.body?.username || '').trim();
+    const openIdDirect = String(req.body?.openId || '').trim();
+    const message = String(req.body?.message || 'HRMS 连通性测试消息').trim();
+
+    let openId = openIdDirect;
+    if (!openId && username) {
+      const u = await lookupFeishuUserByUsername(username);
+      openId = String(u?.open_id || '').trim();
+      if (!openId) {
+        const r = await pool.query(
+          `SELECT open_id FROM feishu_users WHERE lower(username)=lower($1) LIMIT 1`,
+          [username]
+        );
+        openId = String(r.rows?.[0]?.open_id || '').trim();
+      }
+    }
+
+    if (!openId) {
+      return res.status(400).json({ error: 'missing_open_id_or_bind_user' });
+    }
+
+    const result = await sendLarkMessage(openId, message, { skipDedup: true });
+    return res.json({ ok: Boolean(result?.ok), openId, result });
+  } catch (error) {
+    console.error('[Feishu Test Message] Error:', error);
+    return res.status(500).json({ error: 'server_error', message: String(error?.message || error) });
+  }
+});
+
 // Agent/API: 直接写入飞书多维表格（单条或批量）
 app.post('/api/agent/feishu-table-write', authRequired, async (req, res) => {
   const role = String(req.user?.role || '').trim();
@@ -11906,7 +11958,7 @@ app.listen(PORT, HOST, async () => {
       changed = true;
       console.log('[migration] Removed legacy built-in test accounts/data');
     }
-    const ALLOWED_ROLES = ['admin', 'hq_manager', 'store_manager', 'store_employee', 'cashier', 'hr_manager', 'store_production_manager'];
+    const ALLOWED_ROLES = ['admin', 'hq_manager', 'store_manager', 'store_employee', 'cashier', 'hr_manager', 'store_production_manager', 'front_manager'];
     const ROLE_MAP = {
       'hq_employee': 'hr_manager',
       '总部人员': 'hr_manager',
@@ -11927,7 +11979,9 @@ app.listen(PORT, HOST, async () => {
       '门店员工': 'store_employee',
       '员工': 'store_employee',
       '管理员': 'admin',
-      '系统管理员': 'admin'
+      '系统管理员': 'admin',
+      '前厅经理': 'front_manager',
+      '门店前厅经理': 'front_manager'
     };
     // Specific user role assignments
     const USER_ROLE_OVERRIDES = {
@@ -11936,7 +11990,9 @@ app.listen(PORT, HOST, async () => {
       '高赟': 'hr_manager',
       '喻峰': 'store_manager',
       '黎永荣': 'store_production_manager',
-      '李丽丽': 'store_employee'
+      '李丽丽': 'store_employee',
+      '田海伶': 'front_manager',
+      '武静静': 'front_manager'
     };
     for (const list of [state.users, state.employees]) {
       if (!Array.isArray(list)) continue;

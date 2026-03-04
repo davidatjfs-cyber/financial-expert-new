@@ -12980,8 +12980,10 @@
         function getRoleModulePages(role) {
             const r = String(role || '').trim();
             if (r === ROLES.ADMIN) return null; // null means all modules
+            if (_serverRoleModules && _serverRoleModules[r]) return _serverRoleModules[r];
+            if (_defaultRoleModules[r]) return _defaultRoleModules[r];
             const src = _serverRoleModules || _defaultRoleModules;
-            return src[r] || src[ROLES.EMPLOYEE] || ['profile', 'attendance'];
+            return src[ROLES.EMPLOYEE] || ['profile', 'attendance'];
         }
 
         function canAccessModulePage(pageName, role) {
@@ -13053,13 +13055,14 @@
         var _edRoles=[
           {c:ROLES.STORE_MANAGER,l:'店长'},
           {c:ROLES.PRODUCTION_MANAGER,l:'出品经理'},
+          {c:ROLES.FRONT_MANAGER,l:'前厅经理'},
           {c:ROLES.HQ_MANAGER,l:'总部营运'},
           {c:ROLES.HR_MANAGER,l:'总部HR'},
           {c:ROLES.CASHIER,l:'出纳'},
           {c:ROLES.EMPLOYEE,l:'普通员工'}
         ];
         function renderRoleModulesGrid(){var c=document.getElementById('role-modules-grid');if(!c)return;var s=_serverRoleModules||_defaultRoleModules;var h='<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr><th style="text-align:left;padding:6px 8px;border-bottom:1px solid rgba(255,255,255,.15);color:rgba(255,255,255,.6)">模块</th>';for(var i=0;i<_edRoles.length;i++)h+='<th style="text-align:center;padding:6px 4px;border-bottom:1px solid rgba(255,255,255,.15);color:rgba(255,255,255,.6);font-size:11px">'+_edRoles[i].l+'</th>';h+='</tr></thead><tbody>';for(var j=0;j<_allMods.length;j++){var m=_allMods[j];h+='<tr><td style="padding:5px 8px;border-bottom:1px solid rgba(255,255,255,.06);color:#e0e8f0">'+m.l+'</td>';for(var k=0;k<_edRoles.length;k++){var r=_edRoles[k],ck=(s[r.c]||[]).includes(m.p)?'checked':'';h+='<td style="text-align:center;padding:5px 4px;border-bottom:1px solid rgba(255,255,255,.06)"><input type=checkbox data-role="'+r.c+'" data-page="'+m.p+'" '+ck+' style="accent-color:#4f8cff"></td>';}h+='</tr>';}h+='</tbody></table>';c.innerHTML=h;}
-function collectRoleModulesFromUI(){var cfg={};_edRoles.forEach(function(r){cfg[r.c]=[];});var boxes=document.querySelectorAll('#role-modules-grid input[type=checkbox]');boxes.forEach(function(b){if(b.checked)cfg[b.dataset.role].push(b.dataset.page);});return cfg;}
+function collectRoleModulesFromUI(){var base=(_serverRoleModules&&typeof _serverRoleModules==='object')?JSON.parse(JSON.stringify(_serverRoleModules)):{};_edRoles.forEach(function(r){base[r.c]=[];});var boxes=document.querySelectorAll('#role-modules-grid input[type=checkbox]');boxes.forEach(function(b){if(b.checked){if(!Array.isArray(base[b.dataset.role]))base[b.dataset.role]=[];base[b.dataset.role].push(b.dataset.page);}});return base;}
 async function saveRoleModulesConfig(){try{var cfg=collectRoleModulesFromUI();var tok=localStorage.getItem('hrms_token')||'';var r=await fetch('/api/role-modules',{method:'PUT',headers:{'Content-Type':'application/json','Authorization':'Bearer '+tok},body:JSON.stringify({config:cfg})});if(!r.ok)throw new Error('HTTP '+r.status);_serverRoleModules=cfg;updateUserInfo();showNotification('角色模块权限已保存','success');}catch(e){showNotification('保存失败: '+e.message,'error');}}
 async function resetRoleModulesConfig(){const _okRC=await hrmsConfirm({title:'重置权限配置',message:'确定恢复为默认权限配置？此操作将覆盖当前配置。',okText:'确认重置',icon:'🔄'});if(!_okRC)return;_serverRoleModules=null;renderRoleModulesGrid();showNotification('已恢复默认配置，请点击保存生效','info');}
 async function loadDedupStats(){var el=document.getElementById('dedup-stats-content');if(!el)return;el.textContent='加载中...';try{var r=await fetch('/api/dedup/stats',{credentials:'include'});if(!r.ok)throw new Error('HTTP '+r.status);var d=await r.json();var t=d.tables||{};el.innerHTML='<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;font-size:13px;"><span>消息记录重复组:</span><span style="font-weight:600;color:'+(t.agent_messages_dup_groups>0?'#ef5350':'#66bb6a')+'">'+t.agent_messages_dup_groups+'</span><span>飞书通用记录:</span><span>'+t.feishu_generic_records+'</span><span>销售明细:</span><span>'+t.sales_raw+'</span><span>桌访记录:</span><span>'+t.table_visit_records+'</span></div>';}catch(e){el.textContent='加载失败: '+e.message;}}
@@ -29140,6 +29143,37 @@ ${knowledgeContent.slice(0, 30000)}`;
             try { input.value = ''; } catch (e) {}
         }
 
+        var __DR_WECHAT_MONTH_BASE = 0;
+        function drCalcWechatMonthBase(date, store) {
+            var base = 0;
+            if (!date || !store) return base;
+            var ym = String(date).slice(0, 7);
+            var list = Array.isArray(window.__DR_LAST_LIST) ? window.__DR_LAST_LIST : [];
+            list.forEach(function(r) {
+                if (String(r?.store || '').trim() !== String(store).trim()) return;
+                if (String(r?.date || '').trim() === String(date).trim()) return;
+                if (String(r?.date || '').slice(0, 7) !== ym) return;
+                base += Math.max(0, Math.floor(Number(r?.data?.new_wechat_members) || 0));
+            });
+            return base;
+        }
+        function drUpdateWechatMonthTotal() {
+            var today = Math.max(0, Math.floor(Number(document.getElementById('dr-new-wechat-members')?.value) || 0));
+            var total = __DR_WECHAT_MONTH_BASE + today;
+            var el = document.getElementById('dr-wechat-month-total');
+            if (el) el.textContent = total;
+        }
+        (function() {
+            var _bound = false;
+            var _tryBind = function() {
+                var inp = document.getElementById('dr-new-wechat-members');
+                if (inp && !_bound) { _bound = true; inp.addEventListener('input', drUpdateWechatMonthTotal); }
+                else if (!_bound) setTimeout(_tryBind, 500);
+            };
+            if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', _tryBind);
+            else _tryBind();
+        })();
+
         function onDailyReportStoreChange() {
             try { loadDailyReportData(); } catch (e) {}
         }
@@ -29242,6 +29276,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                                 drSetValue('dr-bad-dianping', '');
                                 drSetValue('dr-bad-meituan', '');
                                 drSetValue('dr-bad-eleme', '');
+                                drSetValue('dr-new-wechat-members', '');
                                 drSetValue('dr-recharge-count', '');
                                 drSetValue('dr-recharge-amt', '');
                                 // 目标字段：只读显示，不需要reset
@@ -29252,6 +29287,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                                 drSetValue('dr-kitchen-support', '');
                                 drSetValue('dr-tomorrow-gross', '');
                                 drSetValue('dr-schedule-remark', '');
+                                try { __DR_WECHAT_MONTH_BASE = drCalcWechatMonthBase(date, store); drUpdateWechatMonthTotal(); } catch(_e3) {}
                             } catch (e2) {}
                             syncDailyReportComputed();
                         }
@@ -29582,7 +29618,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                     eleme: drGetNum('dr-bad-eleme')
                 },
                 new_wechat_members: drGetNum('dr-new-wechat-members'),
-                wechat_month_total: 0, // server auto-calculates monthly total
+                wechat_month_total: __DR_WECHAT_MONTH_BASE + drGetNum('dr-new-wechat-members'),
                 recharge: {
                     count: drGetNum('dr-recharge-count'),
                     amount: drGetNum('dr-recharge-amt')
@@ -29854,7 +29890,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                 drSetValue('dr-bad-meituan', data?.badReviews?.meituan);
                 drSetValue('dr-bad-eleme', data?.badReviews?.eleme);
                 drSetValue('dr-new-wechat-members', data?.new_wechat_members);
-                const _wmt = document.getElementById('dr-wechat-month-total'); if (_wmt) _wmt.textContent = (data?.wechat_month_total != null ? data.wechat_month_total : 0);
+                try { __DR_WECHAT_MONTH_BASE = drCalcWechatMonthBase(item?.date, item?.store); drUpdateWechatMonthTotal(); } catch(_e) { const _wmt = document.getElementById('dr-wechat-month-total'); if (_wmt) _wmt.textContent = (data?.wechat_month_total != null ? data.wechat_month_total : 0); }
                 drSetValue('dr-recharge-count', data?.recharge?.count);
                 drSetValue('dr-recharge-amt', data?.recharge?.amount);
                 // 目标字段：从系统设置读取，只读显示（只有毛利率目标）
