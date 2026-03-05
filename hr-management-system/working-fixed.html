@@ -29997,8 +29997,9 @@ ${knowledgeContent.slice(0, 30000)}`;
                 drSetValue('dr-bad-meituan', data?.badReviews?.meituan);
                 drSetValue('dr-bad-eleme', data?.badReviews?.eleme);
                 drSetValue('dr-new-wechat-members', data?.new_wechat_members);
-                try { __DR_WECHAT_MONTH_BASE = drCalcWechatMonthBase(item?.date, item?.store); drUpdateWechatMonthTotal(); } catch(_e) {}
-                { const _wmt = document.getElementById('dr-wechat-month-total'); if (_wmt) { const _sv = Number(data?.wechat_month_total || 0); const _cv = Number(_wmt.textContent || 0); if (_sv > _cv) { _wmt.textContent = _sv; __DR_WECHAT_MONTH_BASE = _sv - Math.max(0, Number(data?.new_wechat_members || 0)); } } }
+                try { __DR_WECHAT_MONTH_BASE = drCalcWechatMonthBase(item?.date, item?.store); } catch(_e) { __DR_WECHAT_MONTH_BASE = 0; }
+                { const _sv = Number(data?.wechat_month_total || 0); const _today = Math.max(0, Number(data?.new_wechat_members || 0)); if (_sv > 0 && _sv - _today > __DR_WECHAT_MONTH_BASE) __DR_WECHAT_MONTH_BASE = _sv - _today; }
+                drUpdateWechatMonthTotal();
                 drSetValue('dr-recharge-count', data?.recharge?.count);
                 drSetValue('dr-recharge-amt', data?.recharge?.amount);
                 // 目标字段：从系统设置读取，只读显示（只有毛利率目标）

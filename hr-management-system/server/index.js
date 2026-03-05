@@ -4912,6 +4912,7 @@ app.get('/api/daily-reports', authRequired, async (req, res) => {
             ...(item.data || {}),
             target_margin: targetConfig?.targets?.margin || null,
             dianping_rating: dbData?.dianping_rating ?? item?.data?.dianping_rating ?? null,
+            new_wechat_members: dbData?.new_wechat_members ?? item?.data?.new_wechat_members ?? 0,
             wechat_month_total: dbData?.wechat_month_total ?? item?.data?.wechat_month_total ?? 0
           }
         };
