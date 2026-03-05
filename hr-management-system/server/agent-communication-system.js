@@ -420,6 +420,52 @@ export class AgentCommunicationSystem {
   static generateIssueId() {
     return `ISSUE_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   }
+
+  /**
+   * 兼容接口：部分调用方直接使用 AgentCommunicationSystem.reportTaskExecutionIssue
+   * 支持两种调用风格：
+   * 1) (taskType, bottleneck, failureRate:number, suggestedImprovement)
+   * 2) (taskType, bottleneck, details:object)
+   */
+  static async reportTaskExecutionIssue(taskType, bottleneck, failureRateOrDetails, suggestedImprovement = '') {
+    const isDetailsObject = failureRateOrDetails && typeof failureRateOrDetails === 'object';
+    const normalizedDetails = isDetailsObject
+      ? {
+          taskType,
+          bottleneck,
+          ...failureRateOrDetails,
+          suggestedImprovement: failureRateOrDetails.suggestedImprovement || suggestedImprovement
+        }
+      : {
+          taskType,
+          bottleneck,
+          failureRate: Number(failureRateOrDetails || 0),
+          suggestedImprovement
+        };
+
+    return await AgentCommunicationSystem.reportIssue(
+      'ops_supervisor',
+      'TASK_EXECUTION_BOTTLENECK',
+      normalizedDetails,
+      {
+        timestamp: new Date().toISOString(),
+        agent: 'ops_supervisor',
+        source: 'compat_api'
+      }
+    );
+  }
+
+  /**
+   * 兼容接口：允许调用方继续使用 AgentCommunicationSystem.reportDataSourceIssue
+   */
+  static async reportDataSourceIssue(dataSourceType, problem, impact, suggestedFix) {
+    return await AgentCommunicationHelper.reportDataSourceIssue(
+      dataSourceType,
+      problem,
+      impact,
+      suggestedFix
+    );
+  }
 }
 
 // ─────────────────────────────────────────────
@@ -431,19 +477,53 @@ export class AgentCommunicationHelper {
    * Data Auditor 报告数据源问题
    */
   static async reportDataSourceIssue(dataSourceType, problem, impact, suggestedFix) {
+    const source = String(dataSourceType || '').trim();
+    const store = String((impact && typeof impact === 'object' ? impact.store : '') || '').trim();
+
+    // 限流：同一数据源 + 同一门店（门店未知则按全局）24小时内仅报告一次
+    try {
+      const dedup = await pool().query(
+        `SELECT issue_id, created_at
+           FROM agent_issues_reports
+          WHERE agent_type = 'data_auditor'
+            AND issue_type = 'DATA_SOURCE_INSUFFICIENT'
+            AND COALESCE(details::jsonb->>'dataSourceType', '') = $1
+            AND COALESCE(context->>'store', '') = $2
+            AND created_at >= NOW() - INTERVAL '24 hours'
+          ORDER BY created_at DESC
+          LIMIT 1`,
+        [source, store]
+      );
+      const existing = dedup.rows?.[0];
+      if (existing) {
+        return {
+          success: true,
+          suppressed: true,
+          reason: 'dedup_24h',
+          issueId: String(existing.issue_id || ''),
+          firstReportedAt: existing.created_at
+        };
+      }
+    } catch (e) {
+      console.error('[communication] reportDataSourceIssue dedup check failed:', e?.message || e);
+      // 限流检查失败不阻断主流程
+    }
+
     return await AgentCommunicationSystem.reportIssue(
       'data_auditor',
       'DATA_SOURCE_INSUFFICIENT',
       {
-        dataSourceType,
+        dataSourceType: source,
         problem,
         impact,
         suggestedFix,
-        currentStatus: this.getDataSourceStatus(dataSourceType)
+        currentStatus: this.getDataSourceStatus(source)
       },
       {
         timestamp: new Date().toISOString(),
-        agent: 'data_auditor'
+        agent: 'data_auditor',
+        store,
+        dedupWindow: '24h'
       }
     );
   }

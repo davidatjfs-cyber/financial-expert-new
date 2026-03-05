@@ -202,6 +202,7 @@ function inferRouteByRules(text, hasImage = false) {
 
   const keywordMap = [
     { route: 'appeal', score: 2, rx: /(申诉|投诉|不公平|误判|恢复扣分|举报)/i },
+    { route: 'data_auditor', score: 3, rx: /(收档.*(得分|平均|合格|多少|几次|报告|数据|情况)|开档.*(得分|平均|合格|多少|几次|报告|数据|情况))/i },
     { route: 'ops_supervisor', score: 2, rx: /(开市|开档|收档|闭市|巡检|卫生|拍照|上传照片|检查表)/i },
     { route: 'data_auditor', score: 2, rx: /(营业额|营收|毛利|差评|桌访|达成率|排名|趋势|预测|分析|人效|报损|原料)/i },
     { route: 'chief_evaluator', score: 2, rx: /(绩效|评分|考核|奖金|离职|入职|转正|调岗|请假|社保|档案|薪资|工资)/i },
@@ -1491,7 +1492,7 @@ function buildKpiRadarAlertJson(issue) {
   return JSON.stringify({type:'kpi_radar',category:issue?.category||'',store:issue?.store||'',severity:issue?.severity||'medium',title:issue?.title||'',timestamp:new Date().toISOString()});
 }
 
-async function buildBiDeterministicTableVisitReply(store, text) {
+export async function buildBiDeterministicTableVisitReply(store, text) {
   const q = String(text||'').trim(), s = String(store||'').trim();
   if (!s) return '';
   if (!/(桌访|桌巡|巡台|不满意.*菜|菜品.*不满意|出品.*不满意|最不满意|不满意在哪|主要不满意|不满意.*原因|哪里不满意|什么不满意)/.test(q)) return '';
@@ -1785,7 +1786,7 @@ async function buildBiDeterministicMeetingReportReply(store, text) {
   const q = String(text || '').trim();
   const targetStore = String(store || '').trim();
   if (!targetStore) return '';
-  if (!/(例会|早会|班会|会议|开会)/.test(q)) return '';
+  if (!/(例会|早会|班会|会议|开会|例会.*得分|例会.*分数|例会.*合格)/.test(q)) return '';
   const period = resolveDateRangeFromQuestion(q, 30);
   const tableId = String(BITABLE_CONFIGS?.meeting_reports?.tableId || '').trim();
   if (!tableId) return `例会报告数据源未配置，无法查询。`;
@@ -1797,11 +1798,27 @@ async function buildBiDeterministicMeetingReportReply(store, text) {
     const rows = (r.rows || []).filter(row => {
       const f = row.fields && typeof row.fields === 'object' ? row.fields : {};
       const rowStore = extractBitableFieldText(f['所属门店'] || f['门店']);
-      return isLikelySameStore(rowStore, targetStore);
+      if (!isLikelySameStore(rowStore, targetStore)) return false;
+      const d = normalizeBitableDateValue(f['记录日期'] || f['提交时间'] || f['日期'] || f['例会日期'], row?.created_at);
+      return d && inDateRangeInclusive(d, period.start, period.end);
     });
     if (!rows.length) return `📊 ${period.label}例会数据（${targetStore}）：暂无例会记录入库。`;
-    const scores = rows.map(row => parseFloat(extractBitableFieldText(row.fields['得分']))).filter(n => !isNaN(n));
+    const scores = rows.map(row => {
+      const f = row.fields || {};
+      let v = parseFloat(extractBitableFieldText(f['得分']));
+      if (isNaN(v)) {
+        const qualText = String(f['是否合格的例会'] || '');
+        const m = qualText.match(/(\d+(?:\.\d+)?)\s*分/);
+        if (m) v = parseFloat(m[1]);
+      }
+      return v;
+    }).filter(n => !isNaN(n));
     const avgScore = scores.length ? (scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(1) : '-';
+    const qualRows = rows.filter(row => {
+      const qt = String(row.fields?.['是否合格的例会'] || '');
+      return qt.includes('合格') && !qt.includes('不合格');
+    });
+    const qualRate = rows.length > 0 ? `${qualRows.length}/${rows.length}次合格` : null;
     const hosts = new Map();
     rows.forEach(row => {
       const h = extractBitableFieldText(row.fields['主持人']);
@@ -1812,9 +1829,10 @@ async function buildBiDeterministicMeetingReportReply(store, text) {
       const abs = extractBitableFieldText(row.fields['缺席人员姓名']);
       if (abs && abs !== '无') abs.split(/[,，、]/).forEach(n => { n = n.trim(); if (n) absentees.set(n, (absentees.get(n) || 0) + 1); });
     });
-    const lines = [`📊 例会数据（${targetStore}）`];
+    const lines = [`📊 ${period.label}例会数据（${targetStore}）`];
     lines.push(`- 例会记录：${rows.length}次`);
     if (avgScore !== '-') lines.push(`- 平均得分：${avgScore}分`);
+    if (qualRate) lines.push(`- 合格情况：${qualRate}`);
     if (hosts.size) lines.push(`- 主持人：${Array.from(hosts.entries()).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, v]) => `${k}(${v}次)`).join('、')}`);
     if (absentees.size) lines.push(`- 缺席频次Top：${Array.from(absentees.entries()).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, v]) => `${k}(${v}次)`).join('、')}`);
     return lines.join('\n');
@@ -1830,9 +1848,10 @@ async function buildBiDeterministicDailyReportReply(store, text) {
   if (!targetStore) return '';
   if (!/(营业额|营收|日报|毛利|点评评分|大众点评.*分|dianping|revenue|翻台|订单|客单价|会员|充值|业绩|达成率|目标|生意|经营情况|经营)/.test(q)) return '';
   const period = resolveDateRangeFromQuestion(q, 7);
+  const storeLike = normalizeStoreLike(targetStore);
   try {
     let sql = `SELECT * FROM daily_reports WHERE lower(regexp_replace(coalesce(store,''), '\\s+', '', 'g')) LIKE $1`;
-    const params = [normalizeStoreLike(targetStore)];
+    const params = [storeLike];
     if (period.start) { sql += ` AND date >= $${params.length + 1}`; params.push(period.start); }
     if (period.end) { sql += ` AND date <= $${params.length + 1}`; params.push(period.end); }
     sql += ' ORDER BY date DESC LIMIT 60';
@@ -1854,43 +1873,118 @@ async function buildBiDeterministicDailyReportReply(store, text) {
         if (sRows.length) {
           const tRev = sRows.reduce((s, x) => s + (parseFloat(x.day_revenue) || 0), 0);
           const tSales = sRows.reduce((s, x) => s + (parseFloat(x.day_sales) || 0), 0);
-          const sLines = [`📊 营业数据（${targetStore}·${period.label}）`];
-          sLines.push(`- 统计天数：${sRows.length}天`);
-          sLines.push(`- 累计实收：¥${tRev.toFixed(0)}`);
-          if (tSales > 0) sLines.push(`- 累计折前：¥${tSales.toFixed(0)}`);
-          sLines.push(`- 日均实收：¥${(tRev / sRows.length).toFixed(0)}`);
-          sLines.push('> 数据源：sales_raw（销售明细按日汇总）');
+          const sLines = [`📊 营收分析（${targetStore} | ${period.label}）`];
+          sLines.push(`\n- **实收营业额**: ${tRev.toFixed(2)} (已扣优惠)`);
+          if (tSales > 0) sLines.push(`- **折前营业额**: ${tSales.toFixed(1)} (含优惠前金额)`);
+          if (tSales > 0 && tRev > 0) sLines.push(`- **总折扣金额**: ${(tSales - tRev).toFixed(2)} (含优惠前金额)`);
+          sLines.push(`\n> 数据源：sales_raw（销售明细按日汇总，共${sRows.length}天）`);
           return sLines.join('\n');
         }
       } catch (_e) {}
-      return `📊 ${period.label}营业数据（${targetStore}）：暂无营业数据。`;
+      return `📊 ${period.label}营收分析（${targetStore}）：暂无营业数据。`;
     }
+
+    // ── 查本月累计数据（用于补充指标） ──
+    const now = new Date();
+    const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+    const totalDaysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+    let cumRev = 0, cumPre = 0, monthBudget = 0, monthDays = 0, cumLabor = 0;
+    try {
+      const mR = await pool().query(
+        `SELECT COALESCE(SUM(actual_revenue),0) as cum_rev, COALESCE(SUM(pre_discount_revenue),0) as cum_pre,
+                COALESCE(SUM(budget),0) as budget, COUNT(*) as days, COALESCE(SUM(labor_total),0) as cum_labor
+         FROM daily_reports WHERE lower(regexp_replace(coalesce(store,''), '\\s+', '', 'g')) LIKE $1
+           AND date >= $2 AND date <= $3`,
+        [storeLike, monthStart, period.end || monthStart]
+      );
+      const m = mR.rows?.[0] || {};
+      cumRev = parseFloat(m.cum_rev) || 0;
+      cumPre = parseFloat(m.cum_pre) || 0;
+      monthBudget = parseFloat(m.budget) || 0;
+      monthDays = parseInt(m.days) || 0;
+      cumLabor = parseFloat(m.cum_labor) || 0;
+    } catch (_e) {}
+    // 优先使用 revenue_targets 表的月目标
+    try {
+      const rtR = await pool().query(
+        `SELECT target_revenue FROM revenue_targets WHERE lower(regexp_replace(coalesce(store,''), '\\s+', '', 'g')) LIKE $1 AND period = $2 LIMIT 1`,
+        [storeLike, monthStart.slice(0, 7)]
+      );
+      if (rtR.rows?.[0]?.target_revenue) monthBudget = parseFloat(rtR.rows[0].target_revenue) || monthBudget;
+    } catch (_e) {}
+
+    // ── 单日/短期（≤2天）：详细格式 ──
+    if (rows.length <= 2) {
+      const row = rows[0];
+      const actualRev = parseFloat(row.actual_revenue) || 0;
+      const preDiscount = parseFloat(row.pre_discount_revenue) || 0;
+      const totalDiscount = parseFloat(row.total_discount) || 0;
+      if (!monthBudget) monthBudget = parseFloat(row.budget) || 0;
+
+      const lines = [`📊 营收分析（${targetStore} | ${period.label}）`];
+      lines.push('');
+      lines.push(`- **实收营业额**: ${actualRev.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (已扣优惠)`);
+      if (preDiscount > 0) lines.push(`- **折前营业额**: ${preDiscount.toLocaleString('zh-CN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} (含优惠前金额)`);
+      if (totalDiscount > 0) lines.push(`- **总折扣金额**: ${totalDiscount.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (含优惠前金额)`);
+
+      lines.push('');
+      lines.push('📈 **补充指标**');
+      if (monthBudget > 0) {
+        const achRate = (cumRev / monthBudget * 100).toFixed(1);
+        lines.push(`- **实收营业目标达成率**: ${achRate}% (累计实收 ¥${cumRev.toLocaleString('zh-CN', { minimumFractionDigits: 2 })} / 本月目标 ¥${monthBudget.toLocaleString('zh-CN', { minimumFractionDigits: 0 })})`);
+        const theoRate = (monthDays / totalDaysInMonth * 100).toFixed(1);
+        lines.push(`- **理论达成率**: ${theoRate}% (${monthDays}/${totalDaysInMonth}天)`);
+      }
+      const margin = row.actual_margin != null ? parseFloat(row.actual_margin) : null;
+      lines.push(margin != null && !isNaN(margin) ? `- **毛利率**: ${margin.toFixed(1)}%` : `- **毛利率**: 暂无 (当日菜品明细未录入)`);
+      const dp = row.dianping_rating != null ? parseFloat(row.dianping_rating) : null;
+      if (dp != null && !isNaN(dp)) lines.push(`- **今日大众点评评分**: ${dp.toFixed(2)}`);
+      const eff = row.efficiency != null ? parseFloat(row.efficiency) : null;
+      const labor = row.labor_total != null ? parseFloat(row.labor_total) : null;
+      if (eff != null && !isNaN(eff)) {
+        const laborTxt = labor != null && !isNaN(labor) ? ` (出勤${labor.toFixed(0)}工时)` : '';
+        lines.push(`- **今日人效值**: ¥${Math.round(eff).toLocaleString('zh-CN')}${laborTxt}`);
+      }
+      if (cumLabor > 0 && cumPre > 0) {
+        const cumEff = Math.round(cumPre / cumLabor);
+        lines.push(`- **本月累计人效值**: ¥${cumEff.toLocaleString('zh-CN')} (折前 ¥${Math.round(cumPre).toLocaleString('zh-CN')} / 出勤 ${cumLabor.toFixed(1)}人)`);
+      }
+      return lines.join('\n');
+    }
+
+    // ── 多日：汇总格式 ──
     const totalRevenue = rows.reduce((s, r) => s + (parseFloat(r.actual_revenue) || 0), 0);
-    const totalTarget = rows.reduce((s, r) => s + (parseFloat(r.target_revenue) || 0), 0);
-    const avgMargin = rows.filter(r => r.actual_margin != null);
-    const avgMarginVal = avgMargin.length ? (avgMargin.reduce((s, r) => s + parseFloat(r.actual_margin), 0) / avgMargin.length).toFixed(1) : null;
+    const totalPre = rows.reduce((s, r) => s + (parseFloat(r.pre_discount_revenue) || 0), 0);
+    const totalDisc = rows.reduce((s, r) => s + (parseFloat(r.total_discount) || 0), 0);
+    const avgMarginArr = rows.filter(r => r.actual_margin != null);
+    const avgMarginVal = avgMarginArr.length ? (avgMarginArr.reduce((s, r) => s + parseFloat(r.actual_margin), 0) / avgMarginArr.length).toFixed(1) : null;
     const dianpingRows = rows.filter(r => r.dianping_rating != null);
     const avgDianping = dianpingRows.length ? (dianpingRows.reduce((s, r) => s + parseFloat(r.dianping_rating), 0) / dianpingRows.length).toFixed(2) : null;
-    const achieveRate = totalTarget > 0 ? (totalRevenue / totalTarget * 100).toFixed(1) : null;
-    const lines = [`📊 营业数据（${targetStore}·${period.label}）`];
-    lines.push(`- 统计天数：${rows.length}天`);
-    lines.push(`- 累计营收：¥${totalRevenue.toLocaleString('zh-CN', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`);
-    if (totalTarget > 0) lines.push(`- 目标营收：¥${totalTarget.toLocaleString('zh-CN', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}（达成率 ${achieveRate}%）`);
-    lines.push(`- 日均营收：¥${(totalRevenue / rows.length).toFixed(0)}`);
-    if (avgMarginVal) lines.push(`- 平均毛利率：${avgMarginVal}%`);
-    if (avgDianping) lines.push(`- 大众点评均分：${avgDianping}`);
-    // 趋势：最近3天 vs 之前
+    const lines = [`📊 营收分析（${targetStore} | ${period.label}）`];
+    lines.push('');
+    lines.push(`- **实收营业额**: ¥${totalRevenue.toLocaleString('zh-CN', { minimumFractionDigits: 0, maximumFractionDigits: 0 })} (${rows.length}天合计)`);
+    if (totalPre > 0) lines.push(`- **折前营业额**: ¥${totalPre.toLocaleString('zh-CN', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`);
+    if (totalDisc > 0) lines.push(`- **总折扣金额**: ¥${totalDisc.toLocaleString('zh-CN', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`);
+    lines.push(`- **日均实收**: ¥${Math.round(totalRevenue / rows.length).toLocaleString('zh-CN')}`);
+    lines.push('');
+    lines.push('📈 **补充指标**');
+    if (monthBudget > 0) {
+      const achRate = (cumRev / monthBudget * 100).toFixed(1);
+      lines.push(`- **实收营业目标达成率**: ${achRate}% (累计实收 ¥${cumRev.toLocaleString('zh-CN', { minimumFractionDigits: 2 })} / 本月目标 ¥${monthBudget.toLocaleString('zh-CN', { minimumFractionDigits: 0 })})`);
+    }
+    if (avgMarginVal) lines.push(`- **平均毛利率**: ${avgMarginVal}%`);
+    if (avgDianping) lines.push(`- **大众点评均分**: ${avgDianping}`);
     if (rows.length >= 4) {
       const recent3 = rows.slice(0, 3).reduce((s, r) => s + (parseFloat(r.actual_revenue) || 0), 0) / 3;
       const older = rows.slice(3).reduce((s, r) => s + (parseFloat(r.actual_revenue) || 0), 0) / rows.slice(3).length;
       if (older > 0) {
         const trend = ((recent3 - older) / older * 100).toFixed(1);
-        lines.push(`- 趋势：近3天日均 vs 之前 ${Number(trend) >= 0 ? '+' : ''}${trend}%`);
+        lines.push(`- **趋势**: 近3天日均 vs 之前 ${Number(trend) >= 0 ? '+' : ''}${trend}%`);
       }
     }
     return lines.join('\n');
   } catch (e) {
-    return `营业数据查询失败：${e?.message || '未知错误'}`;
+    return `营收分析查询失败：${e?.message || '未知错误'}`;
   }
 }
 
@@ -2103,8 +2197,9 @@ function getLLMClientConfig(modelName, options = {}) {
   };
 }
 
-const LARK_APP_ID = process.env.LARK_APP_ID || '';
-const LARK_APP_SECRET = process.env.LARK_APP_SECRET || '';
+const _isProd = String(process.env.NODE_ENV || '').trim() === 'production';
+const LARK_APP_ID = process.env.LARK_APP_ID || (!_isProd ? 'cli_a9fc0d13c838dcd6' : '');
+const LARK_APP_SECRET = process.env.LARK_APP_SECRET || (!_isProd ? 'pRVuBmiWc0hzqP1YzZDqzGUPFlaProDN' : '');
 const LARK_ENCRYPT_KEY = process.env.LARK_ENCRYPT_KEY || '';
 const LARK_VERIFICATION_TOKEN = process.env.LARK_VERIFICATION_TOKEN || '';
 
@@ -2611,6 +2706,8 @@ function buildOpsChecklistAbnormalItemsCard({ checkType, brandName, storeName })
 function detectOpsChecklistType(text) {
   const t = String(text || '').trim();
   if (!t) return '';
+  // 含数据查询词时不触发检查表，交给 data_auditor 处理
+  if (/(得分|多少|情况|平均|报告|数据|几次|几条|合格|怎么样|记录|统计|查询|查看|分数|评分|上周|上个月|昨天|今天|本周|本月|谁没|几个人|人员|缺席|未开|查一下|看看|看下)/.test(t)) return '';
   if (t.includes('开市') || t.includes('开档')) return 'opening';
   if (t.includes('收档') || t.includes('收市') || t.includes('闭市')) return 'closing';
   return '';
@@ -7385,7 +7482,7 @@ ${contextStr}
 // 10. Agent Response Generator
 // ─────────────────────────────────────────────
 
-async function handleAgentMessage(senderUsername, senderName, senderStore, senderRole, senderBrandContext, text, imageUrls) {
+export async function handleAgentMessage(senderUsername, senderName, senderStore, senderRole, senderBrandContext, text, imageUrls) {
   const hasImage = Array.isArray(imageUrls) && imageUrls.length > 0;
   let routeRes = await routeMessage(text, hasImage, senderUsername);
   let route = routeRes.route;
@@ -7687,8 +7784,9 @@ async function handleAgentMessage(senderUsername, senderName, senderStore, sende
                   }
                 }
 
-                response = dataBlock;
-                agentData = {
+                // Save as fallback; prefer deterministic handlers below for richer format
+                var _dxFallbackResponse = dataBlock;
+                var _dxFallbackAgentData = {
                   route, store, brand, brandId, brandConfig,
                   grounded: true, deterministic: true,
                   source: 'data_executor',
@@ -7697,7 +7795,7 @@ async function handleAgentMessage(senderUsername, senderName, senderStore, sende
                   metrics_returned: execResult.metrics_returned,
                   metric_versions: execResult.metric_versions
                 };
-                break;
+                // Don't break — let deterministic handlers try first
               }
             } catch (e) {
               logExecutorEvent('executor_fallthrough', {
@@ -7717,43 +7815,21 @@ async function handleAgentMessage(senderUsername, senderName, senderStore, sende
           break;
         }
 
-        const fcHandled = await tryHandleBiByFunctionCalling({
-          text,
-          store,
-          brand,
-          senderRole,
-          senderUsername
-        });
-        if (fcHandled?.response) {
-          response = fcHandled.response;
-          agentData = {
-            route,
-            store,
-            brand,
-            brandId,
-            brandConfig,
-            deterministic: true,
-            functionCalling: true,
-            ...fcHandled.meta
-          };
-          break;
-        }
-
-        const deterministicDailyReportReply = await buildBiDeterministicDailyReportReply(store, text);
+        const deterministicDailyReportReply = await buildBiDeterministicDailyReportReply(resolvedStore, text);
         if (deterministicDailyReportReply) {
           response = deterministicDailyReportReply;
           agentData = { route, store, brand, brandId, brandConfig, grounded: true, deterministic: true, source: 'daily_reports' };
           break;
         }
 
-        const deterministicTableVisitReply = await buildBiDeterministicTableVisitReply(store, text);
+        const deterministicTableVisitReply = await buildBiDeterministicTableVisitReply(resolvedStore, text);
         if (deterministicTableVisitReply) {
           response = deterministicTableVisitReply;
           agentData = { route, store, brand, brandId, brandConfig, grounded: true, deterministic: true, source: 'table_visit' };
           break;
         }
 
-        const deterministicSalesRawTopReply = await buildBiDeterministicSalesRawTopReply(store, text);
+        const deterministicSalesRawTopReply = await buildBiDeterministicSalesRawTopReply(resolvedStore, text);
         if (deterministicSalesRawTopReply) {
           response = deterministicSalesRawTopReply;
           agentData = { route, store, brand, brandId, brandConfig, grounded: true, deterministic: true, source: 'sales_raw' };
@@ -7781,52 +7857,77 @@ async function handleAgentMessage(senderUsername, senderName, senderStore, sende
           } catch(e) { console.error('[bi] sales detail error:', e?.message); }
         }
 
-        const deterministicOpsCountReply = await buildBiDeterministicOpsReportCountReply(store, text);
-        if (deterministicOpsCountReply) {
-          response = deterministicOpsCountReply;
-          agentData = { route, store, brand, brandId, brandConfig, grounded: true, deterministic: true, source: 'ops_reports' };
-          break;
-        }
-
-        const deterministicBadReviewReply = await buildBiDeterministicBadReviewReportReply(store, text);
+        const deterministicBadReviewReply = await buildBiDeterministicBadReviewReportReply(resolvedStore, text);
         if (deterministicBadReviewReply) {
           response = deterministicBadReviewReply;
           agentData = { route, store, brand, brandId, brandConfig, grounded: true, deterministic: true, source: 'bad_reviews' };
           break;
         }
 
-        const deterministicClosingReply = await buildBiDeterministicClosingReportReply(store, text);
+        const deterministicClosingReply = await buildBiDeterministicClosingReportReply(resolvedStore, text);
         if (deterministicClosingReply) {
           response = deterministicClosingReply;
           agentData = { route, store, brand, brandId, brandConfig, grounded: true, deterministic: true, source: 'closing_reports' };
           break;
         }
 
-        const deterministicOpeningReply = await buildBiDeterministicOpeningReportReply(store, text);
+        const deterministicOpeningReply = await buildBiDeterministicOpeningReportReply(resolvedStore, text);
         if (deterministicOpeningReply) {
           response = deterministicOpeningReply;
           agentData = { route, store, brand, brandId, brandConfig, grounded: true, deterministic: true, source: 'opening_reports' };
           break;
         }
 
-        const deterministicMaterialReply = await buildBiDeterministicMaterialReportReply(store, text);
+        const deterministicMaterialReply = await buildBiDeterministicMaterialReportReply(resolvedStore, text);
         if (deterministicMaterialReply) {
           response = deterministicMaterialReply;
           agentData = { route, store, brand, brandId, brandConfig, grounded: true, deterministic: true, source: 'material_reports' };
           break;
         }
 
-        const deterministicMeetingReply = await buildBiDeterministicMeetingReportReply(store, text);
+        const deterministicMeetingReply = await buildBiDeterministicMeetingReportReply(resolvedStore, text);
         if (deterministicMeetingReply) {
           response = deterministicMeetingReply;
           agentData = { route, store, brand, brandId, brandConfig, grounded: true, deterministic: true, source: 'meeting_reports' };
           break;
         }
 
-        const deterministicLossReply = await buildBiDeterministicLossReportReply(store, text);
+        const deterministicOpsCountReply = await buildBiDeterministicOpsReportCountReply(resolvedStore, text);
+        if (deterministicOpsCountReply) {
+          response = deterministicOpsCountReply;
+          agentData = { route, store, brand, brandId, brandConfig, grounded: true, deterministic: true, source: 'ops_reports' };
+          break;
+        }
+
+        const deterministicLossReply = await buildBiDeterministicLossReportReply(resolvedStore, text);
         if (deterministicLossReply) {
           response = deterministicLossReply;
           agentData = { route, store, brand, brandId, brandConfig, grounded: true, deterministic: true, source: 'loss_reports' };
+          break;
+        }
+
+        // ── Function Calling fallback (after deterministic handlers) ──
+        const fcHandled = await tryHandleBiByFunctionCalling({
+          text,
+          store: resolvedStore,
+          brand,
+          senderRole,
+          senderUsername
+        });
+        if (fcHandled?.response) {
+          response = fcHandled.response;
+          agentData = {
+            route, store, brand, brandId, brandConfig,
+            deterministic: true, functionCalling: true,
+            ...fcHandled.meta
+          };
+          break;
+        }
+
+        // ── Data Executor fallback: use if no deterministic handler matched ──
+        if (typeof _dxFallbackResponse === 'string' && _dxFallbackResponse) {
+          response = _dxFallbackResponse;
+          agentData = _dxFallbackAgentData;
           break;
         }
 
@@ -9483,22 +9584,38 @@ export function registerAgentRoutes(app, authRequired) {
   // ── Admin: Agent Dashboard summary ──
   app.get('/api/agents/dashboard', authRequired, async (req, res) => {
     const role = String(req.user?.role || '').trim();
-    if (!['admin', 'hq_manager', 'hr_manager'].includes(role)) return res.status(403).json({ error: 'forbidden' });
+    if (!['admin', 'hq_manager', 'hr_manager', 'store_manager', 'front_manager'].includes(role)) return res.status(403).json({ error: 'forbidden' });
     try {
-      const [issuesR, scoresR, auditsR, messagesR, usersR] = await Promise.all([
+      const [issuesR, scoresR, auditsR, messagesR, usersR, genericR] = await Promise.all([
         pool().query(`SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE status='open') as open, COUNT(*) FILTER (WHERE severity='high' AND status='open') as high_open FROM agent_issues`),
         pool().query(`SELECT COUNT(*) as total, ROUND(AVG(total_score)::numeric, 1) as avg_score FROM agent_scores WHERE created_at > NOW() - INTERVAL '30 days'`),
         pool().query(`SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE result='fail') as failed, COUNT(*) FILTER (WHERE duplicate_of IS NOT NULL) as duplicates FROM agent_visual_audits WHERE created_at > NOW() - INTERVAL '30 days'`),
         pool().query(`SELECT COUNT(*) as total FROM agent_messages WHERE created_at > NOW() - INTERVAL '7 days'`),
-        pool().query(`SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE registered=TRUE) as registered FROM feishu_users`)
+        pool().query(`SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE registered=TRUE) as registered FROM feishu_users`),
+        pool().query(`SELECT COUNT(*) as total FROM feishu_generic_records`)
       ]);
+      const iss = issuesR.rows[0] || {};
+      const sc = scoresR.rows[0] || {};
+      const au = auditsR.rows[0] || {};
+      const msg = messagesR.rows[0] || {};
+      const usr = usersR.rows[0] || {};
+      const gen = genericR.rows[0] || {};
       return res.json({
-        issues: issuesR.rows[0],
-        scores: scoresR.rows[0],
-        audits: auditsR.rows[0],
-        messages: { total_7d: messagesR.rows[0]?.total },
-        feishuUsers: usersR.rows[0],
-        performance: getAgentPerformanceMetrics()
+        issues: iss, scores: sc, audits: au,
+        messages: { total_7d: Number(msg.total || 0) },
+        feishuUsers: usr,
+        performance: getAgentPerformanceMetrics(),
+        // Flat fields for data center UI
+        openIssues: Number(iss.open || 0),
+        highOpenIssues: Number(iss.high_open || 0),
+        avgScore: sc.avg_score != null ? Number(sc.avg_score) : null,
+        totalScores: Number(sc.total || 0),
+        totalAudits: Number(au.total || 0),
+        failedAudits: Number(au.failed || 0),
+        totalMessages: Number(msg.total || 0),
+        totalFeishuUsers: Number(usr.total || 0),
+        registeredFeishuUsers: Number(usr.registered || 0),
+        totalGenericRecords: Number(gen.total || 0)
       });
     } catch (e) {
       return res.status(500).json({ error: String(e?.message || e) });

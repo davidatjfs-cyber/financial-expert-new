@@ -16252,8 +16252,10 @@ ${r.approvalNote ? '审批备注：' + r.approvalNote : ''}
                 fetch('/api/agents/bitable-sync', { headers: hdr }).then(r => r.json()).catch(() => null)
             ]);
             const health = healthRes.status === 'fulfilled' ? healthRes.value : null;
-            const dash = dashRes.status === 'fulfilled' ? dashRes.value : null;
-            const sync = syncRes.status === 'fulfilled' ? syncRes.value : null;
+            const _dashRaw = dashRes.status === 'fulfilled' ? dashRes.value : null;
+            const dash = (_dashRaw && !_dashRaw.error) ? _dashRaw : null;
+            const _syncRaw = syncRes.status === 'fulfilled' ? syncRes.value : null;
+            const sync = (_syncRaw && !_syncRaw.error) ? _syncRaw : null;
 
             // ── Health bar ──
             const hBar = document.getElementById('dc-health-bar');
@@ -16273,6 +16275,9 @@ ${r.approvalNote ? '审批备注：' + r.approvalNote : ''}
 
             // ── Stats cards ──
             const grid = document.getElementById('dc-stats-grid');
+            if (grid && !dash) {
+                grid.innerHTML = '<div style="grid-column:1/-1;padding:16px;text-align:center;color:#ef4444;font-size:12px;">数据加载失败，请刷新重试' + (_dashRaw?.error ? ' (' + _dashRaw.error + ')' : '') + '</div>';
+            }
             if (grid && dash) {
                 const cards = [
                     { icon: '🚨', label: '待处理异常', value: dash.openIssues ?? '-', color: (dash.openIssues > 0 ? '#ef4444' : '#22c55e') },
@@ -16293,8 +16298,11 @@ ${r.approvalNote ? '审批备注：' + r.approvalNote : ''}
 
             // ── Sync list ──
             const sList = document.getElementById('dc-sync-list');
+            if (sList && !sync) {
+                sList.innerHTML = '<div style="padding:12px;text-align:center;color:#ef4444;font-size:12px;">同步数据加载失败' + (_syncRaw?.error ? ' (' + _syncRaw.error + ')' : '') + '</div>';
+            }
             const syncItems = sync?.items || sync?.sources || [];
-            if (sList && Array.isArray(syncItems)) {
+            if (sList && sync && Array.isArray(syncItems)) {
                 if (syncItems.length === 0) {
                     sList.innerHTML = '<div style="padding:12px;text-align:center;color:#64748b;font-size:12px;">暂无数据源</div>';
                 } else {
@@ -29989,7 +29997,8 @@ ${knowledgeContent.slice(0, 30000)}`;
                 drSetValue('dr-bad-meituan', data?.badReviews?.meituan);
                 drSetValue('dr-bad-eleme', data?.badReviews?.eleme);
                 drSetValue('dr-new-wechat-members', data?.new_wechat_members);
-                try { __DR_WECHAT_MONTH_BASE = drCalcWechatMonthBase(item?.date, item?.store); drUpdateWechatMonthTotal(); } catch(_e) { const _wmt = document.getElementById('dr-wechat-month-total'); if (_wmt) _wmt.textContent = (data?.wechat_month_total != null ? data.wechat_month_total : 0); }
+                try { __DR_WECHAT_MONTH_BASE = drCalcWechatMonthBase(item?.date, item?.store); drUpdateWechatMonthTotal(); } catch(_e) {}
+                { const _wmt = document.getElementById('dr-wechat-month-total'); if (_wmt) { const _sv = Number(data?.wechat_month_total || 0); const _cv = Number(_wmt.textContent || 0); if (_sv > _cv) { _wmt.textContent = _sv; __DR_WECHAT_MONTH_BASE = _sv - Math.max(0, Number(data?.new_wechat_members || 0)); } } }
                 drSetValue('dr-recharge-count', data?.recharge?.count);
                 drSetValue('dr-recharge-amt', data?.recharge?.amount);
                 // 目标字段：从系统设置读取，只读显示（只有毛利率目标）

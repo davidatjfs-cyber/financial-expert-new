@@ -1544,6 +1544,17 @@ export function startMasterAgent() {
 
 export function registerMasterRoutes(app, authRequired) {
 
+  const _exportCsv = (rows = [], columns = []) => {
+    const esc = (v) => {
+      const s = v == null ? '' : String(v);
+      if (!/[",\n]/.test(s)) return s;
+      return `"${s.replace(/"/g, '""')}"`;
+    };
+    const header = columns.join(',');
+    const body = rows.map((r) => columns.map((c) => esc(r?.[c])).join(',')).join('\n');
+    return `${header}\n${body}`;
+  };
+
   // ── Master Dashboard ──
   app.get('/api/master/dashboard', authRequired, async (req, res) => {
     const role = String(req.user?.role || '').trim();
@@ -1596,6 +1607,115 @@ export function registerMasterRoutes(app, authRequired) {
       );
       return res.json({ items: r.rows || [] });
     } catch (e) { return res.status(500).json({ error: String(e?.message || e) }); }
+  });
+
+  // ── Data Source Health Snapshot ──
+  app.get('/api/master/data-source-health', authRequired, async (req, res) => {
+    const role = String(req.user?.role || '').trim();
+    if (!['admin', 'hq_manager', 'hr_manager'].includes(role)) return res.status(403).json({ error: 'forbidden' });
+    const hours = Math.max(1, Math.min(24 * 30, Number(req.query?.hours) || 24));
+    const tables = ['daily_reports', 'sales_raw', 'table_visit_records', 'master_tasks'];
+    try {
+      const tableCounts = [];
+      for (const table of tables) {
+        const r = await pool().query(
+          `SELECT COUNT(*)::int AS cnt, MAX(created_at) AS latest
+             FROM ${table}
+            WHERE created_at >= NOW() - ($1::text || ' hours')::interval`,
+          [String(hours)]
+        );
+        tableCounts.push({
+          table,
+          rows: Number(r.rows?.[0]?.cnt || 0),
+          latest: r.rows?.[0]?.latest || null,
+          ok: Number(r.rows?.[0]?.cnt || 0) > 0
+        });
+      }
+
+      const issueR = await pool().query(
+        `SELECT
+           COALESCE(details::jsonb->>'dataSourceType', 'unknown') AS data_source,
+           COALESCE(context->>'store', '') AS store,
+           COUNT(*)::int AS issue_count,
+           MAX(created_at) AS latest
+         FROM agent_issues_reports
+         WHERE issue_type = 'DATA_SOURCE_INSUFFICIENT'
+           AND created_at >= NOW() - ($1::text || ' hours')::interval
+         GROUP BY COALESCE(details::jsonb->>'dataSourceType', 'unknown'), COALESCE(context->>'store', '')
+         ORDER BY issue_count DESC, data_source ASC, store ASC
+         LIMIT 200`,
+        [String(hours)]
+      );
+
+      return res.json({
+        windowHours: hours,
+        generatedAt: new Date().toISOString(),
+        tables: tableCounts,
+        insufficientIssues: issueR.rows || []
+      });
+    } catch (e) {
+      return res.status(500).json({ error: String(e?.message || e) });
+    }
+  });
+
+  // ── One-click Evidence Export (tasks + events) ──
+  app.get('/api/master/evidence/export', authRequired, async (req, res) => {
+    const role = String(req.user?.role || '').trim();
+    if (!['admin', 'hq_manager', 'hr_manager'].includes(role)) return res.status(403).json({ error: 'forbidden' });
+    const taskLimit = Math.max(1, Math.min(20000, Number(req.query?.taskLimit) || 5000));
+    const eventLimit = Math.max(1, Math.min(50000, Number(req.query?.eventLimit) || 10000));
+    const format = String(req.query?.format || 'json').trim().toLowerCase();
+    try {
+      const [tasksR, eventsR] = await Promise.all([
+        pool().query(`SELECT * FROM master_tasks ORDER BY created_at DESC LIMIT $1`, [taskLimit]),
+        pool().query(`SELECT * FROM master_events ORDER BY created_at DESC LIMIT $1`, [eventLimit])
+      ]);
+
+      const tasks = tasksR.rows || [];
+      const events = eventsR.rows || [];
+      const byStatus = {};
+      for (const t of tasks) {
+        const k = String(t?.status || 'unknown');
+        byStatus[k] = (byStatus[k] || 0) + 1;
+      }
+      const byEventType = {};
+      for (const e of events) {
+        const k = String(e?.event_type || 'unknown');
+        byEventType[k] = (byEventType[k] || 0) + 1;
+      }
+
+      if (format === 'csv') {
+        const taskColumns = ['task_id', 'source', 'category', 'severity', 'store', 'brand', 'title', 'status', 'assignee_role', 'assignee_username', 'created_at', 'updated_at'];
+        const eventColumns = ['task_id', 'event_type', 'from_agent', 'to_agent', 'status_before', 'status_after', 'created_at'];
+        const taskCsv = _exportCsv(tasks, taskColumns);
+        const eventCsv = _exportCsv(events, eventColumns);
+        const csv = [
+          '# master_tasks',
+          taskCsv,
+          '',
+          '# master_events',
+          eventCsv
+        ].join('\n');
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader('Content-Disposition', `attachment; filename="master-evidence-${Date.now()}.csv"`);
+        return res.send(csv);
+      }
+
+      return res.json({
+        generatedAt: new Date().toISOString(),
+        limits: { taskLimit, eventLimit },
+        summary: {
+          taskCount: tasks.length,
+          eventCount: events.length,
+          byStatus,
+          byEventType
+        },
+        tasks,
+        events
+      });
+    } catch (e) {
+      return res.status(500).json({ error: String(e?.message || e) });
+    }
   });
 
   // ── Task Detail with Events ──

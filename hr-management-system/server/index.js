@@ -9866,7 +9866,7 @@ const BITABLE_TABLE_NAMES = {
 };
 app.get('/api/agents/bitable-sync', authRequired, async (req, res) => {
   const role = String(req.user?.role || '').trim();
-  if (!['admin', 'hq_manager', 'hr_manager'].includes(role)) return res.status(403).json({ error: 'forbidden' });
+  if (!['admin', 'hq_manager', 'hr_manager', 'store_manager', 'front_manager'].includes(role)) return res.status(403).json({ error: 'forbidden' });
   try {
     const r = await pool.query(`SELECT table_id, COUNT(*) as cnt, MAX(updated_at) as last_sync FROM feishu_generic_records GROUP BY table_id ORDER BY last_sync DESC`);
     const items = (r.rows || []).map(row => ({
@@ -9893,7 +9893,7 @@ app.get('/api/health', async (req, res) => {
     const uploads = ensureUploadsDir();
     let agentHealth = {};
     try { agentHealth = getAgentHealthStatus(); } catch (e) {}
-    return res.json({ ok: true, now: new Date().toISOString(), storage: { ossConfigured, cosConfigured }, uploads, agents: agentHealth });
+    return res.json({ ok: true, database: true, now: new Date().toISOString(), storage: { ossConfigured, cosConfigured }, uploads, agents: agentHealth });
   } catch (e) {
     return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
