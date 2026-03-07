@@ -6,7 +6,7 @@ import bcrypt from 'bcryptjs';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { randomUUID } from 'crypto';
+import { randomUUID, createDecipheriv } from 'crypto';
 import multer from 'multer';
 import https from 'https';
 import { execFileSync } from 'child_process';
@@ -17,7 +17,7 @@ import { Readable } from 'stream';
 import zlib from 'zlib';
 import XLSX from 'xlsx';
 import axios from 'axios';
-import { setPool as setAgentPool, ensureAgentTables, registerAgentRoutes, startAgentScheduler, setTaskResponseHook, startBitablePolling, startScheduledTasks, assertCriticalFunctions, verifyLLMHealth, getAgentHealthStatus, startWeeklyReportScheduler, sendWeeklyReports, sendMonthlyReports, sendTestReportsToUser, lookupFeishuUserByUsername, sendLarkMessage } from './agents.js';
+import { setPool as setAgentPool, ensureAgentTables, registerAgentRoutes, startAgentScheduler, setTaskResponseHook, startBitablePolling, startScheduledTasks, assertCriticalFunctions, verifyLLMHealth, getAgentHealthStatus, startWeeklyReportScheduler, sendWeeklyReports, sendMonthlyReports, sendTestReportsToUser, lookupFeishuUserByUsername, sendLarkMessage, onFeishuEvent } from './agents.js';
 import { ensureAgentConfigTables, registerAgentConfigRoutes } from "./agent-config-manager.js";
 
 import { setMasterPool, ensureMasterTables, startMasterAgent, registerMasterRoutes, handleTaskResponse } from './master-agent.js';
@@ -76,6 +76,37 @@ const FEISHU_BASE_URL = 'https://open.feishu.cn/open-apis';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+const FEISHU_ENCRYPT_KEY = process.env.FEISHU_ENCRYPT_KEY;
+
+function tryParseJson(input) {
+  try {
+    if (!input) return null;
+    return JSON.parse(input);
+  } catch (e) {
+    return null;
+  }
+}
+
+function decryptFeishuEncryptPayload(encryptValue) {
+  if (!FEISHU_ENCRYPT_KEY) throw new Error('missing_feishu_encrypt_key');
+  const cipherBuf = Buffer.from(String(encryptValue || ''), 'base64');
+  if (!cipherBuf.length) throw new Error('invalid_encrypt_payload');
+
+  let keyBuf = Buffer.from(String(FEISHU_ENCRYPT_KEY || ''), 'base64');
+  if (keyBuf.length !== 32) {
+    keyBuf = Buffer.from(String(FEISHU_ENCRYPT_KEY || ''), 'utf8');
+    if (keyBuf.length < 32) {
+      keyBuf = Buffer.concat([keyBuf, Buffer.alloc(32 - keyBuf.length)]);
+    }
+    if (keyBuf.length > 32) keyBuf = keyBuf.subarray(0, 32);
+  }
+  const iv = keyBuf.subarray(0, 16);
+  const decipher = createDecipheriv('aes-256-cbc', keyBuf, iv);
+  let decrypted = decipher.update(cipherBuf, undefined, 'utf8');
+  decrypted += decipher.final('utf8');
+  return decrypted;
+}
 const uploadsDir = path.join(__dirname, 'uploads');
 function ensureUploadsDir() {
   try {
@@ -2479,6 +2510,21 @@ app.post('/api/approvals', authRequired, async (req, res) => {
           nextState = addStateNotification(nextState, makeNotif(u, title, msg, { type: `${type}_request`, approvalId: item.id }));
         }
         await saveSharedState(nextState);
+
+        // 飞书通知：异步通知第一个审批人
+        (async () => {
+          try {
+            if (currentAssignee) {
+              const fu = await lookupFeishuUserByUsername(currentAssignee);
+              if (fu?.open_id) {
+                const feishuMsg = `📋 【HRMS 待审批提醒】\n\n${msg}\n\n请登录 HRMS 系统处理：https://nnyx.cc`;
+                await sendLarkMessage(fu.open_id, feishuMsg, { skipDedup: true });
+              }
+            }
+          } catch (feishuErr) {
+            console.error('[approval] feishu notify error:', feishuErr?.message);
+          }
+        })();
       }
     } catch (e) {}
 
@@ -3301,6 +3347,43 @@ app.post('/api/approvals/:id/decide', authRequired, async (req, res) => {
       }
     } catch (e) {}
 
+    // 飞书通知：审批流转时通知下一审批人 / 审批结果通知申请人
+    try {
+      if (updated) {
+        const feishuState = (await getSharedState()) || {};
+        const feishuApplicant = stateFindUserRecord(feishuState, updated.applicant_username) || {};
+        const feishuApplicantName = String(feishuApplicant?.name || updated.applicant_username).trim() || updated.applicant_username;
+        const feishuLabel = approvalTypeLabel(String(updated.type || ''));
+
+        if (String(updated.status || '') === 'pending' && nextAssignee) {
+          // 中间步骤：通知下一审批人
+          (async () => {
+            try {
+              const fu = await lookupFeishuUserByUsername(nextAssignee);
+              if (fu?.open_id) {
+                const feishuMsg = `📋 【HRMS 待审批提醒】\n\n${feishuApplicantName} 提交了${feishuLabel}申请，需要您审批。\n\n请登录 HRMS 系统处理：https://nnyx.cc`;
+                await sendLarkMessage(fu.open_id, feishuMsg, { skipDedup: true });
+              }
+            } catch (e) { console.error('[approval-decide] feishu notify next error:', e?.message); }
+          })();
+        }
+
+        if (String(updated.status || '') === 'approved' || String(updated.status || '') === 'rejected') {
+          // 最终结果：通知申请人
+          const resultText = String(updated.status || '') === 'approved' ? '已通过' : '被拒绝';
+          (async () => {
+            try {
+              const fu = await lookupFeishuUserByUsername(updated.applicant_username);
+              if (fu?.open_id) {
+                const feishuMsg = `📋 【HRMS 审批结果】\n\n${feishuApplicantName}，您的${feishuLabel}申请${resultText}。${note ? `\n原因：${note}` : ''}\n\n请登录 HRMS 查看详情：https://nnyx.cc`;
+                await sendLarkMessage(fu.open_id, feishuMsg, { skipDedup: true });
+              }
+            } catch (e) { console.error('[approval-decide] feishu notify applicant error:', e?.message); }
+          })();
+        }
+      }
+    } catch (e) {}
+
     return res.json({ item: updated });
   } catch (e) {
     return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
@@ -3418,11 +3501,21 @@ app.post('/api/checkin', authRequired, async (req, res) => {
   const storeName = String(req.body?.store || req.user?.store || '').trim();
 
   try {
+    // Prevent duplicate same-type check-in within 1 hour
+    const dupCheck = await pool.query(
+      `select id from checkin_records where lower(username) = lower($1) and type = $2 and check_time > now() - interval '1 hour' limit 1`,
+      [username, type]
+    );
+    if (dupCheck.rows?.length) {
+      const label = type === 'clock_in' ? '上班' : '下班';
+      return res.status(400).json({ error: 'duplicate_checkin', message: `1小时内已${label}打卡，请勿重复操作` });
+    }
+
     let distMeters = null;
     let status = 'normal';
 
     if (noGps || (lat === 0 && lng === 0)) {
-      status = 'no_gps';
+      return res.status(400).json({ error: 'no_gps', message: '打卡必须开启GPS定位，请在手机/浏览器设置中允许位置权限后重试' });
     } else if (storeName) {
       // Look up store location
       try {
@@ -3434,7 +3527,11 @@ app.post('/api/checkin', authRequired, async (req, res) => {
         const sLng = Number(store?.longitude || store?.location?.longitude || 0);
         if (sLat && sLng) {
           distMeters = haversineDistance(lat, lng, sLat, sLng);
-          if (distMeters > 500) status = 'out_of_range';
+          distMeters = Math.round(distMeters * 100) / 100;
+          if (distMeters > 300) {
+            status = 'out_of_range';
+            return res.status(400).json({ error: 'out_of_range', distance: Math.round(distMeters), message: `您距离门店${Math.round(distMeters)}米，超出打卡范围（300米）` });
+          }
         } else {
           status = 'no_store_location';
         }
@@ -3878,6 +3975,86 @@ app.post('/api/uploads/promotion-evidence', authRequired, upload.array('files', 
 
 const pool = new Pool({ connectionString: DATABASE_URL });
 setAgentPool(pool);
+
+async function ensureEmployeeAttachmentsTable() {
+  try {
+    await pool.query(`
+      create table if not exists employee_attachments (
+        id serial primary key,
+        employee_id text not null,
+        filename text not null,
+        original_name text not null,
+        url text not null,
+        description text default '',
+        uploaded_by text not null,
+        created_at timestamptz default now()
+      )
+    `);
+    await pool.query(`create index if not exists idx_emp_att_emp_id on employee_attachments(employee_id)`);
+  } catch (e) {}
+}
+ensureEmployeeAttachmentsTable();
+
+app.get('/api/employees/:empId/attachments', authRequired, async (req, res) => {
+  const role = String(req.user?.role || '').trim();
+  const allowed = ['admin', 'store_manager', 'hr_manager', 'hq_manager'];
+  if (!allowed.includes(role)) return res.status(403).json({ error: 'forbidden' });
+  try {
+    const empId = String(req.params.empId || '').trim();
+    if (!empId) return res.status(400).json({ error: 'missing_emp_id' });
+    const r = await pool.query('select * from employee_attachments where employee_id=$1 order by created_at desc', [empId]);
+    return res.json(r.rows);
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+app.post('/api/employees/:empId/attachments', authRequired, upload.single('file'), async (req, res) => {
+  const role = String(req.user?.role || '').trim();
+  const allowed = ['admin', 'store_manager', 'hr_manager'];
+  if (!allowed.includes(role)) return res.status(403).json({ error: 'forbidden' });
+  try {
+    const empId = String(req.params.empId || '').trim();
+    if (!empId) return res.status(400).json({ error: 'missing_emp_id' });
+    const file = req.file;
+    if (!file) return res.status(400).json({ error: 'missing_file' });
+    if (file.size > 20 * 1024 * 1024) return res.status(400).json({ error: 'file_too_large' });
+    const url = `/uploads/${file.filename}`;
+    const originalName = String(file.originalname || file.filename);
+    const description = String(req.body?.description || '').slice(0, 200);
+    const uploadedBy = String(req.user?.username || '');
+    const r = await pool.query(
+      'insert into employee_attachments(employee_id,filename,original_name,url,description,uploaded_by) values($1,$2,$3,$4,$5,$6) returning *',
+      [empId, file.filename, originalName, url, description, uploadedBy]
+    );
+    return res.json(r.rows[0]);
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+app.delete('/api/employees/:empId/attachments/:attachId', authRequired, async (req, res) => {
+  const role = String(req.user?.role || '').trim();
+  const allowed = ['admin', 'store_manager', 'hr_manager'];
+  if (!allowed.includes(role)) return res.status(403).json({ error: 'forbidden' });
+  try {
+    const empId = String(req.params.empId || '').trim();
+    const attachId = String(req.params.attachId || '').trim();
+    if (!empId || !attachId) return res.status(400).json({ error: 'missing_params' });
+    const r = await pool.query('delete from employee_attachments where id=$1 and employee_id=$2 returning filename', [attachId, empId]);
+    if (!r.rowCount) return res.status(404).json({ error: 'not_found' });
+    try {
+      const filename = r.rows[0]?.filename;
+      if (filename) {
+        const filepath = path.join(uploadsDir, filename);
+        fs.unlink(filepath, () => {});
+      }
+    } catch (e2) {}
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
 
 async function hasColumn(tableName, columnName) {
   const t = String(tableName || '').trim();
@@ -10787,7 +10964,23 @@ app.post('/api/webhook/feishu', express.raw({ type: 'application/json' }), async
   try {
     // 验证webhook签名（可选，建议生产环境启用）
     const body = req.body;
-    const data = typeof body === 'string' ? JSON.parse(body) : body;
+    const rawText = Buffer.isBuffer(body) ? body.toString('utf8') : (typeof body === 'string' ? body : JSON.stringify(body || {}));
+    let data = tryParseJson(rawText) || (body && typeof body === 'object' ? body : null);
+    if (!data) {
+      return res.status(400).json({ code: 400, message: 'invalid_json' });
+    }
+
+    // Decrypt encrypted payload if present
+    if (data.encrypt) {
+      try {
+        const decrypted = decryptFeishuEncryptPayload(data.encrypt);
+        const parsed = tryParseJson(decrypted);
+        if (parsed) data = parsed;
+      } catch (e) {
+        console.error('[Feishu Webhook] decrypt failed:', e?.message || e);
+        return res.status(400).json({ code: 400, message: 'decrypt_failed' });
+      }
+    }
     
     // URL验证模式（飞书首次配置webhook时）
     if (data.type === 'url_verification') {
@@ -10821,6 +11014,15 @@ app.post('/api/webhook/feishu', express.raw({ type: 'application/json' }), async
       });
       
       return res.json({ code: 0, message: 'success' });
+    }
+
+    // Forward all non-bitable events to agents handler (bot replies, card actions, etc.)
+    try {
+      const resp = await onFeishuEvent(data);
+      return res.json(resp || { ok: true });
+    } catch (e) {
+      console.error('[Feishu Webhook] onFeishuEvent error:', e?.message || e);
+      return res.status(500).json({ code: 500, message: 'agent_error' });
     }
     
     // 其他事件类型
@@ -12122,73 +12324,15 @@ app.listen(PORT, HOST, async () => {
   }
 });
 
-// ── Attendance Check-in APIs ──
+// ── Attendance Check-in APIs (duplicate removed - active handler is at ~line 3490) ──
+// The primary POST /api/checkin handler is defined earlier in this file with full GPS enforcement,
+// 300m range check, and 1-hour duplicate prevention. This duplicate is commented out.
 
+/* DUPLICATE REMOVED – see primary handler above
 app.post('/api/checkin', authRequired, async (req, res) => {
-  const username = String(req.user?.username || '').trim();
-  if (!username) return res.status(400).json({ error: 'missing_user' });
-  try {
-    const state = (await getSharedState()) || {};
-    const user = stateFindUserRecord(state, username);
-    const userStore = String(user?.store || req.body?.store || '').trim();
-    const type = req.body?.type === 'clock_out' ? 'clock_out' : 'clock_in';
-    const lat = Number(req.body?.latitude);
-    const lng = Number(req.body?.longitude);
-    const noGps = !!req.body?.noGps;
-    const faceMatch = !!req.body?.faceMatch;
-    const faceScore = Number(req.body?.faceScore || 0);
-    const photoUrl = String(req.body?.photoUrl || '').trim() || null;
-    const note = String(req.body?.note || '').trim() || null;
-
-    if (!noGps && (!Number.isFinite(lat) || !Number.isFinite(lng))) {
-      return res.status(400).json({ error: 'missing_location', message: '请开启定位功能' });
-    }
-
-    // Bug 1: Prevent duplicate same-type check-in within 1 hour
-    const dupCheck = await pool.query(
-      `select id from checkin_records where lower(username) = lower($1) and type = $2 and check_time > now() - interval '1 hour' limit 1`,
-      [username, type]
-    );
-    if (dupCheck.rows?.length) {
-      const label = type === 'clock_in' ? '上班' : '下班';
-      return res.status(400).json({ error: 'duplicate_checkin', message: `1小时内已${label}打卡，请勿重复操作` });
-    }
-
-    // get store location from state
-    const stores = Array.isArray(state.stores) ? state.stores : [];
-    const storeObj = stores.find(s => String(s?.name || '').trim() === userStore);
-    let distance = null;
-    let status = 'normal';
-
-    if (noGps) {
-      // Client has no GPS (HTTP context or permission denied) — allow check-in but mark status
-      status = 'no_gps';
-    } else if (storeObj && Number.isFinite(Number(storeObj.latitude)) && Number.isFinite(Number(storeObj.longitude))) {
-      distance = haversineDistance(lat, lng, Number(storeObj.latitude), Number(storeObj.longitude));
-      distance = Math.round(distance * 100) / 100;
-      if (distance > 10) {
-        status = 'out_of_range';
-        return res.status(400).json({ error: 'out_of_range', distance: Math.round(distance), message: `您距离门店${Math.round(distance)}米，超出打卡范围（10米）` });
-      }
-    } else {
-      status = 'no_store_location';
-    }
-
-    if (!faceMatch && status === 'normal') {
-      status = 'face_fail';
-    }
-
-    const r = await pool.query(
-      `insert into checkin_records (username, store, type, check_time, latitude, longitude, distance_meters, face_match, face_score, photo_url, status, note)
-       values ($1, $2, $3, now(), $4, $5, $6, $7, $8, $9, $10, $11)
-       returning *`,
-      [username, userStore, type, lat, lng, distance, faceMatch, faceScore, photoUrl, status, note]
-    );
-    return res.json({ record: r.rows[0] });
-  } catch (e) {
-    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
-  }
+  // ... duplicate handler removed to avoid Express route shadowing ...
 });
+*/
 
 app.get('/api/checkin/today', authRequired, async (req, res) => {
   const username = String(req.user?.username || '').trim();

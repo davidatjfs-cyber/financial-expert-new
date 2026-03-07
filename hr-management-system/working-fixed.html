@@ -6571,7 +6571,7 @@
                         <div><label style="color:#666;font-size:12px;">美团外卖差评数量</label><input id="dr-bad-meituan" type="number" placeholder="请输入差评数量" style="width:100%; padding:12px;"></div>
                         <div><label style="color:#666;font-size:12px;">饿了么外卖差评数量</label><input id="dr-bad-eleme" type="number" placeholder="请输入差评数量" style="width:100%; padding:12px;"></div>
                         <div><label style="color:#666;font-size:12px;">今日企微会员新增数量</label><input id="dr-new-wechat-members" type="number" placeholder="请输入企微会员新增数量" style="width:100%; padding:12px;"></div>
-                        <div><label style="color:#666;font-size:12px;">累计本月新增企微数量</label><div id="dr-wechat-month-total" style="padding:12px; border-radius:12px; background:rgba(0,0,0,0.03); color:#333; font-size:14px;">0</div></div>
+                        <div><label style="color:#666;font-size:12px;">累计本月新增企微数量</label><div id="dr-wechat-month-total" style="padding:12px; border-radius:12px; background:rgba(234,179,8,0.12); color:#f59e0b; font-size:16px; font-weight:700; border:1px solid rgba(234,179,8,0.3);">0</div></div>
                     </div>
                 </div>
 
@@ -7998,6 +7998,7 @@
                     </div>
                     <div class="ui-modal-footer" style="flex-shrink:0; display:flex; justify-content:flex-end; gap:10px; padding: 12px 20px calc(12px + env(safe-area-inset-bottom, 0px)) 20px; border-top: 1px solid rgba(255,255,255,0.08);">
                         <button class="btn btn-secondary" type="button" onclick="closeApprovalDetailModal()">关闭</button>
+                        <button class="btn btn-secondary" id="approval-detail-export-pdf" type="button" style="display:none;" onclick="exportApprovalPdf()">📄 导出PDF</button>
                         <button class="btn" id="approval-detail-admin-delete" type="button" style="display:none; background: linear-gradient(135deg, #ef4444, #dc2626);" onclick="adminDeleteCurrentApproval()">删除</button>
                         <button class="btn" id="approval-detail-pay" type="button" style="display:none; background: linear-gradient(135deg, #3b82f6, #2563eb);" onclick="payCurrentApproval()">标记已付款</button>
                         <button class="btn btn-secondary" id="approval-detail-reject" type="button" style="display:none;" onclick="promptRejectApproval()">拒绝</button>
@@ -9634,8 +9635,8 @@
                             </div>
                         </div>
                         <div class="form-group" style="margin-top: 14px;">
-                            <label class="form-label">申请理由 <span style="color:#ef4444;">*</span> <span style="color: rgba(200, 215, 230, 0.62); font-size: 12px;">（不少于50字）</span></label>
-                            <textarea id="leave-reason" class="form-input" rows="4" placeholder="请详细说明休假原因，不少于50字..." oninput="try{document.getElementById('leave-reason-count').textContent=this.value.length}catch(e){}"></textarea>
+                            <label class="form-label">申请理由 <span style="color:#ef4444;">*</span></label>
+                            <textarea id="leave-reason" class="form-input" rows="4" placeholder="请简要说明休假原因..." oninput="try{document.getElementById('leave-reason-count').textContent=this.value.length}catch(e){}"></textarea>
                             <div style="text-align: right; font-size: 12px; color: rgba(255,255,255,0.5); margin-top: 4px;">
                                 已输入 <span id="leave-reason-count">0</span> 字
                             </div>
@@ -10061,6 +10062,19 @@
                                 <input type="checkbox" id="employee-form-coreTalent" style="width:18px; height:18px; accent-color:#eab308; cursor:pointer;">
                                 <span id="employee-form-coreTalent-label" style="font-weight:700;">否</span>
                             </label>
+                        </div>
+                    </div>
+                    <div class="ui-form-group" style="grid-column: 1 / -1;" id="employee-form-attachments-section">
+                        <label class="ui-label">📎 员工附件（签署文件）</label>
+                        <div style="padding:12px; border-radius:12px; border:1px solid rgba(255,255,255,0.1); background:rgba(255,255,255,0.03);">
+                            <div id="employee-form-attachments-list" style="margin-bottom:10px; display:flex; flex-direction:column; gap:8px;"></div>
+                            <div id="employee-form-attachments-empty" style="font-size:12px; color:rgba(200,215,230,0.5); margin-bottom:10px; display:none;">暂无附件</div>
+                            <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+                                <input id="employee-form-attachment-file" type="file" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.xls,.xlsx" style="flex:1; min-width:180px;">
+                                <input id="employee-form-attachment-desc" type="text" placeholder="附件说明（如：劳动合同）" class="form-input" style="flex:1; min-width:140px; padding:8px 10px; font-size:13px;">
+                                <button type="button" class="btn btn-secondary" onclick="uploadEmployeeAttachment()" style="padding:8px 14px; font-size:13px; white-space:nowrap;">上传附件</button>
+                            </div>
+                            <div id="employee-form-attachment-hint" style="margin-top:6px; font-size:11px; color:rgba(200,215,230,0.5);">支持 PDF、Word、Excel、图片，单文件不超过 20MB</div>
                         </div>
                     </div>
                 </div>
@@ -11526,6 +11540,18 @@
                     body: formData
                 });
             },
+            async uploadEmployeeAttachment(empId, formData) {
+                return this.request('/api/employees/' + encodeURIComponent(String(empId || '')) + '/attachments', {
+                    method: 'POST',
+                    body: formData
+                });
+            },
+            async getEmployeeAttachments(empId) {
+                return this.request('/api/employees/' + encodeURIComponent(String(empId || '')) + '/attachments', { method: 'GET' });
+            },
+            async deleteEmployeeAttachment(empId, attachId) {
+                return this.request('/api/employees/' + encodeURIComponent(String(empId || '')) + '/attachments/' + encodeURIComponent(String(attachId || '')), { method: 'DELETE' });
+            },
             async uploadPointsEvidence(formData) {
                 return this.request('/api/uploads/points-evidence', {
                     method: 'POST',
@@ -12322,10 +12348,17 @@
                 const existingRemDays = payload?.remainingLeaveDays;
                 const existingRemDaysDisplay = (existingRemDays != null && existingRemDays !== '') ? String(existingRemDays) : '';
                 const managerFilledBy = String(payload?.remainingLeaveDaysFilledBy || '').trim();
+                const leaveApplicantName = hrmsDisplayName(item?.applicant_username);
+                const leaveApplicantRec = hrmsLookupUserRecord(item?.applicant_username);
+                const leaveApplicantStore = String(leaveApplicantRec?.store || payload?.store || '').trim();
+                const leaveApplicantPosition = String(leaveApplicantRec?.position || payload?.position || '').trim();
                 payloadHtml = `
                     <div style="margin-top: 14px; padding: 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.03);">
                         <div style="font-weight: 900;">休假信息</div>
-                        <div style="margin-top: 10px; color: rgba(200,215,230,0.85);">休假类型：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(payload?.leaveType || '-')}</span></div>
+                        <div style="margin-top: 10px; color: rgba(200,215,230,0.85);">申请人：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(leaveApplicantName || '-')}</span></div>
+                        <div style="margin-top: 8px; color: rgba(200,215,230,0.85);">门店：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(leaveApplicantStore || '-')}</span></div>
+                        <div style="margin-top: 8px; color: rgba(200,215,230,0.85);">岗位：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(leaveApplicantPosition || '-')}</span></div>
+                        <div style="margin-top: 10px; border-top: 1px solid rgba(255,255,255,0.06); padding-top: 10px; color: rgba(200,215,230,0.85);">休假类型：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(payload?.leaveType || '-')}</span></div>
                         <div style="margin-top: 8px; color: rgba(200,215,230,0.85);">开始日期：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(payload?.startDate || payload?.fromDate || '-')}</span></div>
                         <div style="margin-top: 8px; color: rgba(200,215,230,0.85);">结束日期：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(payload?.endDate || payload?.toDate || '-')}</span></div>
                         <div style="margin-top: 8px; color: rgba(200,215,230,0.85);">原因：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(payload?.reason || payload?.leaveReason || '-')}</span></div>
@@ -12397,7 +12430,9 @@
                         <div style="margin-top: 8px; color: rgba(200,215,230,0.85);">请款金额：<span style="color: rgba(59,130,246,0.95); font-weight: 900;">${escapeHtml(amountText)}</span></div>
                         <div style="margin-top: 8px; color: rgba(200,215,230,0.85);">门店：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(payload?.store || '-')}</span></div>
                         <div style="margin-top: 8px; color: rgba(200,215,230,0.85);">项目：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(payload?.category || '-')}</span></div>
-                        <div style="margin-top: 8px; color: rgba(200,215,230,0.85);">付款对象：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(payload?.payee || '无')}</span></div>
+                        <div style="margin-top: 8px; color: rgba(200,215,230,0.85);">付款对象：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(payload?.payee || payload?.payeeName || '无')}</span></div>
+                        ${(payload?.payeeAccount) ? `<div style="margin-top: 8px; color: rgba(200,215,230,0.85);">收款账号：<span style="color: #f59e0b; font-weight: 900;">${escapeHtml(payload?.payeeAccount || '-')}</span></div>` : ''}
+                        ${(payload?.payeeBank) ? `<div style="margin-top: 8px; color: rgba(200,215,230,0.85);">开户行：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(payload?.payeeBank || '-')}</span></div>` : ''}
                         <div style="margin-top: 8px; color: rgba(200,215,230,0.85);">紧急程度：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(payload?.urgency || '-')}</span></div>
                         <div style="margin-top: 8px; color: rgba(200,215,230,0.85);">说明：<div style="margin-top: 6px; color: rgba(226,232,240,0.95);">${escapeHtml(payload?.note || '')}</div></div>
                     </div>
@@ -12520,6 +12555,12 @@
                 if (payBtn) payBtn.style.display = 'none';
             }
 
+            // 离职单显示PDF导出按钮
+            const exportPdfBtn = document.getElementById('approval-detail-export-pdf');
+            if (exportPdfBtn) {
+                exportPdfBtn.style.display = String(item?.type || '') === 'offboarding' ? '' : 'none';
+            }
+
             modal.classList.add('show');
 
             HRMS_API.readApproval(key).then(() => {
@@ -12543,6 +12584,95 @@
                 b.style.border = sel ? '2px solid ' + (v === 'voluntary' ? '#ea580c' : '#7c3aed') : '2px solid transparent';
                 b.style.background = sel ? (v === 'voluntary' ? 'rgba(234,88,12,0.15)' : 'rgba(124,58,237,0.15)') : 'rgba(255,255,255,0.06)';
             });
+        }
+
+        function exportApprovalPdf() {
+            const item = __CURRENT_APPROVAL;
+            if (!item || String(item?.type || '') !== 'offboarding') { showNotification('仅离职单支持导出PDF', 'warning'); return; }
+            const payload = typeof item.payload === 'object' ? item.payload : {};
+            const chain = Array.isArray(item.chain) ? item.chain : [];
+            const statusMap = { pending: '审批中', approved: '已通过', rejected: '已拒绝' };
+            const statusLabel = statusMap[item.status] || item.status || '-';
+            const depTypeMap = { voluntary: '主动离职（辞职）', involuntary: '被动离职（劝退/裁员）' };
+            const depTypeLabel = depTypeMap[payload.departureType] || '-';
+            const createdAt = String(item.created_at || item.createdAt || '').slice(0, 19).replace('T', ' ') || '-';
+            const chainRows = chain.map((s, i) => {
+                const st = s.status === 'approved' ? '✅ 已通过' : s.status === 'rejected' ? '❌ 已拒绝' : s.status === 'pending' ? '⏳ 待审批' : '排队中';
+                const at = s.decidedAt ? String(s.decidedAt).slice(0, 16).replace('T', ' ') : '-';
+                return `<tr><td>${i + 1}</td><td>${escapeHtml(s.assignee || '-')}</td><td>${st}</td><td>${at}</td><td>${escapeHtml(s.note || '')}</td></tr>`;
+            }).join('');
+
+            const printHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>离职申请单</title>
+<style>
+body { font-family: '微软雅黑', Arial, sans-serif; font-size: 13px; color: #1a1a1a; margin: 0; padding: 20px; }
+.pdf-title { text-align: center; font-size: 22px; font-weight: 900; letter-spacing: 4px; margin-bottom: 6px; }
+.pdf-sub { text-align: center; font-size: 12px; color: #666; margin-bottom: 24px; }
+.pdf-section { border: 1px solid #ccc; border-radius: 6px; margin-bottom: 18px; overflow: hidden; }
+.pdf-section-title { background: #f0f0f0; padding: 8px 14px; font-weight: 900; font-size: 13px; border-bottom: 1px solid #ccc; }
+.pdf-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0; }
+.pdf-field { padding: 9px 14px; border-bottom: 1px solid #eee; }
+.pdf-field:nth-child(odd) { border-right: 1px solid #eee; }
+.pdf-label { font-size: 11px; color: #666; margin-bottom: 3px; }
+.pdf-value { font-weight: 700; }
+.pdf-full { grid-column: 1 / -1; padding: 9px 14px; border-bottom: 1px solid #eee; }
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+th, td { border: 1px solid #ddd; padding: 7px 10px; text-align: left; }
+th { background: #f5f5f5; font-weight: 700; }
+.status-badge { display: inline-block; padding: 2px 10px; border-radius: 20px; font-weight: 700; font-size: 12px; }
+.status-pending { background: #fef3c7; color: #d97706; }
+.status-approved { background: #dcfce7; color: #16a34a; }
+.status-rejected { background: #fee2e2; color: #dc2626; }
+.sig-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; padding: 16px 14px 30px; }
+.sig-box { border-bottom: 1px solid #333; padding-bottom: 4px; min-height: 40px; }
+.sig-label { font-size: 11px; color: #666; margin-top: 6px; }
+@media print { body { padding: 10px; } }
+</style></head><body>
+<div class="pdf-title">离 职 申 请 单</div>
+<div class="pdf-sub">EMPLOYEE RESIGNATION APPLICATION · 编号：${escapeHtml(String(item.id || '-'))}</div>
+<div class="pdf-section">
+  <div class="pdf-section-title">基本信息</div>
+  <div class="pdf-grid">
+    <div class="pdf-field"><div class="pdf-label">申请人</div><div class="pdf-value">${escapeHtml(payload.applicantName || item.applicant_username || '-')}</div></div>
+    <div class="pdf-field"><div class="pdf-label">账号</div><div class="pdf-value">${escapeHtml(item.applicant_username || '-')}</div></div>
+    <div class="pdf-field"><div class="pdf-label">门店</div><div class="pdf-value">${escapeHtml(payload.store || '-')}</div></div>
+    <div class="pdf-field"><div class="pdf-label">提交日期</div><div class="pdf-value">${createdAt}</div></div>
+    <div class="pdf-field"><div class="pdf-label">期望离职日期</div><div class="pdf-value">${escapeHtml(payload.resignDate || '-')}</div></div>
+    <div class="pdf-field"><div class="pdf-label">审批状态</div><div class="pdf-value"><span class="status-badge status-${item.status || 'pending'}">${statusLabel}</span></div></div>
+  </div>
+</div>
+<div class="pdf-section">
+  <div class="pdf-section-title">离职详情</div>
+  <div class="pdf-grid">
+    <div class="pdf-field"><div class="pdf-label">离职原因（分类）</div><div class="pdf-value">${escapeHtml(payload.reason || '-')}</div></div>
+    <div class="pdf-field"><div class="pdf-label">离职类型</div><div class="pdf-value">${escapeHtml(depTypeLabel)}</div></div>
+    <div class="pdf-field"><div class="pdf-label">是否与上级沟通</div><div class="pdf-value">${escapeHtml(payload.communicated || '-')}</div></div>
+    <div class="pdf-field"><div class="pdf-label">上级是否面谈</div><div class="pdf-value">${escapeHtml(payload.interviewed || '-')}</div></div>
+    <div class="pdf-field"><div class="pdf-label">直属上级是否同意</div><div class="pdf-value">${escapeHtml(payload.managerAgreed || '-')}</div></div>
+    <div class="pdf-full"><div class="pdf-label">具体说明</div><div style="margin-top:4px; white-space: pre-wrap; line-height:1.6;">${escapeHtml(payload.detail || '-')}</div></div>
+  </div>
+</div>
+<div class="pdf-section">
+  <div class="pdf-section-title">审批流程</div>
+  <table><thead><tr><th>步骤</th><th>审批人</th><th>状态</th><th>审批时间</th><th>备注</th></tr></thead>
+  <tbody>${chainRows}</tbody></table>
+</div>
+<div class="pdf-section">
+  <div class="pdf-section-title">签字确认</div>
+  <div class="sig-row">
+    <div><div class="sig-box"></div><div class="sig-label">申请人签字</div></div>
+    <div><div class="sig-box"></div><div class="sig-label">直属上级签字</div></div>
+    <div><div class="sig-box"></div><div class="sig-label">人事负责人签字</div></div>
+  </div>
+</div>
+<div style="text-align:right; font-size:11px; color:#999; margin-top:8px;">打印时间：${new Date().toLocaleString('zh-CN')} · HRMS 人力资源管理系统</div>
+</body></html>`;
+
+            const w = window.open('', '_blank', 'width=860,height=1100');
+            if (!w) { showNotification('弹窗被拦截，请允许本站弹窗后重试', 'warning'); return; }
+            w.document.write(printHtml);
+            w.document.close();
+            w.focus();
+            setTimeout(() => { try { w.print(); } catch (e) {} }, 400);
         }
 
         function promoAddTrainingPeriodRow(seed) {
@@ -12899,15 +13029,30 @@
                 };
                 isLoggedIn = true;
 
-                // Load shared state so mobile/non-admin can see records.
-                await hrmsLoadStateFromServer();
-                await loadRoleModulesFromServer();
-
+                // 先显示主界面，不阻塞
                 document.getElementById('login').classList.add('hidden');
                 document.getElementById('main-app').classList.remove('hidden');
                 updateUserInfo();
                 restoreSidebarState();
                 showPage(getHomePageName());
+
+                // 后台异步加载state和角色模块
+                hrmsLoadStateFromServer().then(() => {
+                    // state加载完后用最新数据刷新用户信息
+                    try {
+                        const employees2 = HRMS_STORE.getEmployees() || [];
+                        const empInfo2 = employees2.find(e => String(e?.username || '').toLowerCase() === String(u.username || '').toLowerCase()) || {};
+                        if (empInfo2.name) currentUser.name = empInfo2.name;
+                        if (empInfo2.store) currentUser.store = empInfo2.store;
+                        if (empInfo2.role) { const r2 = hrmsNormalizeRoleCode(empInfo2.role); if (r2) currentUser.role = r2; }
+                        if (empInfo2.position) currentUser.position = empInfo2.position;
+                        if (empInfo2.department) currentUser.department = empInfo2.department;
+                        updateUserInfo();
+                    } catch (e) {}
+                }).catch(() => {});
+                loadRoleModulesFromServer().catch(() => {});
+                try { refreshUnreadBadges(); } catch (e) {}
+
                 return true;
             } catch (e) {
                 try { HRMS_API.clearToken(); } catch (e2) {}
@@ -13193,38 +13338,39 @@ async function runDedupCleanup(){const _okDD=await hrmsConfirm({title:'清理重
                     status: 'active'
                 };
                 isLoggedIn = true;
-
-                try {
-                    await hrmsLoadStateFromServer();
-                    const employees2 = HRMS_STORE.getEmployees() || [];
-                    const empInfo2 = employees2.find(e => String(e?.username || '').toLowerCase() === String(u.username || '').toLowerCase()) || {};
-                    const users2 = HRMS_STORE.getUsers() || [];
-                    const userInfo2 = users2.find(x => x && String(x?.username || '').toLowerCase() === String(u.username || '').toLowerCase()) || {};
-                    const stateRole = hrmsNormalizeRoleCode(empInfo2.role || '');
-                    currentUser = {
-                        ...currentUser,
-                        role: (stateRole && stateRole !== ROLES.EMPLOYEE) ? stateRole : currentUser.role,
-                        store: empInfo2.store || currentUser.store || '',
-                        position: empInfo2.position || currentUser.position || '',
-                        department: empInfo2.department || currentUser.department || '',
-                        level: empInfo2.level || empInfo2.jobLevel || empInfo2.rank || currentUser.level || '',
-                        joinDate: empInfo2.joinDate || empInfo2.hireDate || empInfo2.entryDate || currentUser.joinDate || '',
-                        managerUsername: empInfo2.managerUsername || empInfo2.manager || currentUser.managerUsername || ''
-                    };
-                } catch (e) {
-                    // keep going even if sync fails
-                }
-
                 console.log('登录成功:', currentUser);
-                await loadRoleModulesFromServer();
+
+                // 后台异步加载state，不阻塞UI
+                const _loginUser = u;
+                hrmsLoadStateFromServer().then(() => {
+                    try {
+                        const employees2 = HRMS_STORE.getEmployees() || [];
+                        const empInfo2 = employees2.find(e => String(e?.username || '').toLowerCase() === String(_loginUser.username || '').toLowerCase()) || {};
+                        const stateRole = hrmsNormalizeRoleCode(empInfo2.role || '');
+                        if (stateRole && stateRole !== ROLES.EMPLOYEE) currentUser.role = stateRole;
+                        if (empInfo2.store) currentUser.store = empInfo2.store;
+                        if (empInfo2.name) currentUser.name = empInfo2.name;
+                        if (empInfo2.position) currentUser.position = empInfo2.position;
+                        if (empInfo2.department) currentUser.department = empInfo2.department;
+                        updateUserInfo();
+                    } catch (e) {}
+                }).catch(() => {});
+                // 保存登录凭据用于自动登录
+                try {
+                    localStorage.setItem('HRMS_AUTO_USER', username);
+                    localStorage.setItem('HRMS_AUTO_PASS', password);
+                } catch (e) {}
+                // 先显示主界面，不阻塞
                 document.getElementById('login').classList.add('hidden');
                 document.getElementById('main-app').classList.remove('hidden');
                 updateUserInfo();
                 restoreSidebarState();
                 showPage(getHomePageName());
-                try { refreshUnreadBadges(); } catch (e) {}
                 showNotification(`欢迎回来，${currentUser.name}！`, 'success');
                 updateDebug(`用户登录: ${currentUser.name} (${getRoleDisplayName(currentUser.role)})`);
+                // 非阻塞加载角色模块和刷新
+                loadRoleModulesFromServer().catch(() => {});
+                try { refreshUnreadBadges(); } catch (e) {}
             } catch (e) {
                 console.error(e);
                 const msg = String(e?.message || e);
@@ -13948,7 +14094,9 @@ async function runDedupCleanup(){const _okDD=await hrmsConfirm({title:'清理重
                 const canPay = String(it?.type || '') === 'payment'
                     && String(it?.status || '') === 'approved'
                     && (String(currentUser?.role || '') === ROLES.CASHIER || String(currentUser?.role || '') === ROLES.HQ_MANAGER || String(currentUser?.role || '') === ROLES.HR_MANAGER || isAdminUser());
+                const isPaid = String(it?.status || '') === 'paid';
                 const payBtn = canPay ? `<button class="btn" type="button" onclick="payPaymentById('${escapeHtml(id)}')" style="padding: 8px 12px; background: #3b82f6;">付款</button>` : '';
+                const paidBadge = isPaid ? `<span style="padding: 6px 12px; border-radius: 8px; background: rgba(59,130,246,0.15); color: #3b82f6; font-weight: 800; font-size: 12px; border: 1px solid rgba(59,130,246,0.3);">✅ 已付款</span>` : '';
 
                 return `<div style="padding: 12px; border-radius: 12px; background: ${statusColor}; border-left: 4px solid ${borderColor}; margin-bottom: 10px; display:flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; align-items: center;">
                     <div style="min-width:0; flex: 1;">
@@ -13962,10 +14110,12 @@ async function runDedupCleanup(){const _okDD=await hrmsConfirm({title:'清理重
                             <div>项目：<span style="color: rgba(226,232,240,0.92); font-weight: 800;">${escapeHtml(category || '-')}</span></div>
                             <div>紧急程度：<span style="color: rgba(226,232,240,0.92); font-weight: 800;">${escapeHtml(urgency || '-')}</span></div>
                             <div>提交人：<span style="color: rgba(226,232,240,0.92); font-weight: 800;">${escapeHtml(who || '-')}</span></div>
+                            ${(p?.payeeName || p?.payee) ? `<div>收款方：<span style="color: rgba(226,232,240,0.92); font-weight: 800;">${escapeHtml(p?.payeeName || p?.payee || '-')}</span></div>` : ''}
                         </div>
                         ${(p?.note || p?.description) ? `<div style="margin-top:6px; font-size:12px; color:rgba(200,215,230,0.85);">说明：<span style="color:rgba(226,232,240,0.92); font-weight:800;">${escapeHtml(String(p?.note || p?.description || ''))}</span></div>` : ''}
                     </div>
                     <div style="display:flex; gap: 10px; align-items:center;">
+                        ${paidBadge}
                         <button class="btn btn-secondary" type="button" onclick="openApprovalDetailModal('${escapeHtml(id)}')" style="padding: 8px 12px;">查看</button>
                         ${payBtn}
                     </div>
@@ -16516,6 +16666,19 @@ ${r.approvalNote ? '审批备注：' + r.approvalNote : ''}
                 }
             } catch (e) {}
             return u;
+        }
+
+        function hrmsLookupUserRecord(username) {
+            const u = String(username || '').trim();
+            if (!u) return null;
+            const uLower = u.toLowerCase();
+            try {
+                const users = HRMS_STORE.getUsers() || [];
+                const employees = HRMS_STORE.getEmployees() || [];
+                return users.find(x => String(x?.username || '').trim().toLowerCase() === uLower)
+                    || employees.find(x => String(x?.username || '').trim().toLowerCase() === uLower)
+                    || null;
+            } catch (e) { return null; }
         }
 
         function escapeJsString(str) {
@@ -25724,6 +25887,27 @@ ${knowledgeContent.slice(0, 30000)}`;
 
             hrmsSyncSegmentWithSelect('employee-form-status-seg', 'employee-form-status', lock);
 
+            const attSection = document.getElementById('employee-form-attachments-section');
+            if (attSection) {
+                const uploadRow = attSection.querySelector('.btn-secondary');
+                const fileInp = document.getElementById('employee-form-attachment-file');
+                const descInp = document.getElementById('employee-form-attachment-desc');
+                if (lock) {
+                    if (uploadRow) uploadRow.disabled = true;
+                    if (fileInp) fileInp.disabled = true;
+                    if (descInp) descInp.disabled = true;
+                } else {
+                    if (uploadRow) uploadRow.disabled = false;
+                    if (fileInp) fileInp.disabled = false;
+                    if (descInp) descInp.disabled = false;
+                }
+            }
+            if ((realMode === 'edit' || realMode === 'view') && empId) {
+                loadEmployeeAttachments(empId);
+            } else {
+                renderEmployeeAttachments([]);
+            }
+
             modal.classList.add('show');
         }
 
@@ -25888,6 +26072,99 @@ ${knowledgeContent.slice(0, 30000)}`;
             showNotification('证件照片已删除，保存员工信息后生效', 'success');
         }
 
+        function renderEmployeeAttachments(list) {
+            const container = document.getElementById('employee-form-attachments-list');
+            const emptyEl = document.getElementById('employee-form-attachments-empty');
+            if (!container) return;
+            container.innerHTML = '';
+            const arr = Array.isArray(list) ? list : [];
+            if (arr.length === 0) {
+                if (emptyEl) emptyEl.style.display = '';
+                return;
+            }
+            if (emptyEl) emptyEl.style.display = 'none';
+            const base = String(typeof HRMS_API?.baseUrl === 'function' ? HRMS_API.baseUrl() : '').replace(/\/$/, '');
+            arr.forEach(a => {
+                const url = String(a.url || '').trim();
+                const absUrl = url.startsWith('http') ? url : (base + url);
+                const fileName = String(a.original_name || a.filename || a.name || '未命名文件');
+                const desc = String(a.description || a.desc || '');
+                const id = a.id;
+                const uploadedAt = String(a.created_at || a.uploaded_at || '').slice(0, 10) || '';
+                const row = document.createElement('div');
+                row.style.cssText = 'display:flex; align-items:center; gap:10px; padding:8px 10px; background:rgba(255,255,255,0.05); border-radius:8px; border:1px solid rgba(255,255,255,0.08);';
+                row.innerHTML = `
+                    <span style="font-size:18px;">${fileName.toLowerCase().endsWith('.pdf') ? '📄' : (fileName.match(/\.(jpg|jpeg|png|webp|gif)$/i) ? '🖼️' : (fileName.match(/\.(xls|xlsx)$/i) ? '📊' : '📎'))}</span>
+                    <div style="flex:1; min-width:0;">
+                        <div style="font-size:13px; font-weight:600; color:rgba(226,232,240,0.95); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(desc || fileName)}</div>
+                        <div style="font-size:11px; color:rgba(200,215,230,0.5); margin-top:2px;">${escapeHtml(fileName)}${uploadedAt ? ' · ' + uploadedAt : ''}</div>
+                    </div>
+                    <a href="${escapeHtml(absUrl)}" target="_blank" class="btn btn-secondary" style="padding:5px 10px; font-size:12px; white-space:nowrap;">查看</a>
+                    <button type="button" class="btn" style="padding:5px 10px; font-size:12px; background:rgba(239,68,68,0.2); color:#f87171; border:1px solid rgba(239,68,68,0.3); white-space:nowrap;" onclick="deleteEmployeeAttachment(${id})">删除</button>
+                `;
+                container.appendChild(row);
+            });
+        }
+
+        async function loadEmployeeAttachments(empId) {
+            try {
+                const container = document.getElementById('employee-form-attachments-list');
+                const emptyEl = document.getElementById('employee-form-attachments-empty');
+                if (!container) return;
+                if (!empId) { if (emptyEl) emptyEl.style.display = ''; return; }
+                container.innerHTML = '<div style="font-size:12px; color:rgba(200,215,230,0.5);">加载中…</div>';
+                const resp = await HRMS_API.getEmployeeAttachments(empId);
+                renderEmployeeAttachments(Array.isArray(resp) ? resp : (resp?.attachments || resp?.data || []));
+            } catch (e) {
+                const container = document.getElementById('employee-form-attachments-list');
+                if (container) container.innerHTML = '<div style="font-size:12px; color:#f87171;">附件加载失败</div>';
+            }
+        }
+
+        async function uploadEmployeeAttachment() {
+            const modal = document.getElementById('employee-form-modal');
+            const empId = modal?.dataset?.empId || '';
+            if (!empId) { showNotification('请先保存员工信息后再上传附件', 'warning'); return; }
+            const fileEl = document.getElementById('employee-form-attachment-file');
+            const descEl = document.getElementById('employee-form-attachment-desc');
+            const file = fileEl?.files?.[0];
+            if (!file) { showNotification('请选择要上传的文件', 'warning'); return; }
+            if (file.size > 20 * 1024 * 1024) { showNotification('文件超过20MB限制', 'warning'); return; }
+            const desc = String(descEl?.value || '').trim();
+            const fd = new FormData();
+            fd.append('file', file);
+            if (desc) fd.append('description', desc);
+            try {
+                const btn = document.querySelector('#employee-form-attachments-section button[onclick="uploadEmployeeAttachment()"]');
+                if (btn) btn.disabled = true;
+                const resp = await HRMS_API.uploadEmployeeAttachment(empId, fd);
+                if (fileEl) fileEl.value = '';
+                if (descEl) descEl.value = '';
+                showNotification('附件上传成功', 'success');
+                await loadEmployeeAttachments(empId);
+            } catch (e) {
+                showNotification('附件上传失败：' + String(e?.message || e), 'error');
+            } finally {
+                const btn = document.querySelector('#employee-form-attachments-section button[onclick="uploadEmployeeAttachment()"]');
+                if (btn) btn.disabled = false;
+            }
+        }
+
+        async function deleteEmployeeAttachment(attachId) {
+            const ok = await hrmsConfirm({ title: '删除附件', message: '确定要删除该附件吗？此操作不可恢复。', okText: '确认删除', icon: '🗑️' });
+            if (!ok) return;
+            const modal = document.getElementById('employee-form-modal');
+            const empId = modal?.dataset?.empId || '';
+            if (!empId) return;
+            try {
+                await HRMS_API.deleteEmployeeAttachment(empId, attachId);
+                showNotification('附件已删除', 'success');
+                await loadEmployeeAttachments(empId);
+            } catch (e) {
+                showNotification('删除失败：' + String(e?.message || e), 'error');
+            }
+        }
+
         async function submitEmployeeForm() {
             const modal = document.getElementById('employee-form-modal');
             if (!modal) return;
@@ -26019,6 +26296,17 @@ ${knowledgeContent.slice(0, 30000)}`;
                 showNotification('请填写入职日期（必填）', 'warning');
                 return;
             }
+            if (!gender) { showNotification('请选择性别（必填）', 'warning'); return; }
+            if (!birthday) { showNotification('请填写出生日期（必填）', 'warning'); return; }
+            if (!store) { showNotification('请选择门店（必填）', 'warning'); return; }
+            if (!role) { showNotification('请选择角色（必填）', 'warning'); return; }
+            if (!department) { showNotification('请填写部门（必填）', 'warning'); return; }
+            if (!position) { showNotification('请填写岗位（必填）', 'warning'); return; }
+            if (!phone) { showNotification('请填写手机号（必填）', 'warning'); return; }
+            if (!hometown) { showNotification('请填写籍贯（必填）', 'warning'); return; }
+            if (!emergencyContactName) { showNotification('请填写紧急联系人姓名（必填）', 'warning'); return; }
+            if (!emergencyContactPhone) { showNotification('请填写紧急联系人电话（必填）', 'warning'); return; }
+            if (!emergencyContactRelation) { showNotification('请填写紧急联系人关系（必填）', 'warning'); return; }
             if (String(managerUsername || '').toLowerCase() === String(username || '').toLowerCase()) {
                 showNotification('直属上级账号不能与员工账号相同', 'error');
                 return;
@@ -28496,8 +28784,8 @@ ${knowledgeContent.slice(0, 30000)}`;
                 showNotification('开始日期不能晚于结束日期', 'warning');
                 return;
             }
-            if (reason.length < 50) {
-                showNotification('申请理由不少于50字，当前' + reason.length + '字', 'warning');
+            if (!reason) {
+                showNotification('请填写申请理由', 'warning');
                 return;
             }
 
@@ -28753,10 +29041,19 @@ ${knowledgeContent.slice(0, 30000)}`;
                 drSetValue('dr-schedule-remark', '');
             } catch (e) {}
 
+            drSetValue('dr-new-wechat-members', '');
+            try { __DR_WECHAT_MONTH_BASE = 0; drUpdateWechatMonthTotal(); } catch (e) {}
+
             showDailyReportEditor();
             syncDailyReportComputed();
             try { __DR_CURRENT_REPORT = null; } catch (e) {}
             try { applyDailyReportEditorPermissions(); } catch (e) {}
+
+            try {
+                var _cDate = String(document.getElementById('dr-date')?.value || '').trim();
+                var _cStore = String(document.getElementById('dr-store')?.value || '').trim();
+                if (_cDate && _cStore) drFetchAndSetWechatMonthBase(_cDate, _cStore);
+            } catch (e) {}
         }
 
         function closeDailyReportEditor() {
@@ -29251,6 +29548,22 @@ ${knowledgeContent.slice(0, 30000)}`;
         }
 
         var __DR_WECHAT_MONTH_BASE = 0;
+        function drFetchAndSetWechatMonthBase(date, store) {
+            if (!date || !store) { __DR_WECHAT_MONTH_BASE = 0; drUpdateWechatMonthTotal(); return; }
+            console.log('[wechat-base] fetching for', date, store);
+            HRMS_API.getDailyReports({ store: store, date: date, limit: 1 })
+                .then(function(resp) {
+                    var serverBase = Number(resp?.wechat_month_base || 0);
+                    console.log('[wechat-base] server returned base=' + serverBase + ', current=' + __DR_WECHAT_MONTH_BASE);
+                    __DR_WECHAT_MONTH_BASE = serverBase;
+                    drUpdateWechatMonthTotal();
+                })
+                .catch(function(err) {
+                    console.warn('[wechat-base] fetch failed, using local calc', err);
+                    __DR_WECHAT_MONTH_BASE = drCalcWechatMonthBase(date, store);
+                    drUpdateWechatMonthTotal();
+                });
+        }
         function drCalcWechatMonthBase(date, store) {
             var base = 0;
             if (!date || !store) return base;
@@ -29394,7 +29707,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                                 drSetValue('dr-kitchen-support', '');
                                 drSetValue('dr-tomorrow-gross', '');
                                 drSetValue('dr-schedule-remark', '');
-                                try { __DR_WECHAT_MONTH_BASE = drCalcWechatMonthBase(date, store); drUpdateWechatMonthTotal(); } catch(_e3) {}
+                                try { __DR_WECHAT_MONTH_BASE = drCalcWechatMonthBase(date, store); drUpdateWechatMonthTotal(); drFetchAndSetWechatMonthBase(date, store); } catch(_e3) {}
                             } catch (e2) {}
                             syncDailyReportComputed();
                         }
@@ -29939,6 +30252,8 @@ ${knowledgeContent.slice(0, 30000)}`;
                 else {
                     try { drResetStaffState(); } catch (e) {}
                     try { __DR_PHOTOS = []; renderDailyReportPhotos(); } catch (e) {}
+                    // 新建日报：从服务器获取本月企微累计基数
+                    try { __DR_WECHAT_MONTH_BASE = 0; drUpdateWechatMonthTotal(); drFetchAndSetWechatMonthBase(dt, st); } catch(_e) { __DR_WECHAT_MONTH_BASE = 0; }
                     syncDailyReportComputed();
                 }
                 try { __DR_CURRENT_REPORT = one; } catch (e) {}
@@ -29997,9 +30312,10 @@ ${knowledgeContent.slice(0, 30000)}`;
                 drSetValue('dr-bad-meituan', data?.badReviews?.meituan);
                 drSetValue('dr-bad-eleme', data?.badReviews?.eleme);
                 drSetValue('dr-new-wechat-members', data?.new_wechat_members);
-                try { __DR_WECHAT_MONTH_BASE = drCalcWechatMonthBase(item?.date, item?.store); } catch(_e) { __DR_WECHAT_MONTH_BASE = 0; }
-                { const _sv = Number(data?.wechat_month_total || 0); const _today = Math.max(0, Number(data?.new_wechat_members || 0)); if (_sv > 0 && _sv - _today > __DR_WECHAT_MONTH_BASE) __DR_WECHAT_MONTH_BASE = _sv - _today; }
+                try { __DR_WECHAT_MONTH_BASE = drCalcWechatMonthBase(r?.date, r?.store); } catch(_e) { __DR_WECHAT_MONTH_BASE = 0; }
+                { const _sv = Number(data?.wechat_month_total || 0); const _today = Math.max(0, Number(data?.new_wechat_members || 0)); if (_sv > 0 && _sv - _today >= 0) __DR_WECHAT_MONTH_BASE = _sv - _today; }
                 drUpdateWechatMonthTotal();
+                try { drFetchAndSetWechatMonthBase(r?.date, r?.store); } catch(_e2) {}
                 drSetValue('dr-recharge-count', data?.recharge?.count);
                 drSetValue('dr-recharge-amt', data?.recharge?.amount);
                 // 目标字段：从系统设置读取，只读显示（只有毛利率目标）
@@ -33439,9 +33755,9 @@ ${knowledgeContent.slice(0, 30000)}`;
             attStartGps();
             attLoadTodayRecords();
             attPopulateStoreSelects();
-            // show location tab for admin
+            // show location tab for admin and store_manager
             const locBtn = document.getElementById('att-tab-location-btn');
-            if (locBtn) locBtn.style.display = (currentUser?.role === 'admin') ? '' : 'none';
+            if (locBtn) locBtn.style.display = (['admin','store_manager','hq_manager'].includes(currentUser?.role)) ? '' : 'none';
             // default dates for records
             const now = new Date();
             const y = now.getFullYear(), m = String(now.getMonth() + 1).padStart(2, '0'), d = String(now.getDate()).padStart(2, '0');
@@ -33503,8 +33819,20 @@ ${knowledgeContent.slice(0, 30000)}`;
                     (err) => {
                         __attGpsError = err.message || '定位失败';
                         __attNoGps = true;
-                        if (gpsContainer) gpsContainer.style.display = 'none';
-                        if (gpsText) { gpsText.textContent = ''; gpsText.style.display = 'none'; }
+                        if (gpsContainer) { gpsContainer.style.display = ''; gpsContainer.style.background = 'rgba(220,38,38,0.1)'; gpsContainer.style.borderColor = 'rgba(220,38,38,0.3)'; }
+                        if (gpsText) {
+                            gpsText.style.display = '';
+                            const errCode = err.code;
+                            if (errCode === 1) {
+                                gpsText.innerHTML = '⚠️ 定位权限被拒绝，请在浏览器设置中允许定位，或直接打卡（将标注"无定位"）';
+                            } else if (errCode === 2) {
+                                gpsText.innerHTML = '⚠️ 无法获取位置信号，可直接打卡（将标注"无定位"）';
+                            } else {
+                                gpsText.innerHTML = '⚠️ 定位超时，可直接打卡（将标注"无定位"）';
+                            }
+                            gpsText.style.color = 'rgba(248,113,113,0.9)';
+                            gpsText.style.fontSize = '12px';
+                        }
                     },
                     { enableHighAccuracy: true, timeout: 15000, maximumAge: 5000 }
                 );
@@ -33551,28 +33879,30 @@ ${knowledgeContent.slice(0, 30000)}`;
         }
 
         async function attDoCheckin(type) {
-            if ((__attGpsLat == null || __attGpsLng == null) && !__attNoGps) {
-                showNotification('请等待定位完成后再打卡', 'warning');
+            // 强制GPS：未获取且未标记无GPS时，阻止打卡
+            if (__attGpsLat == null || __attGpsLng == null) {
+                if (!__attNoGps) {
+                    showNotification('⚠️ GPS定位尚未获取，请允许浏览器使用位置权限后再打卡', 'warning');
+                    return;
+                }
+                // __attNoGps=true代表已明确失败/无权限，仍阻止，要求用户在浏览器开启定位
+                showNotification('⚠️ 打卡必须开启GPS定位权限。请在浏览器设置中允许本网站使用位置，刷新后重试', 'error');
                 return;
             }
-            let faceMatch = false;
-            let faceScore = 0;
-            let photoUrl = null;
-            if (__attCameraStream) {
-                const photo = attCapturePhoto();
-                if (photo) {
-                    photoUrl = photo;
-                    // Simple face detection: check if image has enough non-uniform pixels (basic presence check)
-                    // In production, this would call a face recognition API
-                    faceMatch = true;
-                    faceScore = 0.95;
-                }
+            // 强制摄像头：摄像头未开启则阻止打卡
+            if (!__attCameraStream) {
+                showNotification('⚠️ 打卡必须开启摄像头并拍照，请点击「开启摄像头」后再打卡', 'warning');
+                return;
             }
-            if (!faceMatch && !__attCameraStream) {
-                // Allow check-in without camera but mark as face_fail
-                faceMatch = false;
-                faceScore = 0;
+            // 强制拍照
+            const photo = attCapturePhoto();
+            if (!photo) {
+                showNotification('⚠️ 拍照失败，请确保摄像头正常工作后重试', 'error');
+                return;
             }
+            let faceMatch = true;
+            let faceScore = 0.95;
+            let photoUrl = photo;
             const btn = type === 'clock_out' ? document.getElementById('att-clockout-btn') : document.getElementById('att-clockin-btn');
             if (btn) { btn.disabled = true; btn.textContent = '提交中...'; }
             try {
@@ -33583,7 +33913,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                     noGps: __attNoGps,
                     faceMatch,
                     faceScore,
-                    photoUrl: null,
+                    photoUrl: photoUrl,
                     store: currentUser?.store || ''
                 });
                 const statusLabel = (resp?.record?.status === 'normal' || resp?.record?.status === 'no_gps') ? '正常' :
@@ -33619,7 +33949,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                         const typeLabel = r.type === 'clock_in' ? '🟢 上班' : '🔴 下班';
                         const statusColor = (r.status === 'normal' || r.status === 'no_gps') ? 'rgba(34,197,94,0.8)' : 'rgba(234,179,8,0.8)';
                         const statusLabel = (r.status === 'normal' || r.status === 'no_gps') ? '正常' : r.status === 'face_fail' ? '人脸异常' : r.status === 'no_store_location' ? '未设定位' : r.status;
-                        const dist = r.distance_meters != null ? `${Math.round(r.distance_meters)}m` : '';
+                        const dist = r.distance_meters != null ? `${Math.round(r.distance_meters)}米` : '';
                         return `<div style="display:flex; justify-content:space-between; align-items:center; padding:6px 8px; border-radius:6px; background:rgba(255,255,255,0.03); margin-bottom:4px; font-size:12px;">
                             <span>${typeLabel} ${time}</span>
                             <span style="color:${statusColor};">${statusLabel} · ${dist}</span>
@@ -33702,7 +34032,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                 const t = new Date(r.check_time);
                 const timeStr = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')} ${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`;
                 const typeLabel = r.type === 'clock_in' ? '<span style="color:rgba(34,197,94,0.9); font-weight:800;">上班</span>' : '<span style="color:rgba(239,68,68,0.9); font-weight:800;">下班</span>';
-                const dist = r.distance_meters != null ? Math.round(r.distance_meters) + 'm' : '-';
+                const dist = r.distance_meters != null ? Math.round(r.distance_meters) + '米' : '-';
                 const statusLabel = statusMap[r.status] || r.status;
                 const statusColor = r.status === 'normal' || r.status === 'confirmed' || r.status === 'no_gps' ? 'rgba(34,197,94,0.9)' : 'rgba(234,179,8,0.9)';
                 const canConfirm = (currentUser?.role === 'admin' || currentUser?.role === 'hq_manager' || currentUser?.role === 'store_manager' || currentUser?.role === 'hr_manager') && r.status !== 'normal' && r.status !== 'confirmed';
@@ -33772,7 +34102,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                     const t = new Date(r.check_time);
                     const timeStr = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')} ${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`;
                     const typeLabel = r.type === 'clock_in' ? '<span style="color:rgba(34,197,94,0.9);">上班</span>' : '<span style="color:rgba(239,68,68,0.9);">下班</span>';
-                    const dist = r.distance_meters != null ? Math.round(r.distance_meters) : '-';
+                    const dist = r.distance_meters != null ? Math.round(r.distance_meters) + '米' : '-';
                     const faceLabel = r.face_match ? '<span style="color:rgba(34,197,94,0.8);">✓</span>' : '<span style="color:rgba(239,68,68,0.8);">✗</span>';
                     const statusMap = { normal: '正常', face_fail: '人脸异常', out_of_range: '超出范围', no_store_location: '未设定位', no_gps: '正常', confirmed: '已确认' };
                     const statusLabel = statusMap[r.status] || r.status;
@@ -34075,21 +34405,27 @@ ${knowledgeContent.slice(0, 30000)}`;
         }
 
         async function attSetStoreLocationManual(storeName) {
-            const input = prompt(`请输入门店"${storeName}"的GPS坐标（格式：纬度,经度）\n例如：31.230416,121.473701`);
+            const input = prompt(`请输入门店"${storeName}"的GPS坐标（格式：经度,纬度）\n例如：121.473701,31.230416`);
             if (!input) return;
             const parts = input.split(',').map(s => Number(s.trim()));
             if (parts.length !== 2 || !Number.isFinite(parts[0]) || !Number.isFinite(parts[1])) {
-                showNotification('坐标格式错误，请输入 纬度,经度', 'error');
+                showNotification('坐标格式错误，请输入 经度,纬度', 'error');
+                return;
+            }
+            const inputLng = parts[0]; // 第一个数是经度
+            const inputLat = parts[1]; // 第二个数是纬度
+            if (inputLat < -90 || inputLat > 90 || inputLng < -180 || inputLng > 180) {
+                showNotification('坐标范围错误：经度-180~180，纬度-90~90', 'error');
                 return;
             }
             const addr = prompt('请输入门店地址（可选）') || '';
             try {
-                await HRMS_API.setStoreLocation(storeName, { latitude: parts[0], longitude: parts[1], address: addr });
+                await HRMS_API.setStoreLocation(storeName, { latitude: inputLat, longitude: inputLng, address: addr });
                 showNotification('门店定位已更新', 'success');
                 const state = HRMS_STORE.ensure();
                 const stores = Array.isArray(state.stores) ? state.stores : [];
                 const idx = stores.findIndex(s => s.name === storeName);
-                if (idx >= 0) { stores[idx].latitude = parts[0]; stores[idx].longitude = parts[1]; if (addr) stores[idx].address = addr; HRMS_STORE.set(state); }
+                if (idx >= 0) { stores[idx].latitude = inputLat; stores[idx].longitude = inputLng; if (addr) stores[idx].address = addr; HRMS_STORE.set(state); }
                 attLoadStoreLocations();
             } catch (e) {
                 showNotification('设置失败: ' + (e?.message || e), 'error');
@@ -34113,6 +34449,7 @@ ${knowledgeContent.slice(0, 30000)}`;
                 isLoggedIn = false;
                 currentUser = null;
                 try { HRMS_API.clearToken(); } catch (e) {}
+                try { localStorage.removeItem('HRMS_AUTO_USER'); localStorage.removeItem('HRMS_AUTO_PASS'); } catch (e) {}
                 
                 document.getElementById('main-app').classList.add('hidden');
                 document.getElementById('login').classList.remove('hidden');
@@ -34932,37 +35269,11 @@ ${knowledgeContent.slice(0, 30000)}`;
 
             try {
                 if ('serviceWorker' in navigator) {
-                    // NUCLEAR OPTION: Force unregister ALL service workers and clear ALL caches
-                    const forceVersion = 'hrms-pwa-v154';
-                    const needsNuke = !sessionStorage.getItem('hrms-cache-nuked-v154');
-                    
-                    if (needsNuke) {
-                        console.log('[HRMS] Nuclear cache clear initiated...');
-                        // Unregister ALL service workers
-                        navigator.serviceWorker.getRegistrations().then(regs => {
-                            regs.forEach(reg => reg.unregister());
-                        }).catch(() => {});
-                        
-                        // Delete ALL caches
-                        if (typeof caches !== 'undefined') {
-                            caches.keys().then(keys => {
-                                Promise.all(keys.map(k => caches.delete(k))).then(() => {
-                                    sessionStorage.setItem('hrms-cache-nuked-v153', '1');
-                                    console.log('[HRMS] All caches cleared, reloading...');
-                                    window.location.reload();
-                                });
-                            }).catch(() => {});
-                        } else {
-                            sessionStorage.setItem('hrms-cache-nuked-v153', '1');
-                            window.location.reload();
-                        }
-                        return;
-                    }
-                    
-                    // Normal SW registration after nuke
+                    // Clean old caches, keep current version only
+                    const currentCache = 'hrms-pwa-v200';
                     if (typeof caches !== 'undefined') {
                         caches.keys().then(keys => {
-                            keys.forEach(k => { if (!k.startsWith(forceVersion)) caches.delete(k); });
+                            keys.forEach(k => { if (k !== currentCache) caches.delete(k); });
                         }).catch(() => {});
                     }
                     navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }).then((reg) => {
@@ -34978,12 +35289,6 @@ ${knowledgeContent.slice(0, 30000)}`;
                             }
                         });
                         try { reg.update(); } catch (e) {}
-                        try {
-                            const reloadOnControllerChange = () => {
-                                try { window.location.reload(); } catch (e) {}
-                            };
-                            navigator.serviceWorker.addEventListener('controllerchange', reloadOnControllerChange, { once: true });
-                        } catch (e) {}
                     }).catch(() => {});
                 }
             } catch (e) {}
@@ -34991,6 +35296,19 @@ ${knowledgeContent.slice(0, 30000)}`;
             (async () => {
                 const ok = await hrmsTryRestoreSessionOnLoad();
                 if (!ok) {
+                    // 尝试自动登录（如果有保存的凭据）
+                    const savedU = localStorage.getItem('HRMS_AUTO_USER');
+                    const savedP = localStorage.getItem('HRMS_AUTO_PASS');
+                    if (savedU && savedP) {
+                        try {
+                            document.getElementById('username').value = savedU;
+                            document.getElementById('password').value = savedP;
+                            await doLogin(new Event('submit'));
+                            return;
+                        } catch (e) {
+                            console.log('[auto-login] failed:', e?.message);
+                        }
+                    }
                     showNotification('系统已就绪，请登录', 'info');
                     renderTestAccounts();
                 }
