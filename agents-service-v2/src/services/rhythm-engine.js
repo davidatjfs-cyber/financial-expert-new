@@ -12,6 +12,8 @@ import cron from 'node-cron';
 import { query } from '../utils/db.js';
 import { logger } from '../utils/logger.js';
 import { runAnomalyChecks } from './anomaly-engine.js';
+import { pushAnomalyAlert, pushRhythmReport } from './feishu-client.js';
+import { checkCampaignProgress, evaluateCompletedCampaigns } from './agent-collaboration.js';
 
 // ─── 获取活跃门店列表 ───
 async function getActiveStores() {
@@ -78,6 +80,14 @@ export async function morningStandup() {
 
     await logRhythm('morning_standup', 'success', summary);
     logger.info({ pendingTasks: summary.pendingTasks, anomalies: summary.anomalies.length, blockers: summary.blockers.length }, '晨检完成');
+
+    // ── 主动推送晨检报告 ──
+    const lines = ['🌅 晨检报告'];
+    if (summary.anomalies.length) lines.push(`昨日新增异常 ${summary.anomalies.length} 条: ` + summary.anomalies.slice(0, 5).map(a => `${a.store}/${a.anomaly_key}(${a.severity})`).join(', '));
+    lines.push(`未闭环任务: ${summary.pendingTasks} | 阻塞事项: ${summary.blockers.length}`);
+    if (summary.blockers.length) lines.push('⚠️ 阻塞: ' + summary.blockers.slice(0, 3).map(b => `${b.store}/${b.title}`).join(', '));
+    await pushRhythmReport(lines.join('\n')).catch(e => logger.warn({ err: e?.message }, 'push morning failed'));
+
     return summary;
   } catch (err) {
     logger.error({ err }, 'Morning standup failed');
@@ -110,6 +120,20 @@ export async function patrol(waveLabel = 'am') {
 
     await logRhythm(`patrol_${waveLabel}`, 'success', summary);
     logger.info({ triggered: triggered.length, redChannel: redChannel.length }, `巡检(${waveLabel})完成`);
+
+    // ── 主动推送异常告警到门店负责人 ──
+    for (const t of triggered) {
+      await pushAnomalyAlert(t.store, t.anomalyKey, t.severity, t.detail || '').catch(() => {});
+    }
+    // ── 推送红色通道告警到HQ ──
+    if (redChannel.length) {
+      await pushRhythmReport('🚨 红色通道告警 ' + redChannel.length + '条\n' + redChannel.slice(0, 5).map(a => `[${a.type}] ${a.store||''} ${a.anomaly||a.task?.title||''}`).join('\n')).catch(() => {});
+    }
+    // ── 巡检摘要到HQ ──
+    if (triggered.length) {
+      await pushRhythmReport(`🔍 巡检(${waveLabel}) ${stores.length}店 | 触发${triggered.length}条异常`).catch(() => {});
+    }
+
     return summary;
   } catch (err) {
     logger.error({ err }, `Patrol ${waveLabel} failed`);
@@ -207,6 +231,31 @@ export async function endOfDay() {
 
     await logRhythm('end_of_day', 'success', summary);
     logger.info(summary, '日终对账完成');
+
+    // ── 检查营销活动进度 ──
+    let campaignResults = [];
+    try {
+      campaignResults = await checkCampaignProgress();
+      summary.activeCampaigns = campaignResults.length;
+    } catch (e) { logger.warn({ err: e?.message }, 'campaign progress check failed'); }
+
+    // ── P1: 评估已完成的营销活动效果 → 写入记忆 ──
+    let evalResults = [];
+    try {
+      evalResults = await evaluateCompletedCampaigns();
+      summary.evaluatedCampaigns = evalResults.length;
+    } catch (e) { logger.warn({ err: e?.message }, 'campaign evaluation failed'); }
+
+    // ── 主动推送日终报告 ──
+    const eodLines = [
+      '🌙 日终报告',
+      `闭环率: ${closeRate}% (${closedCnt}/${totalCnt})`,
+      `逾期任务: ${overdueCnt} | 证据缺失: ${summary.noEvidenceTasks}`,
+    ];
+    if (campaignResults.length) eodLines.push(`📢 活跃营销活动: ${campaignResults.length}个 — ` + campaignResults.slice(0, 3).map(c => `${c.store}/${c.title}(${c.progress})`).join(', '));
+    if (summary.tomorrowRisks.length) eodLines.push('⚠️ 明日风险: ' + summary.tomorrowRisks.slice(0, 5).map(r => `${r.store}/${r.anomaly_key}`).join(', '));
+    await pushRhythmReport(eodLines.join('\n')).catch(e => logger.warn({ err: e?.message }, 'push eod failed'));
+
     return summary;
   } catch (err) {
     logger.error({ err }, 'End of day failed');
@@ -256,6 +305,12 @@ export async function weeklyReport() {
 
   await logRhythm('weekly_report', 'success', summary);
   logger.info({ triggered: triggered.length }, '周报生成完成');
+
+  // ── 主动推送周报 ──
+  const wkLines = ['📊 周报摘要', `本周检测: ${summary.weeklyChecks} | 触发异常: ${summary.triggered}`];
+  if (summary.top3ProblemStores?.length) wkLines.push('问题门店Top3: ' + summary.top3ProblemStores.map(s => `${s.store}(${s.anomaly_count}次)`).join(', '));
+  await pushRhythmReport(wkLines.join('\n')).catch(() => {});
+
   return summary;
 }
 
@@ -292,6 +347,10 @@ export async function monthlyEvaluation() {
 
   await logRhythm('monthly_evaluation', 'success', summary);
   logger.info(summary, '月度评估完成');
+
+  // ── 主动推送月度评估 ──
+  await pushRhythmReport(`📈 月度评估\n检测: ${summary.monthlyChecks} | 触发: ${summary.triggered}\n门店KPI: ${(summary.kpiByStore||[]).length}店已汇总`).catch(() => {});
+
   return summary;
 }
 
