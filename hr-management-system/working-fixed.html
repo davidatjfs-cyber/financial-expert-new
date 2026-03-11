@@ -2807,6 +2807,7 @@
                 display: flex;
                 flex-direction: column;
                 max-height: 90dvh !important;
+                overflow-y: hidden !important;
             }
 
             .ui-modal .ui-form-grid {
@@ -7011,6 +7012,16 @@
                             <div style="font-size:12px; color:rgba(200,215,230,0.82);">折算补贴</div>
                             <div id="points-month-amount" style="margin-top:4px; font-size:24px; font-weight:900; color:#f59e0b; text-shadow: 0 2px 12px rgba(245,158,11,0.28);">¥0.00</div>
                         </div>
+                    </div>
+                </div>
+
+                <div id="points-ranking-card" class="card" style="margin-bottom:12px; border-radius:16px; border:1px solid rgba(250,204,21,0.18); background: radial-gradient(120% 120% at 80% 0%, rgba(250,204,21,0.08), rgba(15,23,42,0.95) 60%); box-shadow: 0 12px 28px rgba(0,0,0,0.28), inset 0 0 0 1px rgba(255,255,255,0.03);">
+                    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px;">
+                        <h4 style="margin:0; font-size:15px; color:rgba(254,240,138,0.95); font-weight:800; letter-spacing:0.3px;">🏆 本月积分排行榜</h4>
+                        <div id="points-my-rank-badge" style="font-size:12px; color:rgba(250,204,21,0.9); font-weight:700; padding:4px 10px; border-radius:20px; background:rgba(250,204,21,0.12); border:1px solid rgba(250,204,21,0.25); display:none;"></div>
+                    </div>
+                    <div id="points-ranking-list" style="max-height:320px; overflow-y:auto;">
+                        <div style="color:rgba(200,215,230,0.6); font-size:12px;">加载中...</div>
                     </div>
                 </div>
 
@@ -11582,6 +11593,14 @@
             async getMyPoints() {
                 return this.request('/api/points/my', { method: 'GET' });
             },
+            async getPointsRanking(params) {
+                const p = params && typeof params === 'object' ? params : {};
+                const q = new URLSearchParams();
+                if (p.month) q.set('month', String(p.month));
+                if (p.store) q.set('store', String(p.store));
+                const qs = q.toString();
+                return this.request('/api/points/ranking' + (qs ? ('?' + qs) : ''), { method: 'GET' });
+            },
             async getPointRecords(params) {
                 const p = params && typeof params === 'object' ? params : {};
                 const q = new URLSearchParams();
@@ -12072,6 +12091,7 @@
                     }
                 }
                 await queryPointsAdminRecords();
+                loadPointsRanking();
                 return;
             }
 
@@ -12121,8 +12141,61 @@
                         </div>`;
                     }).join('');
                 }
+                loadPointsRanking();
             } catch (e) {
                 if (listEl) listEl.innerHTML = '<div style="color:#ef4444;">加载失败：' + escapeHtml(String(e?.message || e)) + '</div>';
+            }
+        }
+
+        async function loadPointsRanking() {
+            const rankListEl = document.getElementById('points-ranking-list');
+            const myRankBadge = document.getElementById('points-my-rank-badge');
+            const rankCard = document.getElementById('points-ranking-card');
+            if (!rankListEl || !rankCard) return;
+            try {
+                const store = String(currentUser?.store || '').trim();
+                const resp = await fetch('/api/points/ranking?store=' + encodeURIComponent(store), {
+                    headers: { 'Authorization': 'Bearer ' + (localStorage.getItem('hrms_token') || '') }
+                });
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                const data = await resp.json();
+                const ranking = Array.isArray(data?.ranking) ? data.ranking : [];
+
+                if (myRankBadge && data.myRank) {
+                    myRankBadge.style.display = '';
+                    myRankBadge.textContent = '我的排名：第' + data.myRank + '名';
+                } else if (myRankBadge) {
+                    myRankBadge.style.display = 'none';
+                }
+
+                if (!ranking.length) {
+                    rankListEl.innerHTML = '<div style="color:rgba(200,215,230,0.6); font-size:12px; padding:8px 0;">本月暂无积分数据</div>';
+                    return;
+                }
+
+                const myUsername = String(currentUser?.username || '').trim().toLowerCase();
+                rankListEl.innerHTML = ranking.slice(0, 30).map(item => {
+                    const isMe = item.username === myUsername;
+                    const rankNum = item.rank;
+                    let medal = '';
+                    if (rankNum === 1) medal = '🥇';
+                    else if (rankNum === 2) medal = '🥈';
+                    else if (rankNum === 3) medal = '🥉';
+                    const bgStyle = isMe ? 'background:rgba(250,204,21,0.12); border:1px solid rgba(250,204,21,0.3);' : 'background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.06);';
+                    const nameColor = isMe ? 'color:rgba(254,240,138,0.95); font-weight:800;' : 'color:rgba(226,232,240,0.92);';
+                    const rankColor = rankNum <= 3 ? 'color:#facc15; font-weight:900;' : 'color:rgba(200,215,230,0.7); font-weight:700;';
+                    return `<div style="display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:10px; margin-bottom:4px; ${bgStyle}">
+                        <div style="min-width:28px; text-align:center; font-size:${rankNum <= 3 ? '18px' : '14px'}; ${rankColor}">${medal || rankNum}</div>
+                        <div style="flex:1; min-width:0;">
+                            <div style="font-size:13px; ${nameColor} white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(item.name || item.username)}${isMe ? ' <span style="font-size:10px; opacity:0.7;">(我)</span>' : ''}</div>
+                            ${(item.position || item.store) ? '<div style="font-size:10px; color:rgba(200,215,230,0.5); margin-top:1px;">' + escapeHtml([item.position, item.store].filter(Boolean).join(' · ')) + '</div>' : ''}
+                        </div>
+                        <div style="font-size:15px; font-weight:900; color:${rankNum <= 3 ? '#facc15' : 'rgba(245,158,11,0.9)'}; text-shadow:0 1px 4px rgba(250,204,21,0.2);">${item.totalPoints}<span style="font-size:10px; font-weight:500; opacity:0.7;">分</span></div>
+                    </div>`;
+                }).join('');
+            } catch (e) {
+                rankListEl.innerHTML = '<div style="color:rgba(200,215,230,0.5); font-size:12px;">排行榜加载失败</div>';
+                console.warn('loadPointsRanking error:', e);
             }
         }
 
@@ -12404,10 +12477,16 @@
                     if (!base) return s;
                     return s.startsWith('/') ? (base + s) : (base + '/' + s);
                 };
+                const pointsApplicantName = String(payload?.applicantName || '').trim() || hrmsDisplayName(item?.applicant_username);
+                const pointsApplicantPosition = String(payload?.applicantPosition || '').trim();
+                const pointsApplicantDept = String(payload?.applicantDepartment || '').trim();
                 payloadHtml = `
                     <div style="margin-top: 14px; padding: 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.03);">
                         <div style="font-weight: 900;">积分申请信息</div>
-                        <div style="margin-top: 10px; color: rgba(200,215,230,0.85);">事项：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(payload?.itemName || '-')}</span></div>
+                        <div style="margin-top: 10px; color: rgba(200,215,230,0.85);">申请人：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(pointsApplicantName || '-')}</span></div>
+                        ${pointsApplicantPosition ? `<div style="margin-top: 8px; color: rgba(200,215,230,0.85);">岗位：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(pointsApplicantPosition)}</span></div>` : ''}
+                        ${pointsApplicantDept ? `<div style="margin-top: 8px; color: rgba(200,215,230,0.85);">部门：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(pointsApplicantDept)}</span></div>` : ''}
+                        <div style="margin-top: 10px; border-top: 1px solid rgba(255,255,255,0.06); padding-top: 10px; color: rgba(200,215,230,0.85);">事项：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(payload?.itemName || '-')}</span></div>
                         <div style="margin-top: 8px; color: rgba(200,215,230,0.85);">积分：<span style="color: #facc15; font-weight: 900;">${pts}分</span></div>
                         <div style="margin-top: 8px; color: rgba(200,215,230,0.85);">折算金额：<span style="color: #f59e0b; font-weight: 900;">¥${amount.toFixed(2)}</span></div>
                         <div style="margin-top: 8px; color: rgba(200,215,230,0.85);">门店：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(payload?.store || '-')}</span></div>
@@ -15177,8 +15256,9 @@ ${r.approvalNote ? '审批备注：' + r.approvalNote : ''}
             const next = anns.filter(a => String(a.id) !== id);
             data.announcements = next;
             HRMS_STORE.set(data);
+            try { await HRMS_API.saveState(HRMS_STORE.ensure()); } catch (e) { console.warn('state save after deleteAnnouncement failed', e); }
             try { loadProfileData(); } catch (e) {}
-            showNotification('已删除', 'success');
+            showNotification('已删除，所有员工将不再看到该通知', 'success');
         }
 
         async function deleteKnowledgeItem(itemId) {

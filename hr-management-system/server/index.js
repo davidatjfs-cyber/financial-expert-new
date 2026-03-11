@@ -2089,6 +2089,57 @@ app.get('/api/points/records', authRequired, async (req, res) => {
   }
 });
 
+app.get('/api/points/ranking', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+
+  const month = safeMonthOnly(req.query?.month) || new Date().toISOString().slice(0, 7);
+  const store = String(req.query?.store || '').trim();
+
+  try {
+    const state0 = (await getSharedState()) || {};
+    let list = Array.isArray(state0.pointRecords) ? state0.pointRecords.slice() : [];
+    list = list.filter(x => String(x?.approvedAt || x?.createdAt || '').slice(0, 7) === month);
+    if (store) list = list.filter(x => String(x?.store || '').trim() === store);
+
+    const map = {};
+    for (const r of list) {
+      const u = String(r?.username || '').trim().toLowerCase();
+      const name = String(r?.name || '').trim() || u;
+      const pts = Number(r?.points || 0);
+      if (!u) continue;
+      if (!map[u]) map[u] = { username: u, name, store: String(r?.store || '').trim(), position: '', totalPoints: 0, count: 0 };
+      map[u].totalPoints += pts;
+      map[u].count += 1;
+      if (name && name !== u) map[u].name = name;
+    }
+
+    // enrich position from employees
+    const employees = Array.isArray(state0.employees) ? state0.employees : [];
+    for (const key of Object.keys(map)) {
+      const emp = employees.find(e => String(e?.username || '').trim().toLowerCase() === key);
+      if (emp) {
+        if (!map[key].name || map[key].name === key) map[key].name = String(emp?.name || '').trim() || key;
+        map[key].position = String(emp?.position || '').trim();
+        if (!map[key].store) map[key].store = String(emp?.store || '').trim();
+      }
+    }
+
+    const ranking = Object.values(map).sort((a, b) => b.totalPoints - a.totalPoints || a.name.localeCompare(b.name, 'zh-Hans-CN'));
+    let rank = 0, prevPts = -1;
+    for (let i = 0; i < ranking.length; i++) {
+      if (ranking[i].totalPoints !== prevPts) { rank = i + 1; prevPts = ranking[i].totalPoints; }
+      ranking[i].rank = rank;
+      ranking[i].amount = Number((ranking[i].totalPoints * 0.5).toFixed(2));
+    }
+
+    const myEntry = ranking.find(x => x.username === username.toLowerCase());
+    return res.json({ month, ranking, myRank: myEntry?.rank || null, myPoints: myEntry?.totalPoints || 0, total: ranking.length });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
 app.get('/api/payments/budget-summary', authRequired, async (req, res) => {
   const username = String(req.user?.username || '').trim();
   if (!username) return res.status(400).json({ error: 'missing_user' });
@@ -2199,7 +2250,7 @@ app.post('/api/approvals', authRequired, async (req, res) => {
           return res.status(409).json({ error: 'duplicate_pending', id: existing.rows[0].id });
         }
       }
-    } else if (type !== 'payment') {
+    } else if (type !== 'payment' && type !== 'points' && type !== 'reward_punishment') {
       const existing = await pool.query(
         'select id from approval_requests where lower(applicant_username) = lower($1) and type = $2 and status = $3 limit 1',
         [username, type, 'pending']
@@ -2317,6 +2368,9 @@ app.post('/api/approvals', authRequired, async (req, res) => {
         const rulePoints = safeNumber(rule?.points);
         if (rulePoints == null || rulePoints <= 0) return res.status(400).json({ error: 'invalid_rule_points' });
         payload.store = applicantStore;
+        payload.applicantName = String(applicant?.name || '').trim() || username;
+        payload.applicantPosition = String(applicant?.position || '').trim() || '';
+        payload.applicantDepartment = String(applicant?.department || '').trim() || '';
         payload.itemName = String(rule?.itemName || payload?.itemName || '').trim() || '积分事项';
         payload.points = rulePoints;
         payload.ruleId = ruleId;
@@ -3528,9 +3582,9 @@ app.post('/api/checkin', authRequired, async (req, res) => {
         if (sLat && sLng) {
           distMeters = haversineDistance(lat, lng, sLat, sLng);
           distMeters = Math.round(distMeters * 100) / 100;
-          if (distMeters > 300) {
+          if (distMeters > 50) {
             status = 'out_of_range';
-            return res.status(400).json({ error: 'out_of_range', distance: Math.round(distMeters), message: `您距离门店${Math.round(distMeters)}米，超出打卡范围（300米）` });
+            return res.status(400).json({ error: 'out_of_range', distance: Math.round(distMeters), message: `您距离门店${Math.round(distMeters)}米，超出打卡范围（50米）` });
           }
         } else {
           status = 'no_store_location';
@@ -9346,6 +9400,7 @@ app.get('/api/points/my', authRequired, async (req, res) => {
   }
 });
 
+
 function normalizeStoreKey(v) {
   return String(v || '').trim().toLowerCase().replace(/\s+/g, '');
 }
@@ -11958,23 +12013,25 @@ app.listen(PORT, HOST, async () => {
       if (!h.allOk) console.error('[STARTUP] ⚠️ LLM health check FAILED — agents may be brainless!');
       else console.log('[STARTUP] ✅ All LLM providers healthy');
     }).catch(e => console.error('[STARTUP] LLM health check error:', e?.message));
-    startAgentScheduler();
-    console.log('[agents] Multi-agent system initialized');
+    if (process.env.DISABLE_AGENT_SCHEDULING === 'true') {
+      console.log('[agents] ⚠️ DISABLE_AGENT_SCHEDULING=true — agent scheduling delegated to V2');
+    } else {
+      startAgentScheduler();
+      console.log('[agents] Multi-agent system initialized');
+      startBitablePolling();
+      startScheduledTasks();
+      console.log('[agents] Bitable polling started, scheduled tasks started');
+      startMasterAgent();
+      console.log('[master] Master Agent orchestration initialized');
+    }
 
-    // Start Bitable polling for checklist submissions (暂时禁用)
-    startBitablePolling();
-    startScheduledTasks();
-    console.log('[agents] Bitable polling started, scheduled tasks started');
-
-    // Initialize Master Agent orchestration
+    // Initialize Master Agent pools (needed for webhook handler even when scheduling disabled)
     setMasterPool(pool);
     setReportPool(pool);
     setSalesRawPool(pool);
     setDataExecutorPool(pool);
     setTaskResponseHook(handleTaskResponse);
     await ensureMasterTables();
-    startMasterAgent();
-    console.log('[master] Master Agent orchestration initialized');
 
     // Run intelligence upgrade migration (idempotent)
     try {
