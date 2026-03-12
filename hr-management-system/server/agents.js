@@ -1921,33 +1921,39 @@ async function buildBiDeterministicDailyReportReply(store, text) {
       const totalDiscount = parseFloat(row.total_discount) || 0;
       if (!monthBudget) monthBudget = parseFloat(row.budget) || 0;
 
-      const lines = [`📊 营收分析（${targetStore} | ${period.label}）`];
-      lines.push('');
-      lines.push(`- **实收营业额**: ${actualRev.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (已扣优惠)`);
-      if (preDiscount > 0) lines.push(`- **折前营业额**: ${preDiscount.toLocaleString('zh-CN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} (含优惠前金额)`);
-      if (totalDiscount > 0) lines.push(`- **总折扣金额**: ${totalDiscount.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (含优惠前金额)`);
-
-      lines.push('');
-      lines.push('📈 **补充指标**');
+      const lines = [`📊 **营收分析 | ${targetStore}**`, `📅 ${period.label}`];
+      lines.push('─────────────────────');
+      lines.push(`💰 **实收营业额**: ¥${actualRev.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}（已扣优惠）`);
+      if (preDiscount > 0) lines.push(`💳 **折前营业额**: ¥${preDiscount.toLocaleString('zh-CN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}`);
+      if (totalDiscount > 0) lines.push(`🏷️ **总折扣金额**: ¥${totalDiscount.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
+      lines.push('─────────────────────');
+      lines.push('📈 **目标达成情况**');
       if (monthBudget > 0) {
         const achRate = (cumRev / monthBudget * 100).toFixed(1);
-        lines.push(`- **实收营业目标达成率**: ${achRate}% (累计实收 ¥${cumRev.toLocaleString('zh-CN', { minimumFractionDigits: 2 })} / 本月目标 ¥${monthBudget.toLocaleString('zh-CN', { minimumFractionDigits: 0 })})`);
         const theoRate = (monthDays / totalDaysInMonth * 100).toFixed(1);
-        lines.push(`- **理论达成率**: ${theoRate}% (${monthDays}/${totalDaysInMonth}天)`);
+        const achNum = parseFloat(achRate);
+        const theoNum = parseFloat(theoRate);
+        const achIcon = achNum >= theoNum ? '✅' : achNum >= theoNum - 5 ? '⚠️' : '🔴';
+        lines.push(`${achIcon} **实收达成率**: ${achRate}%（累计 ¥${cumRev.toLocaleString('zh-CN', { minimumFractionDigits: 0 })} / 目标 ¥${monthBudget.toLocaleString('zh-CN', { minimumFractionDigits: 0 })}）`);
+        lines.push(`📐 **理论达成率**: ${theoRate}%（${monthDays}/${totalDaysInMonth}天）`);
+        const gap = achNum - theoNum;
+        lines.push(`${gap >= 0 ? '🟢' : '🔴'} **进度差值**: ${gap >= 0 ? '+' : ''}${gap.toFixed(1)}%（${gap >= 0 ? '超前' : '落后'}目标进度）`);
       }
+      lines.push('─────────────────────');
+      lines.push('🔍 **其他指标**');
       const margin = row.actual_margin != null ? parseFloat(row.actual_margin) : null;
-      lines.push(margin != null && !isNaN(margin) ? `- **毛利率**: ${margin.toFixed(1)}%` : `- **毛利率**: 暂无 (当日菜品明细未录入)`);
+      lines.push(margin != null && !isNaN(margin) ? `📊 **毛利率**: ${margin.toFixed(1)}%` : `📊 **毛利率**: 暂无（当日明细未录入）`);
       const dp = row.dianping_rating != null ? parseFloat(row.dianping_rating) : null;
-      if (dp != null && !isNaN(dp)) lines.push(`- **今日大众点评评分**: ${dp.toFixed(2)}`);
+      if (dp != null && !isNaN(dp)) lines.push(`⭐ **大众点评**: ${dp.toFixed(2)} 分`);
       const eff = row.efficiency != null ? parseFloat(row.efficiency) : null;
       const labor = row.labor_total != null ? parseFloat(row.labor_total) : null;
       if (eff != null && !isNaN(eff)) {
-        const laborTxt = labor != null && !isNaN(labor) ? ` (出勤${labor.toFixed(0)}工时)` : '';
-        lines.push(`- **今日人效值**: ¥${Math.round(eff).toLocaleString('zh-CN')}${laborTxt}`);
+        const laborTxt = labor != null && !isNaN(labor) ? `（出勤 ${labor.toFixed(0)} 工时）` : '';
+        lines.push(`👥 **今日人效值**: ¥${Math.round(eff).toLocaleString('zh-CN')}${laborTxt}`);
       }
       if (cumLabor > 0 && cumPre > 0) {
         const cumEff = Math.round(cumPre / cumLabor);
-        lines.push(`- **本月累计人效值**: ¥${cumEff.toLocaleString('zh-CN')} (折前 ¥${Math.round(cumPre).toLocaleString('zh-CN')} / 出勤 ${cumLabor.toFixed(1)}人)`);
+        lines.push(`📦 **本月累计人效**: ¥${cumEff.toLocaleString('zh-CN')}（折前 ¥${Math.round(cumPre).toLocaleString('zh-CN')} / 出勤 ${cumLabor.toFixed(1)} 工时）`);
       }
       return lines.join('\n');
     }
@@ -1960,26 +1966,33 @@ async function buildBiDeterministicDailyReportReply(store, text) {
     const avgMarginVal = avgMarginArr.length ? (avgMarginArr.reduce((s, r) => s + parseFloat(r.actual_margin), 0) / avgMarginArr.length).toFixed(1) : null;
     const dianpingRows = rows.filter(r => r.dianping_rating != null);
     const avgDianping = dianpingRows.length ? (dianpingRows.reduce((s, r) => s + parseFloat(r.dianping_rating), 0) / dianpingRows.length).toFixed(2) : null;
-    const lines = [`📊 营收分析（${targetStore} | ${period.label}）`];
-    lines.push('');
-    lines.push(`- **实收营业额**: ¥${totalRevenue.toLocaleString('zh-CN', { minimumFractionDigits: 0, maximumFractionDigits: 0 })} (${rows.length}天合计)`);
-    if (totalPre > 0) lines.push(`- **折前营业额**: ¥${totalPre.toLocaleString('zh-CN', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`);
-    if (totalDisc > 0) lines.push(`- **总折扣金额**: ¥${totalDisc.toLocaleString('zh-CN', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`);
-    lines.push(`- **日均实收**: ¥${Math.round(totalRevenue / rows.length).toLocaleString('zh-CN')}`);
-    lines.push('');
-    lines.push('📈 **补充指标**');
+    const lines = [`📊 **营收分析 | ${targetStore}**`, `📅 ${period.label}`];
+    lines.push('─────────────────────');
+    lines.push(`💰 **实收营业额**: ¥${totalRevenue.toLocaleString('zh-CN', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}（${rows.length}天合计）`);
+    if (totalPre > 0) lines.push(`💳 **折前营业额**: ¥${totalPre.toLocaleString('zh-CN', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`);
+    if (totalDisc > 0) lines.push(`🏷️ **总折扣金额**: ¥${totalDisc.toLocaleString('zh-CN', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`);
+    lines.push(`📆 **日均实收**: ¥${Math.round(totalRevenue / rows.length).toLocaleString('zh-CN')}`);
+    lines.push('─────────────────────');
+    lines.push('📈 **目标达成情况**');
     if (monthBudget > 0) {
       const achRate = (cumRev / monthBudget * 100).toFixed(1);
-      lines.push(`- **实收营业目标达成率**: ${achRate}% (累计实收 ¥${cumRev.toLocaleString('zh-CN', { minimumFractionDigits: 2 })} / 本月目标 ¥${monthBudget.toLocaleString('zh-CN', { minimumFractionDigits: 0 })})`);
+      const theoRate = (monthDays / totalDaysInMonth * 100).toFixed(1);
+      const achNum = parseFloat(achRate);
+      const theoNum = parseFloat(theoRate);
+      const achIcon = achNum >= theoNum ? '✅' : achNum >= theoNum - 5 ? '⚠️' : '🔴';
+      lines.push(`${achIcon} **实收达成率**: ${achRate}%（累计 ¥${cumRev.toLocaleString('zh-CN', { minimumFractionDigits: 0 })} / 目标 ¥${monthBudget.toLocaleString('zh-CN', { minimumFractionDigits: 0 })}）`);
+      lines.push(`📐 **理论达成率**: ${theoRate}%（${monthDays}/${totalDaysInMonth}天）`);
+      const gap = achNum - theoNum;
+      lines.push(`${gap >= 0 ? '🟢' : '🔴'} **进度差值**: ${gap >= 0 ? '+' : ''}${gap.toFixed(1)}%（${gap >= 0 ? '超前' : '落后'}目标进度）`);
     }
-    if (avgMarginVal) lines.push(`- **平均毛利率**: ${avgMarginVal}%`);
-    if (avgDianping) lines.push(`- **大众点评均分**: ${avgDianping}`);
+    if (avgMarginVal) lines.push(`📊 **平均毛利率**: ${avgMarginVal}%`);
+    if (avgDianping) lines.push(`⭐ **大众点评均分**: ${avgDianping}`);
     if (rows.length >= 4) {
       const recent3 = rows.slice(0, 3).reduce((s, r) => s + (parseFloat(r.actual_revenue) || 0), 0) / 3;
       const older = rows.slice(3).reduce((s, r) => s + (parseFloat(r.actual_revenue) || 0), 0) / rows.slice(3).length;
       if (older > 0) {
         const trend = ((recent3 - older) / older * 100).toFixed(1);
-        lines.push(`- **趋势**: 近3天日均 vs 之前 ${Number(trend) >= 0 ? '+' : ''}${trend}%`);
+        lines.push(`📉 **近期趋势**: 近3天日均 vs 之前 ${Number(trend) >= 0 ? '+' : ''}${trend}%`);
       }
     }
     return lines.join('\n');
@@ -6078,18 +6091,72 @@ async function lookupFeishuUser(openId) {
   } catch (e) { return null; }
 }
 
+async function getFeishuUserInfo(openId) {
+  try {
+    const token = await getLarkTenantToken();
+    if (!token) return null;
+    const resp = await axios.get(`https://open.feishu.cn/open-apis/contact/v3/users/${openId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      params: { user_id_type: 'open_id' },
+      timeout: 8000
+    });
+    return resp.data?.data?.user || null;
+  } catch (e) {
+    console.warn('[feishu] getFeishuUserInfo failed:', e?.message);
+    return null;
+  }
+}
+
+async function tryAutoBindByName(openId) {
+  try {
+    const feishuInfo = await getFeishuUserInfo(openId);
+    if (!feishuInfo) return null;
+    const displayName = String(feishuInfo.name || '').trim();
+    if (!displayName) return null;
+
+    const state = await getSharedState();
+    const allEmp = [
+      ...(Array.isArray(state?.employees) ? state.employees : []),
+      ...(Array.isArray(state?.users) ? state.users : [])
+    ];
+    const inactive = ['resigned','deleted','inactive','terminated','离职','已删除','已离职'];
+    const active = allEmp.filter(e => !inactive.includes(String(e?.status || '').trim().toLowerCase()));
+    const matches = active.filter(e => String(e?.name || '').trim() === displayName);
+
+    if (matches.length === 1) {
+      const emp = matches[0];
+      const regResult = await registerFeishuUser(openId, emp.username);
+      if (regResult.ok) {
+        console.log(`[feishu] auto-bind success: ${displayName} -> ${emp.username}`);
+        return regResult;
+      }
+    } else if (matches.length > 1) {
+      console.log(`[feishu] auto-bind: multiple matches for "${displayName}" (${matches.length}), fallback to manual`);
+    } else {
+      console.log(`[feishu] auto-bind: no match for "${displayName}", fallback to manual`);
+    }
+    return null;
+  } catch (e) {
+    console.warn('[feishu] tryAutoBindByName error:', e?.message);
+    return null;
+  }
+}
+
 export async function lookupFeishuUserByUsername(username) {
   try {
     const r = await pool().query(
       `SELECT *
        FROM feishu_users
-       WHERE username = $1 AND registered = TRUE
+       WHERE lower(username) = lower($1) AND registered = TRUE
        ORDER BY updated_at DESC, created_at DESC
        LIMIT 1`,
       [username]
     );
+    if (!r.rows?.[0]) {
+      console.log('[feishu] lookupFeishuUserByUsername: no registered user found for', username);
+    }
     return r.rows?.[0] || null;
-  } catch (e) { return null; }
+  } catch (e) { console.error('[feishu] lookupFeishuUserByUsername error:', e?.message); return null; }
 }
 
 // 推送督办消息给责任人；仅高优先级异常才抄送总部营运和管理员
@@ -8794,6 +8861,16 @@ export async function onFeishuEvent(body) {
           );
           return { ok: true, registered: true, username: u.username };
         }
+      }
+
+      // Try auto-bind by Feishu display name before asking for manual input
+      const autoBind = await tryAutoBindByName(openId);
+      if (autoBind?.ok) {
+        const u = autoBind.user;
+        await sendLarkMessage(openId,
+          `✅ 已自动绑定！${u.name || u.username}（${u.store || ''}），你好！\n\n我是HRMS智能助理，可以帮你：\n📊 查数据 — "昨天损耗多少？""差评情况？"\n📷 审图片 — 直接发照片，我帮你审核卫生/出品\n📈 看绩效 — "我这周考核分多少？"\n📖 问SOP — "外卖漏发餐具怎么赔付？"\n✋ 申诉 — "申诉昨天损耗扣分，原因是停电"\n\n现在就可以开始对话了！`
+        );
+        return { ok: true, registered: true, autoBound: true, username: u.username };
       }
 
       // Save unregistered user record
