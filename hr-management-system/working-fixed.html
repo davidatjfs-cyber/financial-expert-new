@@ -8066,6 +8066,7 @@
                         <select id="approvals-view" onchange="loadApprovalsData()" style="padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.10); background: rgba(255,255,255,0.04); color: rgba(255,255,255,0.9);">
                             <option value="assigned">待我审批</option>
                             <option value="created">我发起的</option>
+                            <option value="approved">我审批过的</option>
                             <option value="all">全部（管理层）</option>
                         </select>
                         <select id="approvals-status" onchange="loadApprovalsData()" style="padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.10); background: rgba(255,255,255,0.04); color: rgba(255,255,255,0.9);">
@@ -9528,6 +9529,7 @@
                         <div style="padding: 11px; border-radius: 12px; background: linear-gradient(135deg, rgba(250,204,21,0.18), rgba(245,158,11,0.08)); border: 1px solid rgba(250,204,21,0.34); text-align:center; cursor:pointer; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.03), 0 10px 20px rgba(2,6,23,0.2);" onclick="showPage('points')">
                             <div style="font-size: 12px; color: rgba(254,240,138,0.95); font-weight:700;">💎 多劳多得</div>
                             <div style="font-weight: 900; font-size: 17px; margin-top: 4px; color: #facc15; text-shadow:0 2px 10px rgba(250,204,21,0.28);" id="profile-month-points">0分</div>
+                            <div id="profile-points-ranking" style="font-size: 11px; color: rgba(250,204,21,0.7); margin-top: 3px; display:none;"></div>
                         </div>
                     </div>
                     <!-- 待审批 (embedded in 入职信息 card) -->
@@ -12050,15 +12052,9 @@
 
         async function loadPointsPageData() {
             const role = String(currentUser?.role || '').trim();
-            const isEmployee = role === ROLES.EMPLOYEE || role === 'employee';
             const isAdminView = role === ROLES.ADMIN || role === ROLES.HR_MANAGER || role === ROLES.HQ_MANAGER;
             const isStoreManagerView = role === ROLES.STORE_MANAGER;
-            const canViewPoints = isEmployee || isAdminView || isStoreManagerView;
-            if (!canViewPoints) {
-                const listEl = document.getElementById('points-records-list');
-                if (listEl) listEl.innerHTML = '<div style="color:rgba(200,215,230,0.75);">当前角色无积分查看权限</div>';
-                return;
-            }
+            const isEmployee = !isAdminView && !isStoreManagerView;
             const monthPointsEl = document.getElementById('points-month-points');
             const monthAmountEl = document.getElementById('points-month-amount');
             const ruleEl = document.getElementById('points-apply-rule');
@@ -12152,8 +12148,12 @@
             const myRankBadge = document.getElementById('points-my-rank-badge');
             const rankCard = document.getElementById('points-ranking-card');
             if (!rankListEl || !rankCard) return;
+            const _rkRole = String(currentUser?.role || '').trim();
+            const canSeeRanking = _rkRole === ROLES.ADMIN || _rkRole === ROLES.HQ_MANAGER || _rkRole === ROLES.HR_MANAGER || _rkRole === ROLES.STORE_MANAGER;
+            if (!canSeeRanking) { rankCard.style.display = 'none'; return; }
+            rankCard.style.display = '';
             try {
-                const store = String(currentUser?.store || '').trim();
+                const store = (_rkRole === ROLES.STORE_MANAGER) ? String(currentUser?.store || '').trim() : '';
                 const resp = await fetch('/api/points/ranking?store=' + encodeURIComponent(store), {
                     headers: { 'Authorization': 'Bearer ' + (localStorage.getItem('hrms_token') || '') }
                 });
@@ -12298,7 +12298,7 @@
             const rawStatus = String(item?.status || '').trim();
             const st = (String(item?.type || '') === 'payment' && rawStatus === 'approved') ? '已审核' : approvalStatusText(rawStatus);
             const who = hrmsDisplayName(item?.applicant_username);
-            const createdAt = String(item?.created_at || item?.createdAt || '').slice(0, 19).replace('T', ' ');
+            const createdAt = toBeijingTime(item?.created_at || item?.createdAt || '');
             if (sub) sub.textContent = `${type} · ${st} · ${createdAt}${who !== '-' ? (' · 申请人 ' + who) : ''}`;
 
             const payload = item?.payload && typeof item.payload === 'object' ? item.payload : {};
@@ -12309,7 +12309,7 @@
                 const status = String(s?.status || '').trim();
                 const statusText = status === 'pending' ? '待处理' : (status === 'queued' ? '排队' : (status === 'approved' ? '通过' : (status === 'rejected' ? '拒绝' : status)));
                 const note = String(s?.note || '').trim();
-                const time = String(s?.decidedAt || '').slice(0, 19).replace('T', ' ');
+                const time = toBeijingTime(s?.decidedAt || '');
                 return `<div style="padding: 10px 0; border-bottom: 1px solid rgba(255,255,255,0.06);">
                     <div style="display:flex; justify-content: space-between; gap: 10px; flex-wrap: wrap;">
                         <div style="font-weight: 800;">第 ${escapeHtml(step)} 步：${escapeHtml(hrmsDisplayName(assignee))}</div>
@@ -12448,7 +12448,7 @@
                 const rpLabel = (rpType === '奖励' || rpType === 'reward') ? '奖励' : '惩罚';
                 const amt = Number(payload?.amount || 0);
                 const amountText = Number.isFinite(amt) ? ('¥' + Math.abs(amt).toLocaleString('zh-CN', { maximumFractionDigits: 2 })) : '¥0.00';
-                const createdAtText = String(item?.created_at || item?.createdAt || '').slice(0, 19).replace('T', ' ') || '-';
+                const createdAtText = toBeijingTime(item?.created_at || item?.createdAt || '') || '-';
                 const effectiveAtText = String(item?.effective_date || '').slice(0, 10) || '-';
                 payloadHtml = `
                     <div style="margin-top: 14px; padding: 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.03);">
@@ -12477,9 +12477,11 @@
                     if (!base) return s;
                     return s.startsWith('/') ? (base + s) : (base + '/' + s);
                 };
+                const pointsApplicantRec = hrmsLookupUserRecord(item?.applicant_username);
                 const pointsApplicantName = String(payload?.applicantName || '').trim() || hrmsDisplayName(item?.applicant_username);
-                const pointsApplicantPosition = String(payload?.applicantPosition || '').trim();
-                const pointsApplicantDept = String(payload?.applicantDepartment || '').trim();
+                const pointsApplicantPosition = String(payload?.applicantPosition || '').trim() || String(pointsApplicantRec?.position || '').trim();
+                const pointsApplicantDept = String(payload?.applicantDepartment || '').trim() || String(pointsApplicantRec?.department || '').trim();
+                const pointsApplicantStore = String(payload?.store || pointsApplicantRec?.store || '').trim();
                 payloadHtml = `
                     <div style="margin-top: 14px; padding: 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.03);">
                         <div style="font-weight: 900;">积分申请信息</div>
@@ -12489,7 +12491,7 @@
                         <div style="margin-top: 10px; border-top: 1px solid rgba(255,255,255,0.06); padding-top: 10px; color: rgba(200,215,230,0.85);">事项：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(payload?.itemName || '-')}</span></div>
                         <div style="margin-top: 8px; color: rgba(200,215,230,0.85);">积分：<span style="color: #facc15; font-weight: 900;">${pts}分</span></div>
                         <div style="margin-top: 8px; color: rgba(200,215,230,0.85);">折算金额：<span style="color: #f59e0b; font-weight: 900;">¥${amount.toFixed(2)}</span></div>
-                        <div style="margin-top: 8px; color: rgba(200,215,230,0.85);">门店：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(payload?.store || '-')}</span></div>
+                        ${pointsApplicantStore ? `<div style="margin-top: 8px; color: rgba(200,215,230,0.85);">门店：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(pointsApplicantStore)}</span></div>` : ''}
                         <div style="margin-top: 8px; color: rgba(200,215,230,0.85);">理由：<div style="margin-top: 6px; color: rgba(226,232,240,0.95);">${escapeHtml(payload?.reason || '-')}</div></div>
                         ${evidences.length ? `<div style="margin-top: 10px; color: rgba(200,215,230,0.85);">证明图片（点击查看）
                             <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">${evidences.map((u, i) => {
@@ -12950,7 +12952,47 @@ th { background: #f5f5f5; font-weight: 700; }
             }
         }
 
+        // ─── Garbled UTF-8 repair (mojibake: UTF-8 bytes mis-decoded as Latin-1) ───
+        function hrmsRepairGarbledUtf8(str) {
+            if (typeof str !== 'string' || str.length < 2) return str;
+            if (!/[\u00c0-\u00ff]/.test(str)) return str;
+            try {
+                const bytes = new Uint8Array(str.length);
+                for (let i = 0; i < str.length; i++) bytes[i] = str.charCodeAt(i) & 0xff;
+                const decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+                if (/[\u4e00-\u9fff]/.test(decoded)) return decoded;
+            } catch (e) {}
+            return str;
+        }
+        function hrmsDeepRepairGarbled(obj) {
+            if (obj === null || obj === undefined) return obj;
+            if (typeof obj === 'string') return hrmsRepairGarbledUtf8(obj);
+            if (Array.isArray(obj)) return obj.map(hrmsDeepRepairGarbled);
+            if (typeof obj === 'object') {
+                const out = {};
+                for (const k of Object.keys(obj)) out[hrmsRepairGarbledUtf8(k)] = hrmsDeepRepairGarbled(obj[k]);
+                return out;
+            }
+            return obj;
+        }
+
         HRMS_STORE.ensure();
+
+        // Auto-repair garbled localStorage data on page load
+        try {
+            const raw = localStorage.getItem(HRMS_STORAGE_KEY);
+            if (raw && /[\u00c0-\u00ff]/.test(raw)) {
+                const parsed = hrmsSafeParseJson(raw);
+                if (parsed) {
+                    const repaired = hrmsDeepRepairGarbled(parsed);
+                    const repairedJson = JSON.stringify(repaired);
+                    if (repairedJson !== raw) {
+                        console.log('[HRMS] Auto-repaired garbled UTF-8 in localStorage');
+                        localStorage.setItem(HRMS_STORAGE_KEY, repairedJson);
+                    }
+                }
+            }
+        } catch (e) { console.warn('[HRMS] localStorage repair failed:', e); }
 
         try {
             if (__UNREAD_BADGES_TIMER) clearInterval(__UNREAD_BADGES_TIMER);
@@ -15200,7 +15242,7 @@ ${r.approvalNote ? '审批备注：' + r.approvalNote : ''}
             if (box) box.style.display = t === 'store' ? '' : 'none';
         }
 
-        function confirmAnnouncementPublish() {
+        async function confirmAnnouncementPublish() {
             if (!isAdminUser()) {
                 showNotification('仅管理员可发布公告', 'warning');
                 return;
@@ -15236,6 +15278,7 @@ ${r.approvalNote ? '审批备注：' + r.approvalNote : ''}
                 createdByName: currentUser?.name || ''
             });
             HRMS_STORE.set(data);
+            try { await HRMS_API.saveState(HRMS_STORE.ensure()); } catch (e) { console.warn('state save after announcement publish failed', e); }
             closeAnnouncementModal();
             try { loadProfileData(); } catch (e) {}
             showNotification('公告已发布', 'success');
@@ -16729,6 +16772,16 @@ ${r.approvalNote ? '审批备注：' + r.approvalNote : ''}
                 .replace(/>/g, '&gt;')
                 .replace(/"/g, '&quot;')
                 .replace(/'/g, '&#039;');
+        }
+
+        function toBeijingTime(isoStr) {
+            const s = String(isoStr || '').trim();
+            if (!s) return '';
+            try {
+                const d = new Date(s);
+                if (isNaN(d.getTime())) return s.slice(0, 19).replace('T', ' ');
+                return d.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }).replace(/\//g, '-');
+            } catch (e) { return s.slice(0, 19).replace('T', ' '); }
         }
 
         function hrmsDisplayName(username) {
@@ -28122,7 +28175,7 @@ ${knowledgeContent.slice(0, 30000)}`;
         }
         
         // 加载个人信息数据
-        function loadProfileData() {
+        async function loadProfileData() {
             if (!currentUser) return;
 
             // Re-read employee/user data to ensure onboarding fields are up-to-date
@@ -28242,6 +28295,20 @@ ${knowledgeContent.slice(0, 30000)}`;
                 .reduce((s, x) => s + (Number(x?.points) || 0), 0);
             const pointsEl = document.getElementById('profile-month-points');
             if (pointsEl) pointsEl.textContent = `${monthPoints}分`;
+
+            // Fetch ranking for profile display
+            try {
+                const empMatch = (Array.isArray(data.employees) ? data.employees : []).find(e => String(e?.username || '').trim().toLowerCase() === usernameLower);
+                const myStore = String(empMatch?.store || '').trim();
+                const rankResp = await HRMS_API.request('/api/points/ranking?month=' + encodeURIComponent(nowMonth) + (myStore ? '&store=' + encodeURIComponent(myStore) : ''));
+                const rankEl = document.getElementById('profile-points-ranking');
+                if (rankEl && rankResp?.myRank) {
+                    rankEl.style.display = '';
+                    rankEl.textContent = '🏅 本店排名 第' + rankResp.myRank + '名 / 共' + (rankResp.total || 0) + '人';
+                } else if (rankEl) {
+                    rankEl.style.display = 'none';
+                }
+            } catch (e) { console.warn('[profile] ranking fetch failed:', e); }
 
             try { renderProfileNotifications(); } catch (e) {}
             try { renderProfilePendingApprovals(); } catch (e) {}

@@ -1814,7 +1814,7 @@ app.get('/api/approvals', authRequired, async (req, res) => {
   const storeQ = String(req.query?.store || '').trim();
   const limit = Math.min(200, Math.max(1, Number(req.query?.limit || 100)));
 
-  const allowedViews = ['assigned', 'created', 'all'];
+  const allowedViews = ['assigned', 'created', 'all', 'approved'];
   if (!allowedViews.includes(view)) return res.status(400).json({ error: 'invalid_view' });
 
   if (view === 'all') {
@@ -1834,6 +1834,9 @@ app.get('/api/approvals', authRequired, async (req, res) => {
   } else if (view === 'created') {
     params.push(username);
     clauses.push(`lower(applicant_username) = lower($${params.length})`);
+  } else if (view === 'approved') {
+    params.push(username);
+    clauses.push(`EXISTS (SELECT 1 FROM jsonb_array_elements(chain) elem WHERE lower(elem->>'assignee') = lower($${params.length}) AND elem->>'status' IN ('approved','rejected'))`);
   }
 
   if (type) {
@@ -2347,7 +2350,7 @@ app.post('/api/approvals', authRequired, async (req, res) => {
         if (!result) return res.status(400).json({ error: 'missing_result' });
         if (amount == null || amount <= 0) return res.status(400).json({ error: 'missing_amount' });
       } else if (type === 'points') {
-        if (!(role === 'store_employee' || role === 'employee')) {
+        if (!(role === 'store_employee' || role === 'employee' || role === 'front_manager' || role === 'store_production_manager')) {
           return res.status(403).json({ error: 'forbidden' });
         }
         if (!applicantManager) {
@@ -3819,7 +3822,11 @@ app.use(
     extensions: ['html'],
     setHeaders: (res, filePath) => {
       const lp = String(filePath || '').toLowerCase();
-      if (lp.endsWith('.html') || lp.endsWith('sw.js')) {
+      if (lp.endsWith('.html')) {
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+      } else if (lp.endsWith('sw.js')) {
         res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
         res.setHeader('Pragma', 'no-cache');
       }
@@ -3926,6 +3933,7 @@ app.get('/', (req, res) => {
   const target = fs.existsSync(p1) ? p1 : (fs.existsSync(p2) ? p2 : null);
   if (!target) return res.status(404).send('Missing frontend html');
   res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
   return res.sendFile(target);
 });
 
@@ -9891,12 +9899,56 @@ function normalizeCreatedByUuid(input) {
   return isUuid(v) ? v : null;
 }
 
+// ─── Garbled UTF-8 repair (mojibake: UTF-8 bytes mis-decoded as Latin-1) ─────
+function repairGarbledUtf8(str) {
+  if (typeof str !== 'string' || str.length < 2) return str;
+  // Quick check: must contain high Latin-1 chars (0xC0-0xFF) typical of mojibake
+  if (!/[\u00c0-\u00ff]/.test(str)) return str;
+  try {
+    const bytes = Buffer.from(str, 'latin1');
+    const decoded = bytes.toString('utf8');
+    // Valid repair if result contains CJK chars and no replacement chars
+    if (/[\u4e00-\u9fff]/.test(decoded) && !decoded.includes('\ufffd')) return decoded;
+  } catch (e) {}
+  return str;
+}
+
+function deepRepairGarbledStrings(obj) {
+  if (obj === null || obj === undefined) return obj;
+  if (typeof obj === 'string') return repairGarbledUtf8(obj);
+  if (Array.isArray(obj)) return obj.map(deepRepairGarbledStrings);
+  if (typeof obj === 'object') {
+    const out = {};
+    for (const k of Object.keys(obj)) {
+      out[repairGarbledUtf8(k)] = deepRepairGarbledStrings(obj[k]);
+    }
+    return out;
+  }
+  return obj;
+}
+
 app.get('/api/state', authRequired, async (req, res) => {
   try {
     const r = await pool.query('select data from hrms_state where key = $1 limit 1', ['default']);
     const row = r.rows?.[0] || null;
     if (!row) return res.status(404).json({ error: 'not_found' });
-    return res.json({ data: row.data });
+    const data = row.data;
+    // Auto-repair garbled UTF-8 strings and persist if changed
+    const repaired = deepRepairGarbledStrings(data);
+    const origJson = JSON.stringify(data);
+    const repairedJson = JSON.stringify(repaired);
+    if (origJson !== repairedJson) {
+      console.log('[state] Auto-repaired garbled UTF-8 strings in shared state');
+      try {
+        await pool.query(
+          `update hrms_state set data = $1::jsonb, updated_at = now() where key = $2`,
+          [repairedJson, 'default']
+        );
+      } catch (saveErr) {
+        console.error('[state] Failed to persist repaired state:', saveErr?.message || saveErr);
+      }
+    }
+    return res.json({ data: repaired });
   } catch (e) {
     return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
   }
@@ -9906,10 +9958,12 @@ app.put('/api/state', authRequired, async (req, res) => {
   if (String(req.user?.role || '') !== 'admin') {
     return res.status(403).json({ error: 'forbidden' });
   }
-  const data = req.body?.data;
-  if (!data || typeof data !== 'object') {
+  const rawData = req.body?.data;
+  if (!rawData || typeof rawData !== 'object') {
     return res.status(400).json({ error: 'missing_data' });
   }
+  // Auto-repair garbled UTF-8 before persisting
+  const data = deepRepairGarbledStrings(rawData);
   try {
     await pool.query(
       `insert into hrms_state (key, data, updated_at)
