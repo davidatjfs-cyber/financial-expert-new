@@ -657,8 +657,18 @@ async function execBiToolComplaintRanking(store, args = {}, originalQuery = '') 
       });
     }
 
-    if (!rows.length) {
-      return { ok: true, source: 'bad_reviews', text: `📊 ${period.label}投诉数据（${targetStore}）：暂无投诉/差评记录。` };
+    // 补充桌访不满意菜品数据
+    let tableVisitDishMap = new Map();
+    try {
+      const tvRows = await loadUnifiedTableVisitRowsByStore(targetStore, period.start, period.end);
+      for (const row of tvRows) {
+        const items = String(row.dissatisfaction_dish || '').split(/[，,、]+/).map(x => x.trim()).filter(x => x && x !== '无');
+        for (const item of items) { tableVisitDishMap.set(item, (tableVisitDishMap.get(item) || 0) + 1); }
+      }
+    } catch (e) {}
+
+    if (!rows.length && !tableVisitDishMap.size) {
+      return { ok: true, source: 'bad_reviews', text: `📊 ${period.label}投诉数据（${targetStore}）：暂无投诉/差评记录，桌访也无不满意菜品。` };
     }
 
     const productTop = new Map();
@@ -670,6 +680,11 @@ async function execBiToolComplaintRanking(store, args = {}, originalQuery = '') 
       }
     });
 
+    // 合并桌访不满意菜品到排行
+    for (const [dish, count] of tableVisitDishMap.entries()) {
+      productTop.set(dish, (productTop.get(dish) || 0) + count);
+    }
+
     const sorted = Array.from(productTop.entries()).sort((a, b) => asc ? a[1] - b[1] : b[1] - a[1]).slice(0, limit);
     if (!sorted.length) {
       return { ok: true, source: 'bad_reviews', text: `📊 ${period.label}投诉数据（${targetStore}）：未提取到有效菜品字段。` };
@@ -678,7 +693,7 @@ async function execBiToolComplaintRanking(store, args = {}, originalQuery = '') 
     const title = asc ? `投诉最少产品TOP${limit}` : `投诉最多产品TOP${limit}`;
     const lines = [`📊 ${title}（${targetStore}·${period.label}）`];
     sorted.forEach(([name, count], idx) => lines.push(`${idx + 1}. ${name}（${count}次）`));
-    lines.push('> 数据源：差评报告（feishu_generic_records / agent_messages）');
+    lines.push('> 数据源：差评报告 + 桌访巡台记录');
     return { ok: true, source: 'bad_reviews', text: lines.join('\n') };
   } catch (e) {
     return { ok: false, source: 'bad_reviews', text: `投诉排行查询失败：${e?.message || '未知错误'}` };
@@ -1955,6 +1970,36 @@ async function buildBiDeterministicDailyReportReply(store, text) {
         const cumEff = Math.round(cumPre / cumLabor);
         lines.push(`📦 **本月累计人效**: ¥${cumEff.toLocaleString('zh-CN')}（折前 ¥${Math.round(cumPre).toLocaleString('zh-CN')} / 出勤 ${cumLabor.toFixed(1)} 工时）`);
       }
+      // 堂食/外卖单数（单日）
+      try {
+        const dayDate = row.date || period.start;
+        if (dayDate) {
+          const bizR = await pool().query(
+            `SELECT COALESCE(s.biz_type, '') AS biz_type,
+                    ROUND(SUM(COALESCE(s.revenue,0))::numeric, 2) AS total_revenue,
+                    ROUND(SUM(COALESCE(s.qty,0))::numeric, 0) AS total_qty
+             FROM sales_raw s
+             WHERE lower(regexp_replace(COALESCE(s.store,''), '\\s+', '', 'g')) LIKE $1
+               AND s.date = $2
+             GROUP BY s.biz_type`,
+            [storeLike, dayDate]
+          );
+          const bizRows = bizR.rows || [];
+          if (bizRows.length) {
+            lines.push('─────────────────────');
+            lines.push('🍽 **堂食/外卖拆分**');
+            for (const bRow of bizRows) {
+              const bt = String(bRow.biz_type || '').trim().toLowerCase();
+              const label = (bt === 'dinein' || bt === 'dine_in' || bt === '堂食') ? '堂食'
+                : (bt === 'takeaway' || bt === 'delivery' || bt === '外卖' || bt === '外送') ? '外卖'
+                : bt || '其他';
+              const rev = parseFloat(bRow.total_revenue) || 0;
+              const qty = parseInt(bRow.total_qty) || 0;
+              lines.push(`- ${label}：¥${rev.toLocaleString('zh-CN', { minimumFractionDigits: 0 })}（${qty}份）`);
+            }
+          }
+        }
+      } catch (_e) {}
       return lines.join('\n');
     }
 
@@ -1987,6 +2032,47 @@ async function buildBiDeterministicDailyReportReply(store, text) {
     }
     if (avgMarginVal) lines.push(`📊 **平均毛利率**: ${avgMarginVal}%`);
     if (avgDianping) lines.push(`⭐ **大众点评均分**: ${avgDianping}`);
+    // 人效值
+    const effRows = rows.filter(r => r.efficiency != null && parseFloat(r.efficiency) > 0);
+    const laborRows = rows.filter(r => r.labor_total != null && parseFloat(r.labor_total) > 0);
+    if (effRows.length) {
+      const avgEff = effRows.reduce((s, r) => s + parseFloat(r.efficiency), 0) / effRows.length;
+      const totalLabor = laborRows.reduce((s, r) => s + parseFloat(r.labor_total), 0);
+      lines.push(`👥 **平均人效值**: ¥${Math.round(avgEff).toLocaleString('zh-CN')}${totalLabor > 0 ? `（总出勤 ${totalLabor.toFixed(1)} 工时）` : ''}`);
+    }
+    if (cumLabor > 0 && cumPre > 0) {
+      const cumEff = Math.round(cumPre / cumLabor);
+      lines.push(`📦 **本月累计人效**: ¥${cumEff.toLocaleString('zh-CN')}`);
+    }
+    // 堂食/外卖单数（从 sales_raw 查询）
+    try {
+      const bizR = await pool().query(
+        `SELECT
+           COALESCE(s.biz_type, '') AS biz_type,
+           COUNT(DISTINCT s.date) AS days,
+           ROUND(SUM(COALESCE(s.revenue,0))::numeric, 2) AS total_revenue,
+           ROUND(SUM(COALESCE(s.qty,0))::numeric, 0) AS total_qty
+         FROM sales_raw s
+         WHERE lower(regexp_replace(COALESCE(s.store,''), '\\s+', '', 'g')) LIKE $1
+           AND s.date BETWEEN $2 AND $3
+         GROUP BY s.biz_type`,
+        [storeLike, period.start, period.end]
+      );
+      const bizRows = bizR.rows || [];
+      if (bizRows.length) {
+        lines.push('─────────────────────');
+        lines.push('🍽 **堂食/外卖拆分**');
+        for (const bRow of bizRows) {
+          const bt = String(bRow.biz_type || '').trim().toLowerCase();
+          const label = (bt === 'dinein' || bt === 'dine_in' || bt === '堂食') ? '堂食'
+            : (bt === 'takeaway' || bt === 'delivery' || bt === '外卖' || bt === '外送') ? '外卖'
+            : bt || '其他';
+          const rev = parseFloat(bRow.total_revenue) || 0;
+          const qty = parseInt(bRow.total_qty) || 0;
+          lines.push(`- ${label}：¥${rev.toLocaleString('zh-CN', { minimumFractionDigits: 0 })}（${qty}份）`);
+        }
+      }
+    } catch (_e) {}
     if (rows.length >= 4) {
       const recent3 = rows.slice(0, 3).reduce((s, r) => s + (parseFloat(r.actual_revenue) || 0), 0) / 3;
       const older = rows.slice(3).reduce((s, r) => s + (parseFloat(r.actual_revenue) || 0), 0) / rows.slice(3).length;
@@ -2048,8 +2134,51 @@ async function buildBiDeterministicSalesRawTopReply(store, text) {
     const title = askWorst ? `销售倒数${limit}` : `销售TOP${limit}`;
     const lines = [`📦 ${title}（${targetStore}·${period.label}）`];
     rows.forEach((x, i) => {
-      lines.push(`${i + 1}. ${x.dish_name}｜折前¥${Number(x.total_sales || 0).toFixed(0)}｜实收¥${Number(x.total_revenue || 0).toFixed(0)}｜销量${Number(x.total_qty || 0).toFixed(0)}份`);
+      const sales = Number(x.total_sales || 0);
+      const rev = Number(x.total_revenue || 0);
+      const discRate = sales > 0 ? ((sales - rev) / sales * 100).toFixed(1) : '0.0';
+      lines.push(`${i + 1}. ${x.dish_name}｜折前¥${sales.toFixed(0)}｜实收¥${rev.toFixed(0)}｜销量${Number(x.total_qty || 0).toFixed(0)}份｜折扣率${discRate}%`);
     });
+
+    // 时段分析（slot breakdown）
+    try {
+      const slotR = await pool().query(
+        `SELECT COALESCE(s.slot, '未知') AS slot,
+                ROUND(SUM(COALESCE(s.revenue,0))::numeric, 2) AS total_revenue,
+                ROUND(SUM(COALESCE(s.qty,0))::numeric, 0) AS total_qty
+         FROM sales_raw s
+         WHERE lower(regexp_replace(COALESCE(s.store,''), '\\s+', '', 'g')) = $1
+           AND s.date BETWEEN $2 AND $3
+           ${bizSql}
+         GROUP BY s.slot
+         ORDER BY SUM(COALESCE(s.revenue,0)) DESC`,
+        [normalizeStoreKey(targetStore), period.start, period.end]
+      );
+      const slotRows = slotR.rows || [];
+      if (slotRows.length) {
+        lines.push('', '⏰ **时段分析**');
+        for (const sr of slotRows) {
+          const slotName = String(sr.slot || '未知').trim() || '未知';
+          lines.push(`- ${slotName}：¥${Number(sr.total_revenue || 0).toFixed(0)}（${Number(sr.total_qty || 0).toFixed(0)}份）`);
+        }
+      }
+    } catch (_e) {}
+
+    // 毛利率（从 daily_reports 获取该时段平均毛利率）
+    try {
+      const marginR = await pool().query(
+        `SELECT ROUND(AVG(actual_margin)::numeric, 1) AS avg_margin
+         FROM daily_reports
+         WHERE lower(regexp_replace(coalesce(store,''), '\\s+', '', 'g')) LIKE $1
+           AND date BETWEEN $2 AND $3 AND actual_margin IS NOT NULL`,
+        [normalizeStoreLike(targetStore), period.start, period.end]
+      );
+      const avgMargin = marginR.rows?.[0]?.avg_margin;
+      if (avgMargin != null) {
+        lines.push(``, `📊 **同期平均毛利率**: ${avgMargin}%`);
+      }
+    } catch (_e) {}
+
     lines.push('> 数据源：sales_raw（门店销售明细）');
     return lines.join('\n');
   } catch (e) {
@@ -2068,13 +2197,15 @@ async function buildBiDeterministicLossReportReply(store, text) {
   if (!tableId) return `报损单数据源未配置，无法查询。`;
   try {
     const r = await pool().query(
-      `SELECT fields FROM feishu_generic_records WHERE table_id = $1 ORDER BY updated_at DESC LIMIT 500`,
+      `SELECT fields, created_at FROM feishu_generic_records WHERE table_id = $1 ORDER BY updated_at DESC LIMIT 3000`,
       [tableId]
     );
     const rows = (r.rows || []).filter(row => {
       const f = row.fields && typeof row.fields === 'object' ? row.fields : {};
       const rowStore = extractBitableFieldText(f['门店'] || f['所属门店'] || f['报损门店']);
-      return !rowStore || isLikelySameStore(rowStore, targetStore);
+      if (rowStore && !isLikelySameStore(rowStore, targetStore)) return false;
+      const d = normalizeBitableDateValue(f['创建日期'] || f['报损日期'] || f['日期'] || f['提交时间'], row?.created_at);
+      return d && inDateRangeInclusive(d, period.start, period.end);
     });
     if (!rows.length) return `📊 ${period.label}报损数据（${targetStore}）：暂无报损记录入库。`;
     const itemTop = new Map();
@@ -2086,10 +2217,11 @@ async function buildBiDeterministicLossReportReply(store, text) {
       if (item) itemTop.set(item, (itemTop.get(item) || 0) + 1);
       totalAmount += amount;
     });
-    const lines = [`📊 报损数据（${targetStore}）`];
+    const lines = [`📊 报损数据（${targetStore}·${period.label}）`];
     lines.push(`- 报损记录：${rows.length}条`);
     if (totalAmount > 0) lines.push(`- 报损总额：¥${totalAmount.toFixed(2)}`);
     if (itemTop.size) lines.push(`- 报损品项Top：${Array.from(itemTop.entries()).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, v]) => `${k}(${v}次)`).join('、')}`);
+    lines.push(`> 数据源：loss_reports（报损单）`);
     return lines.join('\n');
   } catch (e) {
     return `报损数据查询失败：${e?.message || '未知错误'}`;
@@ -2106,7 +2238,7 @@ async function buildBiDeterministicBadReviewReportReply(store, text) {
   const badReviewTableId = String(BITABLE_CONFIGS?.bad_reviews?.tableId || '').trim();
   try {
     const normalizeReviewDate = (fields, createdAt) => normalizeBitableDateValue(
-      fields?.['创建日期'] || fields?.['日期'] || fields?.['提交时间'] || fields?.['评价日期'] || fields?.date,
+      fields?.['差评日期'] || fields?.['创建日期'] || fields?.['日期'] || fields?.['提交时间'] || fields?.['评价日期'] || fields?.date,
       createdAt
     );
     // 从 feishu_generic_records 查差评报告原始数据
@@ -2139,8 +2271,18 @@ async function buildBiDeterministicBadReviewReportReply(store, text) {
         return d && inDateRangeInclusive(d, period.start, period.end);
       });
     }
-    if (!rows.length) {
-      return `📊 ${period.label}差评数据（${targetStore}）：暂无差评记录入库。`;
+    // 补充桌访不满意菜品数据（结合桌访表）
+    let tableVisitDishMap = new Map();
+    try {
+      const tvRows = await loadUnifiedTableVisitRowsByStore(targetStore, period.start, period.end);
+      for (const row of tvRows) {
+        const items = String(row.dissatisfaction_dish || '').split(/[，,、]+/).map(x => x.trim()).filter(x => x && x !== '无');
+        for (const item of items) { tableVisitDishMap.set(item, (tableVisitDishMap.get(item) || 0) + 1); }
+      }
+    } catch (e) {}
+
+    if (!rows.length && !tableVisitDishMap.size) {
+      return `📊 ${period.label}差评数据（${targetStore}）：暂无差评记录入库，桌访也无不满意菜品记录。`;
     }
     // 统计
     const productTop = new Map();
@@ -2162,14 +2304,24 @@ async function buildBiDeterministicBadReviewReportReply(store, text) {
       if (reason && samples.length < 3) samples.push(String(reason).slice(0, 80));
     });
     const topN = (m, n = 5) => Array.from(m.entries()).sort((a, b) => b[1] - a[1]).slice(0, n).map(([k, v]) => `${k}(${v})`).join('、') || '无';
-    const lines = [`📊 差评数据（${targetStore}·${period.label}）`, `- 差评总数：${rows.length}条`];
-    if (platformTop.size) lines.push(`- 来源平台：${topN(platformTop, 3)}`);
-    if (productTop.size) lines.push(`- 差评产品Top：${topN(productTop)}`);
-    if (keywordTop.size) lines.push(`- 关键词Top：${topN(keywordTop)}`);
-    if (samples.length) {
-      lines.push(`- 最新样例：`);
-      samples.forEach(s => lines.push(`  · ${s}`));
+    const lines = [`📊 差评/点评数据（${targetStore}·${period.label}）`];
+    if (rows.length) {
+      lines.push(`- 差评总数：${rows.length}条`);
+      if (platformTop.size) lines.push(`- 来源平台：${topN(platformTop, 3)}`);
+      if (productTop.size) lines.push(`- 差评产品Top：${topN(productTop)}`);
+      if (keywordTop.size) lines.push(`- 关键词Top：${topN(keywordTop)}`);
+      if (samples.length) {
+        lines.push(`- 最新样例：`);
+        samples.forEach(s => lines.push(`  · ${s}`));
+      }
+    } else {
+      lines.push(`- 差评报告：暂无差评记录入库`);
     }
+    if (tableVisitDishMap.size) {
+      lines.push('', '🍽 桌访不满意菜品（结合桌访巡台数据）：');
+      Array.from(tableVisitDishMap.entries()).sort((a, b) => b[1] - a[1]).slice(0, 8).forEach(([d, c], i) => lines.push(`${i + 1}. ${d}（${c}次）`));
+    }
+    lines.push('', '> 数据源：差评报告 + 桌访巡台记录');
     return lines.join('\n');
   } catch (e) {
     return `差评数据查询失败：${e?.message || '未知错误'}`;
