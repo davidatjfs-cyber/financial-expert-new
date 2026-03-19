@@ -195,7 +195,7 @@ export const ANOMALY_RULES = [
     },
     dataSource: {
       table: 'feishu_generic_records',
-      config: 'bad_reviews',
+      config: 'bad_review',
       fields: ['差评类型=产品'],
       calc: '大众点评差评中关于产品的，1周内1条medium,2条high'
     },
@@ -223,7 +223,7 @@ export const ANOMALY_RULES = [
     },
     dataSource: {
       table: 'feishu_generic_records',
-      config: 'bad_reviews',
+      config: 'bad_review',
       fields: ['差评类型=服务'],
       calc: '大众点评差评中关于服务的，1周内1条medium,2条high；2周内仅1条不触发'
     },
@@ -251,7 +251,7 @@ export const ANOMALY_RULES = [
     },
     dataSource: {
       table: ['table_visit_records', 'feishu_generic_records'],
-      config: ['table_visit', 'bad_reviews'],
+      config: ['table_visit', 'bad_review'],
       fields: ['评价内容', '差评内容'],
       calc: '关键词匹配，任何命中立即触发'
     },

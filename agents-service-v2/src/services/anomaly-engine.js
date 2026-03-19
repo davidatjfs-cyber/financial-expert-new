@@ -5,8 +5,8 @@
  */
 import { query } from '../utils/db.js';
 import { logger } from '../utils/logger.js';
-import { ANOMALY_RULES, SLA_CONFIG } from '../config/anomaly-rules.js';
-import { toFeishuStoreName } from '../config/store-mapping.js';
+import { getAnomalyRules, getSlaConfig, toFeishuStoreName, getBrandForStore as getBrandFromConfig } from './config-service.js';
+import { onAnomalyTriggered } from './agent-collaboration.js';
 
 // ─── 工具函数 ───
 function getMonthDays(year, month) {
@@ -21,14 +21,16 @@ function formatDate(d) {
   return d.toISOString().slice(0, 10);
 }
 
-function getBrandForStore(store) {
-  if (/洪潮/.test(store)) return '洪潮';
-  if (/马己仙/.test(store)) return '马己仙';
-  return null;
+async function getBrandForStore(store) {
+  return await getBrandFromConfig(store);
 }
 
 // ─── 1. 实收营收异常 ───
 export async function checkRevenueAchievement(store) {
+  const rules = await getAnomalyRules();
+  const ruleConfig = rules?.revenue_achievement;
+  if (!ruleConfig?.enabled) return { triggered: false, detail: '规则已禁用' };
+
   const now = new Date();
   const year = now.getFullYear();
   const month = now.getMonth() + 1;
@@ -38,7 +40,6 @@ export async function checkRevenueAchievement(store) {
   const monthStart = getMonthStart(now);
   const monthKey = `${year}-${String(month).padStart(2, '0')}`;
 
-  // 累计实收
   const revR = await query(
     `SELECT COALESCE(SUM(actual_revenue), 0) AS total_rev, COUNT(*) AS days_reported
      FROM daily_reports WHERE store = $1 AND date >= $2 AND date <= $3`,
@@ -47,7 +48,6 @@ export async function checkRevenueAchievement(store) {
   const totalRev = parseFloat(revR.rows[0]?.total_rev || 0);
   const daysReported = parseInt(revR.rows[0]?.days_reported || 0);
 
-  // 月目标
   const tgtR = await query(
     `SELECT target_revenue FROM revenue_targets
      WHERE lower(regexp_replace(coalesce(store,''), '\\s+', '', 'g'))
@@ -62,16 +62,16 @@ export async function checkRevenueAchievement(store) {
   const theoreticalRate = daysReported / totalDays;
   const gap = (theoreticalRate - actualRate) * 100;
 
-  const rule = ANOMALY_RULES.find(r => r.key === 'revenue_achievement');
+  const thresholds = ruleConfig.threshold;
   let severity = null;
-  if (gap >= (rule.thresholds.high?.achievement_gap_pct || 15)) severity = 'high';
-  else if (gap >= (rule.thresholds.medium?.achievement_gap_pct || 10)) severity = 'medium';
+  if (gap >= (thresholds.high?.achievement_gap_pct || 15)) severity = 'high';
+  else if (gap >= (thresholds.medium?.achievement_gap_pct || 10)) severity = 'medium';
 
   return {
     triggered: !!severity,
     severity,
     value: { totalRev, actualRate: (actualRate * 100).toFixed(1), theoreticalRate: (theoreticalRate * 100).toFixed(1), gap: gap.toFixed(1) },
-    threshold: rule.thresholds,
+    threshold: thresholds,
     detail: severity
       ? `实际达成率${(actualRate*100).toFixed(1)}% vs 理论${(theoreticalRate*100).toFixed(1)}%，差距${gap.toFixed(1)}%`
       : `营收达成正常 (差距${gap.toFixed(1)}%)`
@@ -80,9 +80,11 @@ export async function checkRevenueAchievement(store) {
 
 // ─── 2. 人效值异常 ───
 export async function checkLaborEfficiency(store) {
-  const brand = getBrandForStore(store);
-  const rule = ANOMALY_RULES.find(r => r.key === 'labor_efficiency');
-  const brandThresholds = rule.thresholds[brand];
+  const brand = await getBrandForStore(store);
+  const rules = await getAnomalyRules();
+  const ruleConfig = rules?.labor_efficiency;
+  if (!ruleConfig?.enabled) return { triggered: false, detail: '规则已禁用' };
+  const brandThresholds = ruleConfig.threshold[brand] || ruleConfig.threshold.default;
   if (!brandThresholds) return { triggered: false, detail: `品牌${brand}无阈值配置` };
 
   // 本周人效 (过去7天)
@@ -153,7 +155,7 @@ export async function checkRechargeZero(store) {
 
 // ─── 4. 桌访产品异常 ───
 export async function checkTableVisitProduct(store) {
-  const feishuStore = toFeishuStoreName(store);
+  const feishuStore = await toFeishuStoreName(store);
   // 固定7天窗口（不滚动）
   const now = new Date();
   const dayOfMonth = now.getDate();
@@ -168,8 +170,8 @@ export async function checkTableVisitProduct(store) {
     `SELECT fields->>'今天有问题的菜品' AS complaint, COUNT(*) AS cnt
      FROM feishu_generic_records
      WHERE config_key = 'table_visit' AND fields->>'所属门店' = $1
-       AND (fields->>'日期')::date >= $2::date
-       AND (fields->>'日期')::date <= $3::date
+       AND to_timestamp((fields->>'日期')::bigint / 1000)::date >= $2::date
+       AND to_timestamp((fields->>'日期')::bigint / 1000)::date <= $3::date
        AND fields->>'今天有问题的菜品' IS NOT NULL
        AND fields->>'今天有问题的菜品' != ''
      GROUP BY fields->>'今天有问题的菜品'
@@ -197,13 +199,13 @@ export async function checkTableVisitProduct(store) {
 
 // ─── 5. 桌访占比异常 ───
 export async function checkTableVisitRatio(store) {
-  const feishuStore = toFeishuStoreName(store);
+  const feishuStore = await toFeishuStoreName(store);
   // 本周桌访数
   const tvR = await query(
     `SELECT COUNT(*) AS visit_count
      FROM feishu_generic_records
      WHERE config_key = 'table_visit' AND fields->>'所属门店' = $1
-       AND (fields->>'日期')::date >= CURRENT_DATE - 7`,
+       AND to_timestamp((fields->>'日期')::bigint / 1000)::date >= CURRENT_DATE - 7`,
     [feishuStore]
   );
   // 本周堂食订单数
@@ -234,9 +236,11 @@ export async function checkTableVisitRatio(store) {
 
 // ─── 6. 总实收毛利率异常 ───
 export async function checkGrossMargin(store) {
-  const brand = getBrandForStore(store);
-  const rule = ANOMALY_RULES.find(r => r.key === 'gross_margin');
-  const brandThresholds = rule.thresholds[brand];
+  const brand = await getBrandForStore(store);
+  const rules = await getAnomalyRules();
+  const ruleConfig = rules?.gross_margin;
+  if (!ruleConfig?.enabled) return { triggered: false, detail: '规则已禁用' };
+  const brandThresholds = ruleConfig.threshold[brand] || ruleConfig.threshold.default;
   if (!brandThresholds) return { triggered: false, detail: `品牌${brand}无阈值配置` };
 
   // 上月毛利率（每月5号前统计）
@@ -269,11 +273,11 @@ export async function checkGrossMargin(store) {
 
 // ─── 7. 差评报告产品异常 ───
 export async function checkBadReviewProduct(store) {
-  const feishuStore = toFeishuStoreName(store);
+  const feishuStore = await toFeishuStoreName(store);
   const r = await query(
     `SELECT COUNT(*) AS cnt
      FROM feishu_generic_records
-     WHERE config_key = 'bad_reviews' AND fields->>'所属门店' = $1
+     WHERE config_key = 'bad_review' AND fields->>'所属门店' = $1
        AND created_at >= CURRENT_DATE - 7
        AND (fields->>'差评类型' ILIKE '%产品%'
             OR fields->>'差评类型' ILIKE '%出品%'
@@ -296,12 +300,12 @@ export async function checkBadReviewProduct(store) {
 
 // ─── 8. 差评报告服务异常 ───
 export async function checkBadReviewService(store) {
-  const feishuStore = toFeishuStoreName(store);
+  const feishuStore = await toFeishuStoreName(store);
   // 本周
   const thisWeek = await query(
     `SELECT COUNT(*) AS cnt
      FROM feishu_generic_records
-     WHERE config_key = 'bad_reviews' AND fields->>'所属门店' = $1
+     WHERE config_key = 'bad_review' AND fields->>'所属门店' = $1
        AND created_at >= CURRENT_DATE - 7
        AND (fields->>'差评类型' ILIKE '%服务%')`,
     [feishuStore]
@@ -310,7 +314,7 @@ export async function checkBadReviewService(store) {
   const lastWeek = await query(
     `SELECT COUNT(*) AS cnt
      FROM feishu_generic_records
-     WHERE config_key = 'bad_reviews' AND fields->>'所属门店' = $1
+     WHERE config_key = 'bad_review' AND fields->>'所属门店' = $1
        AND created_at >= CURRENT_DATE - 14 AND created_at < CURRENT_DATE - 7
        AND (fields->>'差评类型' ILIKE '%服务%')`,
     [feishuStore]
@@ -414,34 +418,43 @@ const CHECK_FN_MAP = {
  * @param {string[]} stores - 门店列表
  */
 export async function runAnomalyChecks(frequency, stores) {
-  const rules = ANOMALY_RULES.filter(r => r.frequency === frequency);
+  const allRules = await getAnomalyRules();
+  if (!allRules) return [{ error: 'anomaly_rules config not found in DB' }];
+
+  // 按frequency过滤启用的规则
+  const ruleEntries = Object.entries(allRules).filter(
+    ([, cfg]) => cfg.enabled && cfg.frequency === frequency
+  );
   const results = [];
 
   for (const store of stores) {
-    for (const rule of rules) {
-      const checkFn = CHECK_FN_MAP[rule.key];
+    const brand = await getBrandForStore(store);
+    for (const [ruleKey, ruleCfg] of ruleEntries) {
+      const checkFn = CHECK_FN_MAP[ruleKey];
       if (!checkFn) continue;
 
       try {
         const result = await checkFn(store);
         if (result.triggered) {
-          // 写入 anomaly_triggers
           await query(
             `INSERT INTO anomaly_triggers (anomaly_key, store, brand, severity, trigger_date, trigger_value, threshold_value, assigned_role, notify_target_role)
              VALUES ($1, $2, $3, $4, CURRENT_DATE, $5, $6, $7, $8)`,
             [
-              rule.key, store, getBrandForStore(store), result.severity,
+              ruleKey, store, brand, result.severity,
               JSON.stringify(result.value), JSON.stringify(result.threshold),
-              rule.assignTo?.role || 'ops',
-              Array.isArray(rule.notifyTarget) ? rule.notifyTarget.map(t => t.role).join(',') : rule.notifyTarget?.role || 'store_manager'
+              ruleCfg.assign_to || 'store_manager',
+              ruleCfg.assign_to || 'store_manager'
             ]
           );
-          logger.warn({ anomaly: rule.key, store, severity: result.severity, detail: result.detail }, 'Anomaly triggered');
+          logger.warn({ anomaly: ruleKey, store, severity: result.severity, detail: result.detail }, 'Anomaly triggered');
+          // 触发Agent协作链
+          onAnomalyTriggered(ruleKey, store, result.severity, result.detail, result.value).catch(e =>
+            logger.warn({ err: e?.message, rule: ruleKey, store }, 'collab chain err'));
         }
-        results.push({ store, rule: rule.key, name: rule.name, ...result });
+        results.push({ store, rule: ruleKey, name: ruleCfg.name, ...result });
       } catch (err) {
-        logger.error({ err, rule: rule.key, store }, 'Anomaly check failed');
-        results.push({ store, rule: rule.key, name: rule.name, triggered: false, error: err.message });
+        logger.error({ err, rule: ruleKey, store }, 'Anomaly check failed');
+        results.push({ store, rule: ruleKey, name: ruleCfg.name, triggered: false, error: err.message });
       }
     }
   }
@@ -454,10 +467,11 @@ export async function runAnomalyChecks(frequency, stores) {
 export async function checkFoodSafetyFromMessage(store, content) {
   const result = await checkFoodSafety(store, content);
   if (result.triggered) {
+    const brand = await getBrandForStore(store);
     await query(
       `INSERT INTO anomaly_triggers (anomaly_key, store, brand, severity, trigger_date, trigger_value, threshold_value, assigned_role, notify_target_role)
        VALUES ('food_safety', $1, $2, 'high', CURRENT_DATE, $3, $4, 'hq_manager', 'store_manager,kitchen_manager')`,
-      [store, getBrandForStore(store), JSON.stringify(result.value), JSON.stringify(result.threshold)]
+      [store, brand, JSON.stringify(result.value), JSON.stringify(result.threshold)]
     );
     logger.error({ store, keywords: result.value.matchedKeywords }, '🚨 FOOD SAFETY ALERT');
   }

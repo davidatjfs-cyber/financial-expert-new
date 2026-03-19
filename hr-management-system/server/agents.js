@@ -594,8 +594,41 @@ async function execBiToolSalesRanking(store, args = {}, originalQuery = '') {
       [normalizeStoreLike(targetStore), period.start, period.end]
     );
 
-    const rows = r.rows || [];
+    let rows = r.rows || [];
     if (!rows.length) {
+      // Fallback: check available data range and use most recent data
+      try {
+        const rangeR = await pool().query(
+          `SELECT MAX(date)::text as max_d, MIN(date)::text as min_d FROM sales_raw WHERE lower(regexp_replace(COALESCE(store,''), '\\s+', '', 'g')) LIKE $1`,
+          [normalizeStoreLike(targetStore)]
+        );
+        const maxDate = rangeR.rows?.[0]?.max_d;
+        if (maxDate && maxDate < period.start) {
+          // Data exists but not for requested period - use last 7 days of available data
+          const fbEnd = maxDate;
+          const fbStartD = new Date(new Date(maxDate).getTime() - 6*86400000);
+          const fbStart = fbStartD.toISOString().slice(0,10);
+          const fbR = await pool().query(
+            `SELECT s.dish_name, ROUND(SUM(COALESCE(s.qty,0))::numeric,2) AS total_qty, ROUND(SUM(COALESCE(s.sales_amount,0))::numeric,2) AS total_sales, ROUND(SUM(COALESCE(s.revenue,0))::numeric,2) AS total_revenue
+             FROM sales_raw s WHERE lower(regexp_replace(COALESCE(s.store,''), '\\s+', '', 'g')) LIKE $1 AND s.date BETWEEN $2 AND $3 ${bizSql} AND COALESCE(s.dish_name,'') <> ''
+             GROUP BY s.dish_name HAVING SUM(COALESCE(s.qty,0)) > 0 ORDER BY ${metricSql} ${sortOrder} LIMIT ${limit}`,
+            [normalizeStoreLike(targetStore), fbStart, fbEnd]
+          );
+          rows = fbR.rows || [];
+          if (rows.length) {
+            const fbTitle = sortOrder === 'ASC' ? `销售倒数${limit}` : `销售TOP${limit}`;
+            const fbMetricLabel = metric === 'qty' ? '销量' : metric === 'revenue' ? '实收金额' : '折前金额';
+            const fbScope = bizType === 'all' ? '全部业态' : (bizType === 'dinein' ? '堂食' : '外卖');
+            const lines = [`⚠️ ${period.label}暂无销售数据，以下为最近可用数据（${fbStart} ~ ${fbEnd}）：`, `📦 ${fbTitle}（${targetStore}·${fbScope}）`, `排序口径：${fbMetricLabel}`];
+            rows.forEach((x, i) => {
+              lines.push(`${i + 1}. ${x.dish_name}｜折前¥${Number(x.total_sales || 0).toFixed(0)}｜实收¥${Number(x.total_revenue || 0).toFixed(0)}｜销量${Number(x.total_qty || 0).toFixed(0)}份`);
+            });
+            lines.push(`> ⚠️ 销售数据最新截至 ${maxDate}，请上传最新销售数据`);
+            return { ok: true, source: 'sales_raw', text: lines.join('\n') };
+          }
+          return { ok: true, source: 'sales_raw', text: `📦 ${period.label}销售数据（${targetStore}）：暂无可用销售明细。\n⚠️ 销售数据最新截至 ${maxDate}，请上传最新数据。` };
+        }
+      } catch (_e) {}
       return { ok: true, source: 'sales_raw', text: `📦 ${period.label}销售数据（${targetStore}）：暂无可用销售明细。` };
     }
 
@@ -1962,13 +1995,19 @@ async function buildBiDeterministicDailyReportReply(store, text) {
       if (dp != null && !isNaN(dp)) lines.push(`⭐ **大众点评**: ${dp.toFixed(2)} 分`);
       const eff = row.efficiency != null ? parseFloat(row.efficiency) : null;
       const labor = row.labor_total != null ? parseFloat(row.labor_total) : null;
-      if (eff != null && !isNaN(eff)) {
-        const laborTxt = labor != null && !isNaN(labor) ? `（出勤 ${labor.toFixed(0)} 工时）` : '';
+      if (eff != null && !isNaN(eff) && eff > 0) {
+        const laborTxt = labor != null && !isNaN(labor) && labor > 0 ? `（出勤 ${labor.toFixed(0)} 工时）` : '';
         lines.push(`👥 **今日人效值**: ¥${Math.round(eff).toLocaleString('zh-CN')}${laborTxt}`);
+      } else if (labor != null && !isNaN(labor) && labor > 0 && actualRev > 0) {
+        lines.push(`👥 **今日人效值**: ¥${Math.round(actualRev / labor).toLocaleString('zh-CN')}（实收÷工时，出勤 ${labor.toFixed(0)} 工时）`);
+      } else {
+        lines.push(`👥 **今日人效值**: 暂无（出勤工时未录入）`);
       }
       if (cumLabor > 0 && cumPre > 0) {
         const cumEff = Math.round(cumPre / cumLabor);
         lines.push(`📦 **本月累计人效**: ¥${cumEff.toLocaleString('zh-CN')}（折前 ¥${Math.round(cumPre).toLocaleString('zh-CN')} / 出勤 ${cumLabor.toFixed(1)} 工时）`);
+      } else if (cumLabor > 0 && cumRev > 0) {
+        lines.push(`📦 **本月累计人效**: ¥${Math.round(cumRev / cumLabor).toLocaleString('zh-CN')}（实收÷工时）`);
       }
       // 堂食/外卖单数（单日）
       try {
@@ -2202,9 +2241,9 @@ async function buildBiDeterministicLossReportReply(store, text) {
     );
     const rows = (r.rows || []).filter(row => {
       const f = row.fields && typeof row.fields === 'object' ? row.fields : {};
-      const rowStore = extractBitableFieldText(f['门店'] || f['所属门店'] || f['报损门店']);
+      const rowStore = extractBitableFieldText(f['所属门店'] || f['门店'] || f['报损门店']);
       if (rowStore && !isLikelySameStore(rowStore, targetStore)) return false;
-      const d = normalizeBitableDateValue(f['创建日期'] || f['报损日期'] || f['日期'] || f['提交时间'], row?.created_at);
+      const d = normalizeBitableDateValue(f['日期'] || f['创建日期'] || f['报损日期'] || f['提交时间'], row?.created_at);
       return d && inDateRangeInclusive(d, period.start, period.end);
     });
     if (!rows.length) return `📊 ${period.label}报损数据（${targetStore}）：暂无报损记录入库。`;
@@ -2212,16 +2251,38 @@ async function buildBiDeterministicLossReportReply(store, text) {
     let totalAmount = 0;
     rows.forEach(row => {
       const f = row.fields && typeof row.fields === 'object' ? row.fields : {};
-      const item = extractBitableFieldText(f['报损品名'] || f['品名'] || f['物品名称'] || f['报损物品']);
-      const amount = parseFloat(extractBitableFieldText(f['报损金额'] || f['金额'] || f['损失金额'])) || 0;
+      const item = extractBitableFieldText(f['报损菜品'] || f['报损品名'] || f['品名'] || f['物品名称'] || f['报损物品']);
+      const amount = parseFloat(extractBitableFieldText(f['报损金额'] || f['金额'] || f['损失金额'] || f['报损数量'])) || 0;
       if (item) itemTop.set(item, (itemTop.get(item) || 0) + 1);
       totalAmount += amount;
+    });
+    // 汇总报损原因
+    const reasonTop = new Map();
+    rows.forEach(row => {
+      const f = row.fields && typeof row.fields === 'object' ? row.fields : {};
+      const reason = extractBitableFieldText(f['报损原因'] || f['原因']);
+      if (reason) reasonTop.set(reason, (reasonTop.get(reason) || 0) + 1);
     });
     const lines = [`📊 报损数据（${targetStore}·${period.label}）`];
     lines.push(`- 报损记录：${rows.length}条`);
     if (totalAmount > 0) lines.push(`- 报损总额：¥${totalAmount.toFixed(2)}`);
-    if (itemTop.size) lines.push(`- 报损品项Top：${Array.from(itemTop.entries()).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, v]) => `${k}(${v}次)`).join('、')}`);
-    lines.push(`> 数据源：loss_reports（报损单）`);
+    if (itemTop.size) lines.push(`- 报损菜品Top：${Array.from(itemTop.entries()).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, v]) => `${k}(${v}次)`).join('、')}`);
+    if (reasonTop.size) lines.push(`- 报损原因：${Array.from(reasonTop.entries()).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, v]) => `${k}(${v}次)`).join('、')}`);
+    // 最近5条明细
+    const recent = rows.slice(0, 5);
+    if (recent.length) {
+      lines.push('', '📝 最近报损明细：');
+      recent.forEach((row, i) => {
+        const f = row.fields && typeof row.fields === 'object' ? row.fields : {};
+        const dish = extractBitableFieldText(f['报损菜品'] || f['报损品名'] || '');
+        const qty = extractBitableFieldText(f['报损数量'] || '');
+        const reason = extractBitableFieldText(f['报损原因'] || '');
+        const dept = extractBitableFieldText(f['报损部门'] || '');
+        const d = normalizeBitableDateValue(f['日期'], row?.created_at);
+        lines.push(`${i + 1}. ${d || '-'} ${dish || '-'} ${qty || '-'} ${reason || ''}${dept ? `（${dept}）` : ''}`);
+      });
+    }
+    lines.push('> 数据源：loss_reports（报损单）');
     return lines.join('\n');
   } catch (e) {
     return `报损数据查询失败：${e?.message || '未知错误'}`;
@@ -6261,10 +6322,10 @@ async function getFeishuUserInfo(openId) {
 
 async function tryAutoBindByName(openId) {
   try {
+    // Step 1: Try Feishu contact API to get display name
     const feishuInfo = await getFeishuUserInfo(openId);
-    if (!feishuInfo) return null;
-    const displayName = String(feishuInfo.name || '').trim();
-    if (!displayName) return null;
+    const displayName = String(feishuInfo?.name || '').trim();
+    console.log(`[feishu] tryAutoBindByName: openId=${openId}, feishuName="${displayName}"`);
 
     const state = await getSharedState();
     const allEmp = [
@@ -6273,20 +6334,40 @@ async function tryAutoBindByName(openId) {
     ];
     const inactive = ['resigned','deleted','inactive','terminated','离职','已删除','已离职'];
     const active = allEmp.filter(e => !inactive.includes(String(e?.status || '').trim().toLowerCase()));
-    const matches = active.filter(e => String(e?.name || '').trim() === displayName);
 
-    if (matches.length === 1) {
-      const emp = matches[0];
-      const regResult = await registerFeishuUser(openId, emp.username);
-      if (regResult.ok) {
-        console.log(`[feishu] auto-bind success: ${displayName} -> ${emp.username}`);
-        return regResult;
+    // Step 2: Try exact name match
+    if (displayName) {
+      const matches = active.filter(e => String(e?.name || '').trim() === displayName);
+      if (matches.length === 1) {
+        const emp = matches[0];
+        const regResult = await registerFeishuUser(openId, emp.username);
+        if (regResult.ok) {
+          console.log(`[feishu] auto-bind success: ${displayName} -> ${emp.username} (${emp.store})`);
+          return regResult;
+        }
+      } else if (matches.length > 1) {
+        console.log(`[feishu] auto-bind: multiple matches for "${displayName}" (${matches.length}), fallback to manual`);
+      } else {
+        console.log(`[feishu] auto-bind: no exact match for "${displayName}"`);
       }
-    } else if (matches.length > 1) {
-      console.log(`[feishu] auto-bind: multiple matches for "${displayName}" (${matches.length}), fallback to manual`);
-    } else {
-      console.log(`[feishu] auto-bind: no match for "${displayName}", fallback to manual`);
     }
+
+    // Step 3: Try Feishu mobile number match (if contact API returned phone)
+    const feishuMobile = String(feishuInfo?.mobile || '').replace(/^\+86/, '').replace(/\D/g, '').trim();
+    if (feishuMobile && feishuMobile.length >= 11) {
+      const phoneMatch = active.find(e => {
+        const empPhone = String(e?.phone || '').replace(/\D/g, '').trim();
+        return empPhone && empPhone === feishuMobile;
+      });
+      if (phoneMatch) {
+        const regResult = await registerFeishuUser(openId, phoneMatch.username);
+        if (regResult.ok) {
+          console.log(`[feishu] auto-bind by phone success: ${feishuMobile} -> ${phoneMatch.username} (${phoneMatch.store})`);
+          return regResult;
+        }
+      }
+    }
+
     return null;
   } catch (e) {
     console.warn('[feishu] tryAutoBindByName error:', e?.message);
@@ -7901,20 +7982,48 @@ export async function handleAgentMessage(senderUsername, senderName, senderStore
     switch (route) {
       case 'data_auditor': {
 
-        // ── [顶层门店解析] HQ用户store='总部'时，从消息文本提取真实门店，所有子路径共用 ──
+        // ── [顶层门店解析] 任何用户都可以通过文本提及门店名来查询不同门店的数据 ──
         let resolvedStore = store;
-        if (!resolvedStore || resolvedStore === '总部') {
+        {
+          // 1. 先检查用户是否在文本中明确提及了某个门店品牌
+          let textMentionedStore = '';
           try {
-            if (/洪潮/.test(text)) {
-              const r = await pool().query(`SELECT store FROM sales_raw WHERE store LIKE '%洪潮%' GROUP BY store ORDER BY COUNT(*) DESC LIMIT 1`);
-              resolvedStore = r.rows?.[0]?.store || resolvedStore;
-            } else if (/马己仙/.test(text)) {
-              const r = await pool().query(`SELECT store FROM sales_raw WHERE store LIKE '%马己仙%' GROUP BY store ORDER BY COUNT(*) DESC LIMIT 1`);
-              resolvedStore = r.rows?.[0]?.store || resolvedStore;
+            for (const entry of STORE_CANONICAL_MAP) {
+              for (const kw of entry.keywords) {
+                if (new RegExp(kw, 'i').test(text)) {
+                  textMentionedStore = entry.canonical;
+                  break;
+                }
+              }
+              if (textMentionedStore) break;
+            }
+            // 如果文本提及的门店与用户绑定门店不同品牌，则覆盖
+            if (textMentionedStore) {
+              const mentionedBrand = inferBrandFromStoreName(textMentionedStore);
+              const boundBrand = inferBrandFromStoreName(resolvedStore);
+              if (mentionedBrand && mentionedBrand !== boundBrand) {
+                resolvedStore = textMentionedStore;
+                console.log(`[data_auditor] store override from text: ${store} → ${resolvedStore} (brand: ${mentionedBrand})`);
+              } else if (!resolvedStore || resolvedStore === '总部') {
+                resolvedStore = textMentionedStore;
+                console.log(`[data_auditor] store resolved from text: ${store} → ${resolvedStore}`);
+              }
             }
           } catch (_e) {}
-          if (resolvedStore && resolvedStore !== '总部') {
-            console.log(`[data_auditor] top-level store resolved: ${store} → ${resolvedStore}`);
+          // 2. 兜底：HQ用户未提及门店时，尝试从数据库查
+          if (!resolvedStore || resolvedStore === '总部') {
+            try {
+              if (/洪潮/.test(text)) {
+                const r = await pool().query(`SELECT store FROM sales_raw WHERE store LIKE '%洪潮%' GROUP BY store ORDER BY COUNT(*) DESC LIMIT 1`);
+                resolvedStore = r.rows?.[0]?.store || resolvedStore;
+              } else if (/马己仙/.test(text)) {
+                const r = await pool().query(`SELECT store FROM sales_raw WHERE store LIKE '%马己仙%' GROUP BY store ORDER BY COUNT(*) DESC LIMIT 1`);
+                resolvedStore = r.rows?.[0]?.store || resolvedStore;
+              }
+            } catch (_e) {}
+            if (resolvedStore && resolvedStore !== '总部') {
+              console.log(`[data_auditor] HQ store fallback: ${store} → ${resolvedStore}`);
+            }
           }
         }
 
@@ -8060,7 +8169,7 @@ export async function handleAgentMessage(senderUsername, senderName, senderStore
           try {
             const st = await getSharedState();
             const allH = Array.isArray(st?.inventoryForecastHistory) ? st.inventoryForecastHistory : [];
-            const storeH = allH.filter(x => normalizeStoreKey(x?.store) === normalizeStoreKey(store));
+            const storeH = allH.filter(x => normalizeStoreKey(x?.store) === normalizeStoreKey(resolvedStore));
             if (storeH.length) {
               const p = resolveDateRangeFromQuestion(text, 7);
               const filt = storeH.filter(x => { const d=String(x?.date||''); return d>=p.start&&d<=p.end; });
@@ -8997,14 +9106,31 @@ export async function onFeishuEvent(body) {
     let feishuUser = await lookupFeishuUser(openId);
 
     if (!feishuUser || !feishuUser.registered) {
+      console.log(`[feishu] user not registered: openId=${openId}, existing=${!!feishuUser}`);
       // Parse text
       let inputText = '';
       if (msgType === 'text') {
         try { inputText = String(JSON.parse(msg?.content || '{}').text || '').trim(); } catch (e) { inputText = String(msg?.content || '').trim(); }
       }
 
-      if (inputText) {
-        // Try to register with the text as username
+      // Step 1: Try auto-bind by Feishu display name FIRST (before trying text as username)
+      const autoBind = await tryAutoBindByName(openId);
+      if (autoBind?.ok) {
+        const u = autoBind.user;
+        // Auto-bound successfully, now process the original message if any
+        await sendLarkMessage(openId,
+          `✅ 已自动识别！${u.name || u.username}（${u.store || ''}），你好！\n\n我是HRMS智能助理，可以帮你：\n📊 查数据 — "昨天损耗多少？""差评情况？"\n📷 审图片 — 直接发照片，我帮你审核卫生/出品\n📈 看绩效 — "我这周考核分多少？"\n📖 问SOP — "外卖漏发餐具怎么赔付？"\n✋ 申诉 — "申诉昨天损耗扣分，原因是停电"\n\n正在处理您的消息...`
+        );
+        // Re-process the original message with the now-registered user
+        feishuUser = await lookupFeishuUser(openId);
+        if (feishuUser?.registered) {
+          // Fall through to message processing below
+          console.log(`[feishu] auto-bind OK, proceeding with message for ${u.username}`);
+        } else {
+          return { ok: true, registered: true, autoBound: true, username: u.username };
+        }
+      } else if (inputText) {
+        // Step 2: Try to register with the text as username (user manually typed their username)
         const regResult = await registerFeishuUser(openId, inputText);
         if (regResult.ok) {
           const u = regResult.user;
@@ -9012,30 +9138,34 @@ export async function onFeishuEvent(body) {
             `✅ 绑定成功！${u.name || u.username}（${u.store || ''}），你好！\n\n我是HRMS智能助理，可以帮你：\n📊 查数据 — "昨天损耗多少？""差评情况？"\n📷 审图片 — 直接发照片，我帮你审核卫生/出品\n📈 看绩效 — "我这周考核分多少？"\n📖 问SOP — "外卖漏发餐具怎么赔付？"\n✋ 申诉 — "申诉昨天损耗扣分，原因是停电"\n\n现在就可以开始对话了！`
           );
           return { ok: true, registered: true, username: u.username };
+        } else {
+          console.log(`[feishu] register with text="${inputText.slice(0,20)}" failed: ${regResult.error}`);
         }
-      }
 
-      // Try auto-bind by Feishu display name before asking for manual input
-      const autoBind = await tryAutoBindByName(openId);
-      if (autoBind?.ok) {
-        const u = autoBind.user;
+        // Step 3: Save unregistered user record and ask for username
+        try {
+          await pool().query(
+            `INSERT INTO feishu_users (open_id, registered) VALUES ($1, FALSE) ON CONFLICT (open_id) DO NOTHING`, [openId]
+          );
+        } catch (e) {}
+
         await sendLarkMessage(openId,
-          `✅ 已自动绑定！${u.name || u.username}（${u.store || ''}），你好！\n\n我是HRMS智能助理，可以帮你：\n📊 查数据 — "昨天损耗多少？""差评情况？"\n📷 审图片 — 直接发照片，我帮你审核卫生/出品\n📈 看绩效 — "我这周考核分多少？"\n📖 问SOP — "外卖漏发餐具怎么赔付？"\n✋ 申诉 — "申诉昨天损耗扣分，原因是停电"\n\n现在就可以开始对话了！`
+          `你好！我是HRMS智能助理 🤖\n\n首次使用需要绑定HRMS账号。\n请输入你的HRMS用户名（登录HRMS系统时使用的用户名，如：NNYXYF26）：`
         );
-        return { ok: true, registered: true, autoBound: true, username: u.username };
+        return { ok: true, pendingRegistration: true };
+      } else {
+        // No text (image/audio etc) and auto-bind failed
+        try {
+          await pool().query(
+            `INSERT INTO feishu_users (open_id, registered) VALUES ($1, FALSE) ON CONFLICT (open_id) DO NOTHING`, [openId]
+          );
+        } catch (e) {}
+
+        await sendLarkMessage(openId,
+          `你好！我是HRMS智能助理 🤖\n\n首次使用需要绑定HRMS账号。\n请输入你的HRMS用户名（登录HRMS系统时使用的用户名，如：NNYXYF26）：`
+        );
+        return { ok: true, pendingRegistration: true };
       }
-
-      // Save unregistered user record
-      try {
-        await pool().query(
-          `INSERT INTO feishu_users (open_id, registered) VALUES ($1, FALSE) ON CONFLICT (open_id) DO NOTHING`, [openId]
-        );
-      } catch (e) {}
-
-      await sendLarkMessage(openId,
-        `你好！我是HRMS智能助理 🤖\n\n首次使用需要绑定HRMS账号。\n请输入你的HRMS用户名（登录HRMS系统时使用的用户名）：`
-      );
-      return { ok: true, pendingRegistration: true };
     }
 
     // ── 校验员工是否仍在职 ──

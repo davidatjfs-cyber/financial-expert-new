@@ -6994,76 +6994,78 @@
             </div>
 
             <div id="points-page" class="hidden">
-                <div class="page-header">
-                    <h2>员工积分</h2>
-                </div>
-
-                <div style="margin-bottom: 12px; border-radius: 16px; padding: 14px; border:1px solid rgba(250,204,21,0.28); background: radial-gradient(120% 120% at 20% 0%, rgba(250,204,21,0.2), rgba(245,158,11,0.06) 45%, rgba(15,23,42,0.88) 100%); box-shadow: 0 12px 28px rgba(0,0,0,0.28), inset 0 0 0 1px rgba(255,255,255,0.03);">
-                    <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
-                        <div style="font-size:13px; color:rgba(254,240,138,0.92); font-weight:700; letter-spacing:0.2px;">💎 多劳多得</div>
-                        <div style="font-size:11px; color:rgba(200,215,230,0.82);">1分 = ¥0.5</div>
+                <!-- 顶部积分概览卡 -->
+                <div style="margin:0 0 16px 0; padding:20px; border-radius:20px; background:linear-gradient(135deg, rgba(37,99,235,0.15) 0%, rgba(99,102,241,0.08) 50%, rgba(15,23,42,0.95) 100%); border:1px solid rgba(99,102,241,0.2); position:relative; overflow:hidden;">
+                    <div style="position:absolute; top:-30px; right:-30px; width:120px; height:120px; border-radius:50%; background:radial-gradient(circle, rgba(250,204,21,0.12), transparent 70%);"></div>
+                    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:16px;">
+                        <div style="font-size:18px; font-weight:800; color:rgba(226,232,240,0.95); letter-spacing:0.5px;">我的积分</div>
+                        <div style="font-size:11px; color:rgba(200,215,230,0.6); padding:4px 10px; border-radius:20px; background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.08);">1积分 = ¥0.5</div>
                     </div>
-                    <div style="margin-top:8px; display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:10px;">
-                        <div style="padding: 12px; border-radius: 12px; border:1px solid rgba(250,204,21,0.28); background: rgba(250,204,21,0.08);">
-                            <div style="font-size:12px; color:rgba(200,215,230,0.82);">本月积分</div>
-                            <div id="points-month-points" style="margin-top:4px; font-size:24px; font-weight:900; color:#facc15; text-shadow: 0 2px 12px rgba(250,204,21,0.28);">0</div>
+                    <div style="display:flex; gap:12px;">
+                        <div style="flex:1; padding:16px; border-radius:14px; background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.06); text-align:center;">
+                            <div id="points-month-points" style="font-size:32px; font-weight:900; color:#facc15; line-height:1.1; text-shadow:0 2px 20px rgba(250,204,21,0.3);">0</div>
+                            <div style="margin-top:6px; font-size:11px; color:rgba(200,215,230,0.6); font-weight:500;">本月积分</div>
                         </div>
-                        <div style="padding: 12px; border-radius: 12px; border:1px solid rgba(245,158,11,0.32); background: rgba(245,158,11,0.1);">
-                            <div style="font-size:12px; color:rgba(200,215,230,0.82);">折算补贴</div>
-                            <div id="points-month-amount" style="margin-top:4px; font-size:24px; font-weight:900; color:#f59e0b; text-shadow: 0 2px 12px rgba(245,158,11,0.28);">¥0.00</div>
+                        <div style="flex:1; padding:16px; border-radius:14px; background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.06); text-align:center;">
+                            <div id="points-month-amount" style="font-size:32px; font-weight:900; color:#34d399; line-height:1.1; text-shadow:0 2px 20px rgba(52,211,153,0.3);">¥0</div>
+                            <div style="margin-top:6px; font-size:11px; color:rgba(200,215,230,0.6); font-weight:500;">折算补贴</div>
                         </div>
                     </div>
                 </div>
 
-                <div id="points-ranking-card" class="card" style="margin-bottom:12px; border-radius:16px; border:1px solid rgba(250,204,21,0.18); background: radial-gradient(120% 120% at 80% 0%, rgba(250,204,21,0.08), rgba(15,23,42,0.95) 60%); box-shadow: 0 12px 28px rgba(0,0,0,0.28), inset 0 0 0 1px rgba(255,255,255,0.03);">
-                    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px;">
-                        <h4 style="margin:0; font-size:15px; color:rgba(254,240,138,0.95); font-weight:800; letter-spacing:0.3px;">🏆 本月积分排行榜</h4>
-                        <div id="points-my-rank-badge" style="font-size:12px; color:rgba(250,204,21,0.9); font-weight:700; padding:4px 10px; border-radius:20px; background:rgba(250,204,21,0.12); border:1px solid rgba(250,204,21,0.25); display:none;"></div>
+                <!-- 积分排行榜 -->
+                <div id="points-ranking-card" style="margin-bottom:16px; padding:16px 16px 12px; border-radius:16px; background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.06);">
+                    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
+                        <div style="display:flex; align-items:center; gap:8px;">
+                            <span style="font-size:16px;">🏆</span>
+                            <span style="font-size:14px; font-weight:700; color:rgba(226,232,240,0.9);">排行榜</span>
+                        </div>
+                        <div id="points-my-rank-badge" style="font-size:11px; color:rgba(250,204,21,0.9); font-weight:600; padding:3px 10px; border-radius:20px; background:rgba(250,204,21,0.1); border:1px solid rgba(250,204,21,0.2); display:none;"></div>
                     </div>
-                    <div id="points-ranking-list" style="max-height:320px; overflow-y:auto;">
-                        <div style="color:rgba(200,215,230,0.6); font-size:12px;">加载中...</div>
+                    <div id="points-ranking-list" style="max-height:240px; overflow-y:auto;">
+                        <div style="color:rgba(200,215,230,0.5); font-size:12px; text-align:center; padding:16px 0;">加载中...</div>
                     </div>
                 </div>
 
-                <div id="points-apply-card" class="card" style="margin-bottom:12px; border-radius:16px; border:1px solid rgba(255,255,255,0.08); box-shadow: 0 12px 24px rgba(2,6,23,0.32);">
-                    <h4 style="margin:0 0 10px 0; font-size:20px; letter-spacing:0.3px;">申报新的积分申请</h4>
-                    <div style="display:grid; grid-template-columns: 1fr; gap: 12px;">
-                        <div>
-                            <label class="form-label">申请事项</label>
-                            <select id="points-apply-rule" class="form-input"></select>
-                        </div>
-                        <div>
-                            <label class="form-label">申请理由</label>
-                            <textarea id="points-apply-reason" class="form-input form-textarea" placeholder="请填写具体表现与贡献"></textarea>
-                        </div>
-                        <div>
-                            <label class="form-label">证明图片（可选）</label>
-                            <input id="points-apply-evidence-files" type="file" accept="image/*" multiple style="width:100%;">
-                            <div id="points-apply-evidence-hint" style="margin-top:6px; font-size:12px; color:rgba(200,215,230,0.7);">可上传1-6张图片</div>
-                            <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">
-                                <button class="btn btn-secondary" type="button" onclick="uploadPointsEvidence()" style="border-radius:12px;">上传证明图片</button>
-                                <button class="btn" type="button" onclick="submitPointsApplication()" style="border-radius:12px; background:linear-gradient(135deg, #f59e0b, #facc15); color:#111827; font-weight:800;">提交积分申请</button>
-                            </div>
-                            <div id="points-evidence-list" style="margin-top:10px; font-size:12px; color:rgba(200,215,230,0.75);"></div>
-                        </div>
+                <!-- 积分申请表单（批量） -->
+                <div id="points-apply-card" style="margin-bottom:16px; padding:20px; border-radius:16px; background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.06);">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+                        <div style="font-size:15px; font-weight:700; color:rgba(226,232,240,0.9);">申报积分 <span id="points-apply-count-badge" style="font-size:12px; font-weight:600; color:rgba(250,204,21,0.9); margin-left:6px;"></span></div>
+                        <div style="font-size:11px; color:rgba(200,215,230,0.5);">每天限提交1次，可一次申请多条</div>
                     </div>
+                    <div id="points-apply-items" style="display:flex; flex-direction:column; gap:12px;"></div>
+                    <button class="btn" type="button" onclick="addPointsApplyItem()" style="width:100%; margin-top:12px; padding:10px; border-radius:12px; background:rgba(255,255,255,0.04); border:1px dashed rgba(255,255,255,0.15); color:rgba(200,215,230,0.7); font-size:13px; font-weight:600; cursor:pointer;">
+                        + 再添加一条
+                    </button>
+                    <div style="margin-top:14px;">
+                        <label style="display:block; font-size:12px; font-weight:600; color:rgba(200,215,230,0.7); margin-bottom:6px;">证明图片 <span style="color:rgba(200,215,230,0.4);">（可选，最多6张，所有事项共用）</span></label>
+                        <input id="points-apply-evidence-files" type="file" accept="image/*" multiple style="display:none;">
+                        <div id="points-apply-evidence-hint" style="display:none;"></div>
+                        <div id="points-evidence-list" style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:8px;"></div>
+                        <button class="btn" type="button" onclick="document.getElementById('points-apply-evidence-files').click()" style="width:100%; padding:10px; border-radius:12px; background:rgba(255,255,255,0.05); border:1px dashed rgba(255,255,255,0.15); color:rgba(200,215,230,0.7); font-size:13px; font-weight:500; cursor:pointer;">
+                            📷 点击上传图片
+                        </button>
+                    </div>
+                    <button class="btn" type="button" onclick="uploadPointsEvidence().then(()=>submitPointsApplication())" style="width:100%; margin-top:14px; padding:14px; border-radius:14px; background:linear-gradient(135deg, #2563eb, #6366f1); color:#fff; font-size:15px; font-weight:700; border:none; cursor:pointer; box-shadow:0 4px 16px rgba(37,99,235,0.3); letter-spacing:0.5px;">
+                        提交申请
+                    </button>
                 </div>
 
-                <div id="points-admin-filter-card" class="card" style="display:none; margin-bottom:12px; border-radius:16px; border:1px solid rgba(255,255,255,0.08); box-shadow: 0 12px 24px rgba(2,6,23,0.28);">
-                    <h4 style="margin:0 0 10px 0;">积分记录查询（总部）</h4>
-                    <div style="display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:8px;">
-                        <select id="points-admin-store" class="form-input"></select>
-                        <input id="points-admin-name" class="form-input" type="text" placeholder="员工姓名/账号">
-                        <input id="points-admin-start" class="form-input" type="date">
-                        <input id="points-admin-end" class="form-input" type="date">
+                <!-- 总部管理员筛选 -->
+                <div id="points-admin-filter-card" style="display:none; margin-bottom:16px; padding:16px; border-radius:16px; background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.06);">
+                    <div style="font-size:14px; font-weight:700; color:rgba(226,232,240,0.9); margin-bottom:12px;">记录查询</div>
+                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+                        <select id="points-admin-store" class="form-input" style="padding:10px 12px; border-radius:10px; font-size:13px; background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.1); color:rgba(226,232,240,0.95);"></select>
+                        <input id="points-admin-name" class="form-input" type="text" placeholder="姓名/账号" style="padding:10px 12px; border-radius:10px; font-size:13px; background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.1); color:rgba(226,232,240,0.95);">
+                        <input id="points-admin-start" class="form-input" type="date" style="padding:10px 12px; border-radius:10px; font-size:13px; background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.1); color:rgba(226,232,240,0.95);">
+                        <input id="points-admin-end" class="form-input" type="date" style="padding:10px 12px; border-radius:10px; font-size:13px; background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.1); color:rgba(226,232,240,0.95);">
                     </div>
-                    <div style="margin-top:10px; display:flex; justify-content:flex-end;">
-                        <button class="btn" type="button" onclick="queryPointsAdminRecords()" style="background:linear-gradient(135deg,#f59e0b,#facc15); color:#111827; font-weight:800;">查询记录</button>
-                    </div>
+                    <button class="btn" type="button" onclick="queryPointsAdminRecords()" style="margin-top:10px; width:100%; padding:12px; border-radius:12px; background:linear-gradient(135deg, #2563eb, #6366f1); color:#fff; font-size:14px; font-weight:700; border:none;">查询</button>
                 </div>
 
-                <div id="points-records-card" class="card" style="border-radius:16px; border:1px solid rgba(255,255,255,0.08); box-shadow: 0 12px 24px rgba(2,6,23,0.28);">
-                    <h4 id="points-records-title" style="margin:0 0 10px 0;">我的积分记录</h4>
+                <!-- 积分记录 -->
+                <div id="points-records-card" style="padding:16px; border-radius:16px; background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.06);">
+                    <h4 id="points-records-title" style="margin:0 0 12px 0; font-size:14px; font-weight:700; color:rgba(226,232,240,0.9);">积分记录</h4>
                     <div id="points-records-list"></div>
                 </div>
             </div>
@@ -8012,8 +8014,10 @@
                         <button class="btn btn-secondary" id="approval-detail-export-pdf" type="button" style="display:none;" onclick="exportApprovalPdf()">📄 导出PDF</button>
                         <button class="btn" id="approval-detail-admin-delete" type="button" style="display:none; background: linear-gradient(135deg, #ef4444, #dc2626);" onclick="adminDeleteCurrentApproval()">删除</button>
                         <button class="btn" id="approval-detail-pay" type="button" style="display:none; background: linear-gradient(135deg, #3b82f6, #2563eb);" onclick="payCurrentApproval()">标记已付款</button>
+                        <button class="btn" id="approval-detail-return" type="button" style="display:none; background: linear-gradient(135deg, #f59e0b, #d97706);" onclick="promptReturnApproval()">退回</button>
                         <button class="btn btn-secondary" id="approval-detail-reject" type="button" style="display:none;" onclick="promptRejectApproval()">拒绝</button>
                         <button class="btn" id="approval-detail-approve" type="button" style="display:none; background: linear-gradient(135deg, #22c55e, #16a34a);" onclick="decideApproval(true)">通过</button>
+                        <button class="btn" id="approval-detail-resubmit" type="button" style="display:none; background: linear-gradient(135deg, #6366f1, #4f46e5);" onclick="resubmitReturnedApproval()">重新提交</button>
                     </div>
                 </div>
             </div>
@@ -8503,6 +8507,11 @@
                         <div style="font-size:24px;margin-bottom:6px;">👥</div>
                         <div style="font-size:13px;font-weight:600;color:#e2e8f0;">飞书用户</div>
                         <div style="font-size:11px;color:#64748b;margin-top:4px;">用户绑定管理</div>
+                    </div>
+                    <div class="card" style="cursor:pointer;text-align:center;padding:16px 10px;" onclick="openAnnouncementModal()">
+                        <div style="font-size:24px;margin-bottom:6px;">📢</div>
+                        <div style="font-size:13px;font-weight:600;color:#e2e8f0;">发布公告</div>
+                        <div style="font-size:11px;color:#64748b;margin-top:4px;">全员/门店通知</div>
                     </div>
                 </div>
                 <div id="agents-config-section" style="display:none;">
@@ -9456,6 +9465,7 @@
                             </div>
                         </div>
                         <span id="profile-notif-count-badge" style="display:none; background:linear-gradient(135deg,#f59e0b,#d97706); color:#fff; font-size:11px; font-weight:800; padding:3px 10px; border-radius:12px; box-shadow:0 2px 8px rgba(245,158,11,0.3);"></span>
+                        <button id="profile-publish-announcement-btn" style="display:none; background:linear-gradient(135deg,#6366f1,#4f46e5); color:#fff; font-size:11px; font-weight:700; padding:5px 12px; border-radius:10px; border:none; cursor:pointer; box-shadow:0 2px 8px rgba(99,102,241,0.3); white-space:nowrap;" onclick="openAnnouncementModal()">+ 发布公告</button>
                     </div>
                     <!-- 通知列表 -->
                     <div id="profile-notifications"></div>
@@ -11703,6 +11713,20 @@
                     body: JSON.stringify(body)
                 });
             },
+            async returnApproval(id, note) {
+                return this.request('/api/approvals/' + encodeURIComponent(String(id || '')) + '/return', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ note: String(note || '') })
+                });
+            },
+            async resubmitApproval(id) {
+                return this.request('/api/approvals/' + encodeURIComponent(String(id || '')) + '/resubmit', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({})
+                });
+            },
             async payPayment(id, note) {
                 return this.request('/api/payments/' + encodeURIComponent(String(id || '')) + '/pay', {
                     method: 'POST',
@@ -11875,6 +11899,7 @@
             if (s === 'approved') return '已通过';
             if (s === 'paid') return '已付款';
             if (s === 'rejected') return '已拒绝';
+            if (s === 'returned') return '已退回';
             return s || '-';
         }
 
@@ -12018,32 +12043,93 @@
             }
         }
 
-        async function submitPointsApplication() {
-            const ruleEl = document.getElementById('points-apply-rule');
-            const reasonEl = document.getElementById('points-apply-reason');
-            const ruleId = String(ruleEl?.value || '').trim();
-            const reason = String(reasonEl?.value || '').trim();
-            if (!ruleId) {
-                showNotification('请选择申请事项', 'warning');
-                return;
+        let __POINTS_RULES_CACHE = [];
+        let __POINTS_APPLY_COUNTER = 0;
+
+        function addPointsApplyItem() {
+            const container = document.getElementById('points-apply-items');
+            if (!container) return;
+            const count = container.querySelectorAll('.points-apply-item').length;
+            if (count >= 20) { showNotification('单次最多申请20条', 'warning'); return; }
+            __POINTS_APPLY_COUNTER++;
+            const idx = __POINTS_APPLY_COUNTER;
+            const rules = __POINTS_RULES_CACHE || [];
+            const optionsHtml = rules.length
+                ? '<option value="">请选择事项</option>' + rules.map(r => `<option value="${escapeHtml(String(r?.id || ''))}">${escapeHtml(String(r?.itemName || '-'))}（${Number(r?.points || 0)}分）</option>`).join('')
+                : '<option value="">暂无可用事项</option>';
+            const itemDiv = document.createElement('div');
+            itemDiv.className = 'points-apply-item';
+            itemDiv.setAttribute('data-idx', String(idx));
+            itemDiv.style.cssText = 'padding:14px; border-radius:12px; border:1px solid rgba(255,255,255,0.08); background:rgba(255,255,255,0.02); position:relative;';
+            itemDiv.innerHTML = `
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+                    <span style="font-size:12px; font-weight:700; color:rgba(250,204,21,0.85);">第 ${count + 1} 条</span>
+                    ${count > 0 ? `<button type="button" onclick="removePointsApplyItem(this)" style="background:none; border:none; color:rgba(239,68,68,0.8); font-size:18px; cursor:pointer; padding:0 4px; line-height:1;" title="删除此条">✕</button>` : ''}
+                </div>
+                <div style="margin-bottom:10px;">
+                    <label style="display:block; font-size:12px; font-weight:600; color:rgba(200,215,230,0.7); margin-bottom:4px;">申请事项</label>
+                    <select class="form-input points-item-rule" style="width:100%; padding:10px 12px; border-radius:10px; font-size:13px; background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.1); color:rgba(226,232,240,0.95); -webkit-appearance:none; appearance:none;">${optionsHtml}</select>
+                </div>
+                <div>
+                    <label style="display:block; font-size:12px; font-weight:600; color:rgba(200,215,230,0.7); margin-bottom:4px;">申请理由</label>
+                    <textarea class="form-input points-item-reason" placeholder="请填写具体表现与贡献" style="width:100%; min-height:60px; padding:10px 12px; border-radius:10px; font-size:13px; background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.1); color:rgba(226,232,240,0.95); resize:vertical;"></textarea>
+                </div>
+            `;
+            container.appendChild(itemDiv);
+            updatePointsApplyBadge();
+        }
+
+        function removePointsApplyItem(btn) {
+            const itemDiv = btn.closest('.points-apply-item');
+            if (itemDiv) itemDiv.remove();
+            // Re-number
+            const container = document.getElementById('points-apply-items');
+            if (container) {
+                const items = container.querySelectorAll('.points-apply-item');
+                items.forEach((el, i) => {
+                    const numSpan = el.querySelector('span');
+                    if (numSpan) numSpan.textContent = `第 ${i + 1} 条`;
+                    const delBtn = el.querySelector('button[onclick*="removePointsApplyItem"]');
+                    if (i === 0 && items.length === 1 && delBtn) delBtn.style.display = 'none';
+                    else if (delBtn) delBtn.style.display = '';
+                });
             }
-            if (!reason) {
-                showNotification('请填写申请理由', 'warning');
-                return;
+            updatePointsApplyBadge();
+        }
+
+        function updatePointsApplyBadge() {
+            const container = document.getElementById('points-apply-items');
+            const badge = document.getElementById('points-apply-count-badge');
+            if (!container || !badge) return;
+            const count = container.querySelectorAll('.points-apply-item').length;
+            badge.textContent = count > 1 ? `（${count}条）` : '';
+        }
+
+        async function submitPointsApplication() {
+            const container = document.getElementById('points-apply-items');
+            if (!container) return;
+            const itemEls = container.querySelectorAll('.points-apply-item');
+            if (!itemEls.length) { showNotification('请至少添加一条积分申请', 'warning'); return; }
+            const items = [];
+            for (let i = 0; i < itemEls.length; i++) {
+                const el = itemEls[i];
+                const ruleId = String(el.querySelector('.points-item-rule')?.value || '').trim();
+                const reason = String(el.querySelector('.points-item-reason')?.value || '').trim();
+                if (!ruleId) { showNotification(`第${i + 1}条请选择申请事项`, 'warning'); return; }
+                if (!reason) { showNotification(`第${i + 1}条请填写申请理由`, 'warning'); return; }
+                items.push({ ruleId, reason });
             }
             try {
                 await HRMS_API.createApproval('points', {
-                    ruleId,
-                    reason,
+                    items,
                     evidenceUrls: Array.isArray(__POINTS_EVIDENCE_URLS) ? __POINTS_EVIDENCE_URLS.slice() : []
                 });
-                if (reasonEl) reasonEl.value = '';
                 const fileEl = document.getElementById('points-apply-evidence-files');
                 if (fileEl) fileEl.value = '';
                 const listEl = document.getElementById('points-evidence-list');
                 if (listEl) listEl.innerHTML = '';
                 __POINTS_EVIDENCE_URLS = [];
-                showNotification('积分申请已提交（直属上级 → 总部营运 → 总部人事）', 'success');
+                showNotification(`${items.length}条积分申请已提交（直属上级 → 总部营运 → 总部人事）`, 'success');
                 await loadPointsPageData();
             } catch (e) {
                 showNotification('提交失败：' + String(e?.message || e), 'error');
@@ -12057,7 +12143,6 @@
             const isEmployee = !isAdminView && !isStoreManagerView;
             const monthPointsEl = document.getElementById('points-month-points');
             const monthAmountEl = document.getElementById('points-month-amount');
-            const ruleEl = document.getElementById('points-apply-rule');
             const listEl = document.getElementById('points-records-list');
             const applyCard = document.getElementById('points-apply-card');
             const adminFilterCard = document.getElementById('points-admin-filter-card');
@@ -12106,12 +12191,13 @@
                 const rules = (Array.isArray(rulesResp?.items) ? rulesResp.items : [])
                     .filter(r => r?.enabled !== false)
                     .sort((a, b) => Number(b?.points || 0) - Number(a?.points || 0));
-                if (ruleEl) {
-                    ruleEl.innerHTML = rules.length
-                        ? ['<option value="">请选择事项</option>']
-                            .concat(rules.map(r => `<option value="${escapeHtml(String(r?.id || ''))}">${escapeHtml(String(r?.itemName || '-'))}（${Number(r?.points || 0)}分）</option>`))
-                            .join('')
-                        : '<option value="">暂无可用事项（请联系管理员配置）</option>';
+                __POINTS_RULES_CACHE = rules;
+                // Initialize dynamic items container with one default item
+                const itemsContainer = document.getElementById('points-apply-items');
+                if (itemsContainer) {
+                    itemsContainer.innerHTML = '';
+                    __POINTS_APPLY_COUNTER = 0;
+                    addPointsApplyItem();
                 }
 
                 const items = Array.isArray(approvalsResp?.items) ? approvalsResp.items : [];
@@ -12397,10 +12483,19 @@
                 const existingDepType = String(payload?.departureType || '').trim();
                 const depTypeDisplay = existingDepType === 'voluntary' ? '主动离职（辞职）' : existingDepType === 'involuntary' ? '被动离职（劝退/裁员）' : '';
                 const depTypeColor = existingDepType === 'voluntary' ? '#ea580c' : existingDepType === 'involuntary' ? '#7c3aed' : '';
+                const offbApplicantRec = hrmsLookupUserRecord(item?.applicant_username);
+                const offbApplicantName = hrmsDisplayName(item?.applicant_username);
+                const offbApplicantPosition = String(offbApplicantRec?.position || '').trim();
+                const offbApplicantLevel = String(offbApplicantRec?.level || '').trim();
+                const offbApplicantStore = String(offbApplicantRec?.store || '').trim();
                 payloadHtml = `
                     <div style="margin-top: 14px; padding: 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.03);">
                         <div style="font-weight: 900;">离职信息</div>
-                        <div style="margin-top: 10px; color: rgba(200,215,230,0.85);">离职日：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(payload?.resignDate || '-')}</span></div>
+                        <div style="margin-top: 10px; color: rgba(200,215,230,0.85);">申请人：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(offbApplicantName || '-')}</span></div>
+                        ${offbApplicantStore ? `<div style="margin-top: 8px; color: rgba(200,215,230,0.85);">门店：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(offbApplicantStore)}</span></div>` : ''}
+                        ${offbApplicantPosition ? `<div style="margin-top: 8px; color: rgba(200,215,230,0.85);">岗位：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(offbApplicantPosition)}</span></div>` : ''}
+                        ${offbApplicantLevel ? `<div style="margin-top: 8px; color: rgba(200,215,230,0.85);">级别：<span style="color: rgba(139,92,246,0.95); font-weight: 800;">${escapeHtml(offbApplicantLevel)}</span></div>` : ''}
+                        <div style="margin-top: 10px; border-top: 1px solid rgba(255,255,255,0.06); padding-top: 10px; color: rgba(200,215,230,0.85);">离职日：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(payload?.resignDate || '-')}</span></div>
                         <div style="margin-top: 8px; color: rgba(200,215,230,0.85);">原因：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(payload?.reason || '-')}</span></div>
                         <div style="margin-top: 8px; color: rgba(200,215,230,0.85);">说明：<div style="margin-top: 6px; color: rgba(226,232,240,0.95);">${escapeHtml(payload?.detail || '')}</div></div>
                         ${depTypeDisplay ? `<div style="margin-top: 10px; color: rgba(200,215,230,0.85);">离职类型：<span style="color: ${depTypeColor}; font-weight: 900;">${escapeHtml(depTypeDisplay)}</span></div>` : ''}
@@ -12425,12 +12520,14 @@
                 const leaveApplicantRec = hrmsLookupUserRecord(item?.applicant_username);
                 const leaveApplicantStore = String(leaveApplicantRec?.store || payload?.store || '').trim();
                 const leaveApplicantPosition = String(leaveApplicantRec?.position || payload?.position || '').trim();
+                const leaveApplicantLevel = String(leaveApplicantRec?.level || payload?.level || '').trim();
                 payloadHtml = `
                     <div style="margin-top: 14px; padding: 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.03);">
                         <div style="font-weight: 900;">休假信息</div>
                         <div style="margin-top: 10px; color: rgba(200,215,230,0.85);">申请人：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(leaveApplicantName || '-')}</span></div>
                         <div style="margin-top: 8px; color: rgba(200,215,230,0.85);">门店：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(leaveApplicantStore || '-')}</span></div>
                         <div style="margin-top: 8px; color: rgba(200,215,230,0.85);">岗位：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(leaveApplicantPosition || '-')}</span></div>
+                        ${leaveApplicantLevel ? `<div style="margin-top: 8px; color: rgba(200,215,230,0.85);">级别：<span style="color: rgba(139,92,246,0.95); font-weight: 800;">${escapeHtml(leaveApplicantLevel)}</span></div>` : ''}
                         <div style="margin-top: 10px; border-top: 1px solid rgba(255,255,255,0.06); padding-top: 10px; color: rgba(200,215,230,0.85);">休假类型：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(payload?.leaveType || '-')}</span></div>
                         <div style="margin-top: 8px; color: rgba(200,215,230,0.85);">开始日期：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(payload?.startDate || payload?.fromDate || '-')}</span></div>
                         <div style="margin-top: 8px; color: rgba(200,215,230,0.85);">结束日期：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(payload?.endDate || payload?.toDate || '-')}</span></div>
@@ -12450,12 +12547,17 @@
                 const amountText = Number.isFinite(amt) ? ('¥' + Math.abs(amt).toLocaleString('zh-CN', { maximumFractionDigits: 2 })) : '¥0.00';
                 const createdAtText = toBeijingTime(item?.created_at || item?.createdAt || '') || '-';
                 const effectiveAtText = String(item?.effective_date || '').slice(0, 10) || '-';
+                const rpTargetRec = hrmsLookupUserRecord(payload?.targetUsername);
+                const rpTargetLevel = String(rpTargetRec?.level || '').trim();
+                const rpTargetPosition = String(rpTargetRec?.position || '').trim();
                 payloadHtml = `
                     <div style="margin-top: 14px; padding: 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.03);">
                         <div style="font-weight: 900;">奖惩信息</div>
                         <div style="margin-top: 10px; color: rgba(200,215,230,0.85);">类型：<span style="color: ${rpLabel === '奖励' ? 'rgba(34,197,94,0.95)' : 'rgba(239,68,68,0.95)'}; font-weight: 900;">${escapeHtml(rpLabel)}</span></div>
                         <div style="margin-top: 8px; color: rgba(200,215,230,0.85);">受奖罚人：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(payload?.targetName || payload?.targetUsername || '-')}</span></div>
                         <div style="margin-top: 8px; color: rgba(200,215,230,0.85);">账号：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(payload?.targetUsername || '-')}</span></div>
+                        ${rpTargetPosition ? `<div style="margin-top: 8px; color: rgba(200,215,230,0.85);">岗位：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(rpTargetPosition)}</span></div>` : ''}
+                        ${rpTargetLevel ? `<div style="margin-top: 8px; color: rgba(200,215,230,0.85);">级别：<span style="color: rgba(139,92,246,0.95); font-weight: 800;">${escapeHtml(rpTargetLevel)}</span></div>` : ''}
                         <div style="margin-top: 8px; color: rgba(200,215,230,0.85);">门店：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(payload?.store || '-')}</span></div>
                         <div style="margin-top: 8px; color: rgba(200,215,230,0.85);">提报时间：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(createdAtText)}</span></div>
                         <div style="margin-top: 8px; color: rgba(200,215,230,0.85);">生效日期：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(effectiveAtText)}</span></div>
@@ -12481,18 +12583,47 @@
                 const pointsApplicantName = String(payload?.applicantName || '').trim() || hrmsDisplayName(item?.applicant_username);
                 const pointsApplicantPosition = String(payload?.applicantPosition || '').trim() || String(pointsApplicantRec?.position || '').trim();
                 const pointsApplicantDept = String(payload?.applicantDepartment || '').trim() || String(pointsApplicantRec?.department || '').trim();
+                const pointsApplicantLevel = String(payload?.applicantLevel || pointsApplicantRec?.level || '').trim();
                 const pointsApplicantStore = String(payload?.store || pointsApplicantRec?.store || '').trim();
+                const batchItems = Array.isArray(payload?.items) ? payload.items : [];
+                let itemsDetailHtml = '';
+                if (batchItems.length > 1) {
+                    itemsDetailHtml = batchItems.map((it, idx) => `
+                        <div style="margin-top:${idx === 0 ? '10' : '8'}px; padding:10px 12px; border-radius:10px; background:rgba(250,204,21,0.04); border:1px solid rgba(250,204,21,0.12);">
+                            <div style="display:flex; justify-content:space-between; align-items:center;">
+                                <span style="font-size:12px; font-weight:700; color:rgba(250,204,21,0.85);">第${idx + 1}条</span>
+                                <span style="color:#facc15; font-weight:900; font-size:13px;">${Number(it?.points || 0)}分</span>
+                            </div>
+                            <div style="margin-top:6px; color:rgba(200,215,230,0.85); font-size:13px;">事项：<span style="color:rgba(226,232,240,0.95); font-weight:700;">${escapeHtml(it?.itemName || '-')}</span></div>
+                            <div style="margin-top:4px; color:rgba(200,215,230,0.85); font-size:13px;">理由：<span style="color:rgba(226,232,240,0.95);">${escapeHtml(it?.reason || '-')}</span></div>
+                        </div>
+                    `).join('');
+                } else if (batchItems.length === 1) {
+                    itemsDetailHtml = `
+                        <div style="margin-top: 10px; border-top: 1px solid rgba(255,255,255,0.06); padding-top: 10px; color: rgba(200,215,230,0.85);">事项：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(batchItems[0]?.itemName || '-')}</span></div>
+                        <div style="margin-top: 8px; color: rgba(200,215,230,0.85);">理由：<div style="margin-top: 6px; color: rgba(226,232,240,0.95);">${escapeHtml(batchItems[0]?.reason || '-')}</div></div>
+                    `;
+                } else {
+                    itemsDetailHtml = `
+                        <div style="margin-top: 10px; border-top: 1px solid rgba(255,255,255,0.06); padding-top: 10px; color: rgba(200,215,230,0.85);">事项：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(payload?.itemName || '-')}</span></div>
+                        <div style="margin-top: 8px; color: rgba(200,215,230,0.85);">理由：<div style="margin-top: 6px; color: rgba(226,232,240,0.95);">${escapeHtml(payload?.reason || '-')}</div></div>
+                    `;
+                }
                 payloadHtml = `
                     <div style="margin-top: 14px; padding: 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.03);">
-                        <div style="font-weight: 900;">积分申请信息</div>
+                        <div style="font-weight: 900;">积分申请信息${batchItems.length > 1 ? `<span style="font-size:12px; font-weight:600; color:rgba(250,204,21,0.85); margin-left:8px;">（共${batchItems.length}条）</span>` : ''}</div>
                         <div style="margin-top: 10px; color: rgba(200,215,230,0.85);">申请人：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(pointsApplicantName || '-')}</span></div>
                         ${pointsApplicantPosition ? `<div style="margin-top: 8px; color: rgba(200,215,230,0.85);">岗位：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(pointsApplicantPosition)}</span></div>` : ''}
+                        ${pointsApplicantLevel ? `<div style="margin-top: 8px; color: rgba(200,215,230,0.85);">级别：<span style="color: rgba(139,92,246,0.95); font-weight: 800;">${escapeHtml(pointsApplicantLevel)}</span></div>` : ''}
                         ${pointsApplicantDept ? `<div style="margin-top: 8px; color: rgba(200,215,230,0.85);">部门：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(pointsApplicantDept)}</span></div>` : ''}
-                        <div style="margin-top: 10px; border-top: 1px solid rgba(255,255,255,0.06); padding-top: 10px; color: rgba(200,215,230,0.85);">事项：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(payload?.itemName || '-')}</span></div>
-                        <div style="margin-top: 8px; color: rgba(200,215,230,0.85);">积分：<span style="color: #facc15; font-weight: 900;">${pts}分</span></div>
-                        <div style="margin-top: 8px; color: rgba(200,215,230,0.85);">折算金额：<span style="color: #f59e0b; font-weight: 900;">¥${amount.toFixed(2)}</span></div>
                         ${pointsApplicantStore ? `<div style="margin-top: 8px; color: rgba(200,215,230,0.85);">门店：<span style="color: rgba(226,232,240,0.95); font-weight: 800;">${escapeHtml(pointsApplicantStore)}</span></div>` : ''}
-                        <div style="margin-top: 8px; color: rgba(200,215,230,0.85);">理由：<div style="margin-top: 6px; color: rgba(226,232,240,0.95);">${escapeHtml(payload?.reason || '-')}</div></div>
+                        <div style="margin-top: 10px; border-top: 1px solid rgba(255,255,255,0.06); padding-top: 10px;">
+                            <div style="display:flex; justify-content:space-between; align-items:center;">
+                                <span style="color: rgba(200,215,230,0.85);">总积分：<span style="color: #facc15; font-weight: 900;">${pts}分</span></span>
+                                <span style="color: rgba(200,215,230,0.85);">折算金额：<span style="color: #f59e0b; font-weight: 900;">¥${amount.toFixed(2)}</span></span>
+                            </div>
+                        </div>
+                        ${itemsDetailHtml}
                         ${evidences.length ? `<div style="margin-top: 10px; color: rgba(200,215,230,0.85);">证明图片（点击查看）
                             <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">${evidences.map((u, i) => {
                                 const abs = toAbs(u);
@@ -12564,6 +12695,7 @@
 
             const approveBtn = document.getElementById('approval-detail-approve');
             const rejectBtn = document.getElementById('approval-detail-reject');
+            const returnBtn = document.getElementById('approval-detail-return');
             const payBtn = document.getElementById('approval-detail-pay');
             const adminDelBtn = document.getElementById('approval-detail-admin-delete');
             const myUsername = String(currentUser?.username || '').toLowerCase();
@@ -12572,7 +12704,16 @@
             const canAct = String(item?.status || '') === 'pending' && myUsername && (assigneeMatch || chainMatch);
             if (approveBtn) approveBtn.style.display = canAct ? '' : 'none';
             if (rejectBtn) rejectBtn.style.display = canAct ? '' : 'none';
+            if (returnBtn) returnBtn.style.display = canAct ? '' : 'none';
             if (adminDelBtn) adminDelBtn.style.display = isAdminUser() ? '' : 'none';
+
+            // Show resubmit button for returned approvals where current user is the applicant
+            const resubmitBtn = document.getElementById('approval-detail-resubmit');
+            if (resubmitBtn) {
+                const isReturned = String(item?.status || '') === 'returned';
+                const isApplicant = myUsername && String(item?.applicant_username || '').toLowerCase() === myUsername;
+                resubmitBtn.style.display = (isReturned && isApplicant) ? '' : 'none';
+            }
 
             // Show departure type selector only for pending offboarding approvals where user can act
             const depTypeBox = document.getElementById('offboarding-departure-type-box');
@@ -12647,6 +12788,45 @@
             HRMS_API.readApproval(key).then(() => {
                 try { refreshUnreadBadges(); } catch (e) {}
             }).catch(() => {});
+        }
+
+        function promptReturnApproval() {
+            const item = __CURRENT_APPROVAL;
+            if (!item) return;
+            const id = String(item?.id || '').trim();
+            if (!id) return;
+            const note = prompt('请输入退回原因（可选）：');
+            if (note === null) return;
+            HRMS_API.returnApproval(id, String(note || ''))
+                .then(() => {
+                    showNotification('已退回，申请人可修改后重新提交', 'success');
+                    closeApprovalDetailModal();
+                    loadApprovalsData();
+                })
+                .catch((e) => {
+                    showNotification('退回失败：' + String(e?.message || e), 'error');
+                });
+        }
+
+        function resubmitReturnedApproval() {
+            const item = __CURRENT_APPROVAL;
+            if (!item) return;
+            const id = String(item?.id || '').trim();
+            if (!id) return;
+            if (String(item?.status || '') !== 'returned') {
+                showNotification('只有已退回的申请才能重新提交', 'warning');
+                return;
+            }
+            if (!confirm('确认重新提交此申请？')) return;
+            HRMS_API.resubmitApproval(id)
+                .then(() => {
+                    showNotification('已重新提交，等待审批', 'success');
+                    closeApprovalDetailModal();
+                    loadApprovalsData();
+                })
+                .catch((e) => {
+                    showNotification('重新提交失败：' + String(e?.message || e), 'error');
+                });
         }
 
         function promptRejectApproval() {
@@ -13234,7 +13414,7 @@ th { background: #f5f5f5; font-weight: 700; }
 
         function hrmsCanAccessSmartAssistant(role) {
             const r = String(role || '').trim();
-            return r === ROLES.ADMIN;
+            return r === ROLES.ADMIN || r === ROLES.STORE_MANAGER || r === ROLES.PRODUCTION_MANAGER || r === ROLES.HQ_MANAGER;
         }
 
         function hrmsIsAlwaysAllowedPage(pageName) {
@@ -13246,8 +13426,8 @@ th { background: #f5f5f5; font-weight: 700; }
         // 8个管理模块：员工管理/营业日报/待审批/请款/知识库/奖惩管理/分析报表/智能助手
         const _defaultRoleModules = {
             [ROLES.EMPLOYEE]:           ['profile', 'attendance', 'exam', 'points', 'knowledge'],
-            [ROLES.STORE_MANAGER]:      ['profile', 'attendance', 'exam', 'points', 'employees', 'daily-report', 'approvals', 'payment', 'knowledge', 'rewards', 'reports'],
-            [ROLES.PRODUCTION_MANAGER]: ['profile', 'attendance', 'exam', 'points', 'knowledge', 'rewards'],
+            [ROLES.STORE_MANAGER]:      ['profile', 'attendance', 'exam', 'points', 'employees', 'daily-report', 'approvals', 'payment', 'knowledge', 'rewards', 'reports', 'agents'],
+            [ROLES.PRODUCTION_MANAGER]: ['profile', 'attendance', 'exam', 'points', 'knowledge', 'rewards', 'agents'],
             [ROLES.HQ_MANAGER]:         ['profile', 'attendance', 'exam', 'points', 'employees', 'daily-report', 'approvals', 'payment', 'knowledge', 'rewards', 'reports'],
             [ROLES.HR_MANAGER]:         ['profile', 'attendance', 'exam', 'points', 'employees', 'approvals', 'payment', 'knowledge', 'rewards', 'reports'],
             [ROLES.FRONT_MANAGER]:      ['profile', 'attendance', 'exam', 'points', 'daily-report', 'approvals', 'knowledge'],
@@ -13272,8 +13452,11 @@ th { background: #f5f5f5; font-weight: 700; }
             const page = String(pageName || '').trim();
             if (!currentUser && page !== 'profile') return false;
             if (hrmsIsAlwaysAllowedPage(page)) return true;
-            if (page === 'agents' || page === 'users' || page === 'stores' || page === 'roles' || page === 'settings') {
+            if (page === 'users' || page === 'stores' || page === 'roles' || page === 'settings') {
                 return hrmsIsRoleAdmin(role == null ? currentUser?.role : role);
+            }
+            if (page === 'agents') {
+                return hrmsCanAccessSmartAssistant(role == null ? currentUser?.role : role);
             }
             const pages = getRoleModulePages(role == null ? currentUser?.role : role);
             if (pages === null) return true;
@@ -28302,11 +28485,15 @@ ${knowledgeContent.slice(0, 30000)}`;
                 const myStore = String(empMatch?.store || '').trim();
                 const rankResp = await HRMS_API.request('/api/points/ranking?month=' + encodeURIComponent(nowMonth) + (myStore ? '&store=' + encodeURIComponent(myStore) : ''));
                 const rankEl = document.getElementById('profile-points-ranking');
-                if (rankEl && rankResp?.myRank) {
+                if (rankEl) {
                     rankEl.style.display = '';
-                    rankEl.textContent = '🏅 本店排名 第' + rankResp.myRank + '名 / 共' + (rankResp.total || 0) + '人';
-                } else if (rankEl) {
-                    rankEl.style.display = 'none';
+                    if (rankResp?.myRank) {
+                        rankEl.textContent = '🏅 本店排名 第' + rankResp.myRank + '名 / 共' + (rankResp.total || 0) + '人';
+                    } else if (rankResp?.total > 0) {
+                        rankEl.textContent = '📊 本店共' + rankResp.total + '人上榜，你暂未上榜';
+                    } else {
+                        rankEl.textContent = '📊 本月暂无排名数据';
+                    }
                 }
             } catch (e) { console.warn('[profile] ranking fetch failed:', e); }
 
@@ -28466,6 +28653,8 @@ ${knowledgeContent.slice(0, 30000)}`;
             }
 
             const isAdmin = isAdminUser();
+            const pubBtn = document.getElementById('profile-publish-announcement-btn');
+            if (pubBtn) pubBtn.style.display = isAdmin ? '' : 'none';
             const COLLAPSE_LIMIT = 3;
 
             const renderCard = (a, idx, animDelay) => {

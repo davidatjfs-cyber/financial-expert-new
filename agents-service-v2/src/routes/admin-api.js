@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { getConfig, getAllConfigs, upsertConfig, getConfigAuditLog } from '../services/config-service.js';
 import { authRequired, requireRole } from '../middleware/auth.js';
 import { query } from '../utils/db.js';
+import { getBitableStatus, pollAllBitableTables } from '../services/bitable-poller.js';
 
 const r = Router();
 const admin = [authRequired, requireRole('admin','hq_manager')];
@@ -55,8 +56,15 @@ r.get('/audit-log', ...admin, async (req,res) => {
 r.get('/config', ...admin, async (req,res) => {
   res.json({configs: await getAllConfigs()});
 });
+// Single config by key
+r.get('/config/:key', ...admin, async (req,res) => {
+  const val = await getConfig(req.params.key);
+  res.json({ config_key: req.params.key, config_value: val });
+});
 r.put('/config/:key', ...admin, async (req,res) => {
-  await upsertConfig(req.params.key, req.body.value, null, req.user?.username);
+  const val = req.body.config_value ?? req.body.value ?? req.body;
+  const desc = req.body.description || null;
+  await upsertConfig(req.params.key, val, desc, req.user?.username);
   res.json({ok:true});
 });
 
@@ -233,6 +241,159 @@ r.get('/agent-memory/:agentId', ...admin, async (req, res) => {
     const memories = await recallMemories(req.params.agentId, req.query.store || '', req.query.topic || '', 20);
     res.json({ memories });
   } catch (e) { res.json({ memories: [], error: e?.message }); }
+});
+
+// ─── Knowledge Base CRUD ───
+r.get('/knowledge-base', ...admin, async (req, res) => {
+  const result = await query('SELECT id, title, category, enabled, created_at, updated_at, LENGTH(content) as content_length FROM knowledge_base ORDER BY updated_at DESC LIMIT 100').catch(() => ({ rows: [] }));
+  res.json({ items: result.rows });
+});
+r.get('/knowledge-base/:id', ...admin, async (req, res) => {
+  const result = await query('SELECT * FROM knowledge_base WHERE id = $1', [req.params.id]).catch(() => ({ rows: [] }));
+  res.json(result.rows[0] || {});
+});
+r.post('/knowledge-base', ...admin, async (req, res) => {
+  const { title, content, category } = req.body;
+  if (!title || !content) return res.status(400).json({ error: 'title and content required' });
+  const result = await query('INSERT INTO knowledge_base (title, content, category, enabled) VALUES ($1,$2,$3,true) RETURNING id', [title, content, category || 'sop']);
+  res.json({ ok: true, id: result.rows[0]?.id });
+});
+r.put('/knowledge-base/:id', ...admin, async (req, res) => {
+  const { title, content, category, enabled } = req.body;
+  await query('UPDATE knowledge_base SET title=COALESCE($1,title), content=COALESCE($2,content), category=COALESCE($3,category), enabled=COALESCE($4,enabled), updated_at=NOW() WHERE id=$5',
+    [title, content, category, enabled, req.params.id]);
+  res.json({ ok: true });
+});
+r.delete('/knowledge-base/:id', ...admin, async (req, res) => {
+  await query('DELETE FROM knowledge_base WHERE id = $1', [req.params.id]);
+  res.json({ ok: true });
+});
+
+// ─── Feature Flags ───
+r.get('/feature-flags', ...admin, async (req, res) => {
+  const flags = await getConfig('feature_flags') || {};
+  res.json({ flags });
+});
+r.put('/feature-flags', ...admin, async (req, res) => {
+  await upsertConfig('feature_flags', req.body.flags || {}, req.user?.username);
+  res.json({ ok: true });
+});
+
+// ─── Agent Activity (每日任务执行清单) ───
+r.get('/agent-activity', ...admin, async (req, res) => {
+  const date = req.query.date || new Date().toISOString().slice(0, 10);
+  const agent = req.query.agent || null;
+  try {
+    // 1. Task logs (agent interactions)
+    let taskSql = `SELECT agent, store, username, latency_ms, has_evidence, evidence_violation, created_at
+                   FROM agent_task_logs WHERE created_at::date = $1::date`;
+    const taskParams = [date];
+    if (agent) { taskParams.push(agent); taskSql += ` AND agent = $${taskParams.length}`; }
+    taskSql += ` ORDER BY created_at DESC LIMIT 200`;
+    const taskLogs = await query(taskSql, taskParams).catch(() => ({ rows: [] }));
+
+    // 2. Rhythm execution logs
+    let rhySql = `SELECT rhythm_type, status, result_summary, error_message, execution_time, created_at
+                  FROM rhythm_logs WHERE execution_date = $1::date ORDER BY created_at DESC LIMIT 50`;
+    const rhythmLogs = await query(rhySql, [date]).catch(() => ({ rows: [] }));
+
+    // 3. Anomaly triggers
+    let anomSql = `SELECT anomaly_key, store, severity, trigger_value, status, category, description, created_at
+                   FROM anomaly_triggers WHERE trigger_date = $1::date ORDER BY created_at DESC LIMIT 100`;
+    const anomalyTriggers = await query(anomSql, [date]).catch(() => ({ rows: [] }));
+
+    // 4. Master tasks created/updated today
+    let mtSql = `SELECT task_id, title, store, severity, status, agent, created_at, closed_at
+                 FROM master_tasks WHERE created_at::date = $1::date OR closed_at::date = $1::date
+                 ORDER BY created_at DESC LIMIT 100`;
+    const masterTasks = await query(mtSql, [date]).catch(() => ({ rows: [] }));
+
+    // 5. Agent-to-agent collaboration (marketing campaigns auto-created)
+    let collabSql = `SELECT id, store, title, status, notes, created_at
+                     FROM marketing_campaigns WHERE created_at::date = $1::date AND notes LIKE '%auto:%'
+                     ORDER BY created_at DESC LIMIT 20`;
+    const collabEvents = await query(collabSql, [date]).catch(() => ({ rows: [] }));
+
+    // Build per-agent summary
+    const agentSummary = {};
+    for (const log of taskLogs.rows) {
+      const a = log.agent || 'unknown';
+      if (!agentSummary[a]) agentSummary[a] = { interactions: 0, stores: new Set(), avgLatency: 0, totalLatency: 0, evidenceViolations: 0 };
+      agentSummary[a].interactions++;
+      if (log.store) agentSummary[a].stores.add(log.store);
+      agentSummary[a].totalLatency += (log.latency_ms || 0);
+      if (log.evidence_violation) agentSummary[a].evidenceViolations++;
+    }
+    for (const [a, s] of Object.entries(agentSummary)) {
+      s.avgLatency = s.interactions ? Math.round(s.totalLatency / s.interactions) : 0;
+      s.stores = [...s.stores];
+    }
+
+    res.json({
+      date,
+      summary: agentSummary,
+      taskLogs: taskLogs.rows,
+      rhythmLogs: rhythmLogs.rows,
+      anomalyTriggers: anomalyTriggers.rows,
+      masterTasks: masterTasks.rows,
+      collabEvents: collabEvents.rows,
+      totalInteractions: taskLogs.rows.length,
+      totalAnomalies: anomalyTriggers.rows.length,
+      totalRhythm: rhythmLogs.rows.length
+    });
+  } catch (e) { res.status(500).json({ error: e?.message }); }
+});
+
+// ─── Dashboard drill-through: detailed data per metric ───
+r.get('/dashboard-detail/:type', ...admin, async (req, res) => {
+  const type = req.params.type;
+  try {
+    if (type === 'anomalies') {
+      const r2 = await query(`SELECT anomaly_key, store, severity, description, trigger_date, status, category, created_at
+                              FROM anomaly_triggers WHERE trigger_date >= CURRENT_DATE - 7
+                              ORDER BY created_at DESC LIMIT 100`);
+      return res.json({ items: r2.rows });
+    }
+    if (type === 'tasks') {
+      const r2 = await query(`SELECT task_id, title, store, severity, status, agent, created_at, timeout_at, closed_at,
+                                     EXTRACT(EPOCH FROM (COALESCE(closed_at,now()) - created_at))/3600 AS hours_open
+                              FROM master_tasks WHERE status NOT IN ('closed','settled')
+                              ORDER BY CASE severity WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END, created_at ASC LIMIT 100`);
+      return res.json({ items: r2.rows });
+    }
+    if (type === 'messages') {
+      const r2 = await query(`SELECT agent, store, username, latency_ms, has_evidence, evidence_violation, created_at
+                              FROM agent_task_logs WHERE created_at > NOW() - INTERVAL '24h'
+                              ORDER BY created_at DESC LIMIT 100`);
+      return res.json({ items: r2.rows });
+    }
+    if (type === 'rhythm') {
+      const r2 = await query(`SELECT rhythm_type, status, result_summary, error_message, execution_date, execution_time, created_at
+                              FROM rhythm_logs WHERE execution_date >= CURRENT_DATE - 7
+                              ORDER BY created_at DESC LIMIT 50`);
+      return res.json({ items: r2.rows });
+    }
+    res.json({ items: [] });
+  } catch (e) { res.status(500).json({ error: e?.message }); }
+});
+
+// ─── Bitable Polling Status & Manual Trigger ───
+r.get('/bitable-status', ...admin, async (req, res) => {
+  const status = getBitableStatus();
+  const recentCount = await query(
+    `SELECT COUNT(*) as cnt FROM feishu_generic_records WHERE created_at > NOW() - INTERVAL '24h'`
+  ).catch(() => ({ rows: [{ cnt: 0 }] }));
+  res.json({ ...status, recentRecords24h: parseInt(recentCount.rows[0]?.cnt || 0) });
+});
+r.post('/bitable-poll', ...admin, async (req, res) => {
+  pollAllBitableTables().catch(() => {});
+  res.json({ ok: true, message: 'Poll triggered in background' });
+});
+
+// ─── Delete config ───
+r.delete('/config/:key', ...admin, async (req, res) => {
+  await query('DELETE FROM agent_v2_configs WHERE config_key = $1', [req.params.key]).catch(() => {});
+  res.json({ ok: true });
 });
 
 export default r;

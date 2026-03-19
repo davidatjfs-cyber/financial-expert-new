@@ -1084,8 +1084,8 @@ export function registerAgentConfigRoutes(app, authRequired) {
   // === 角色模块权限配置 ===
   const DEFAULT_ROLE_MODULES = {
     store_employee: ['profile', 'attendance', 'points', 'exam'],
-    store_manager: ['profile', 'attendance', 'employees', 'daily-report', 'approvals', 'payment', 'rewards', 'points', 'reports'],
-    store_production_manager: ['profile', 'attendance', 'reports', 'points'],
+    store_manager: ['profile', 'attendance', 'employees', 'daily-report', 'approvals', 'payment', 'rewards', 'points', 'reports', 'knowledge', 'exam', 'agents'],
+    store_production_manager: ['profile', 'attendance', 'reports', 'points', 'knowledge', 'rewards', 'exam', 'agents'],
     hq_manager: ['profile', 'attendance', 'daily-report', 'approvals', 'employees', 'payment', 'exam', 'rewards', 'points', 'knowledge', 'reports', 'agents'],
     hr_manager: ['profile', 'attendance', 'employees', 'approvals', 'payment', 'reports', 'exam'],
     cashier: ['profile', 'attendance', 'payment', 'exam'],

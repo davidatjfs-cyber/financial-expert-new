@@ -12,7 +12,16 @@ import https from 'https';
 import { execFileSync } from 'child_process';
 import OSS from 'ali-oss';
 import COS from 'cos-nodejs-sdk-v5';
-import { Pool } from 'pg';
+import pg from 'pg';
+const { Pool } = pg;
+// Return raw timestamp strings (Beijing time) instead of JS Date objects
+// OID 1114 = timestamp without time zone, OID 1184 = timestamp with time zone
+pg.types.setTypeParser(1114, str => str);
+pg.types.setTypeParser(1184, str => {
+  // Convert timestamptz to Beijing time string
+  const d = new Date(str);
+  return d.toLocaleString('sv-SE', { timeZone: 'Asia/Shanghai' }).replace('T', ' ');
+});
 import { Readable } from 'stream';
 import zlib from 'zlib';
 import XLSX from 'xlsx';
@@ -2358,25 +2367,69 @@ app.post('/api/approvals', authRequired, async (req, res) => {
         }
         const applicantStore = String(applicant?.store || '').trim();
         if (!applicantStore) return res.status(400).json({ error: 'missing_store' });
-        const ruleId = String(payload?.ruleId || '').trim();
-        const reason = String(payload?.reason || '').trim();
-        if (!ruleId) return res.status(400).json({ error: 'missing_rule' });
-        if (!reason) return res.status(400).json({ error: 'missing_reason' });
+
+        // Daily submission limit: 1 per day per employee
+        // Use CURRENT_DATE (server-side, respects pg timezone) to avoid JS Date timezone mismatch
+        try {
+          const dupCheck = await pool.query(
+            `SELECT id FROM approval_requests WHERE type='points' AND lower(applicant_username)=lower($1) AND created_at >= CURRENT_DATE AND status != 'returned' LIMIT 1`,
+            [username]
+          );
+          if (dupCheck.rows?.length > 0) {
+            return res.status(400).json({ error: 'daily_limit', message: '每天只能提交1次积分申请，今天已提交过' });
+          }
+        } catch (e) { /* ignore check error, allow submission */ }
+
         const rules = Array.isArray(state?.pointRules) ? state.pointRules : [];
-        const rule = rules.find(r => String(r?.id || '').trim() === ruleId);
-        if (!rule) return res.status(400).json({ error: 'invalid_rule' });
-        if (rule?.enabled === false) return res.status(400).json({ error: 'rule_disabled' });
-        const ruleStore = String(rule?.store || '').trim();
-        if (ruleStore && ruleStore !== applicantStore) return res.status(400).json({ error: 'rule_store_mismatch' });
-        const rulePoints = safeNumber(rule?.points);
-        if (rulePoints == null || rulePoints <= 0) return res.status(400).json({ error: 'invalid_rule_points' });
+        // Support batch items array OR single ruleId+reason (backward compat)
+        const rawItems = Array.isArray(payload?.items) ? payload.items : [];
+        if (rawItems.length > 0) {
+          // Batch mode
+          if (rawItems.length > 20) return res.status(400).json({ error: 'too_many_items', message: '单次最多申请20条' });
+          const validatedItems = [];
+          let totalPoints = 0;
+          for (let i = 0; i < rawItems.length; i++) {
+            const it = rawItems[i];
+            const rid = String(it?.ruleId || '').trim();
+            const rsn = String(it?.reason || '').trim();
+            if (!rid) return res.status(400).json({ error: 'missing_rule', message: `第${i + 1}条缺少事项` });
+            if (!rsn) return res.status(400).json({ error: 'missing_reason', message: `第${i + 1}条缺少理由` });
+            const rule = rules.find(r => String(r?.id || '').trim() === rid);
+            if (!rule) return res.status(400).json({ error: 'invalid_rule', message: `第${i + 1}条事项无效` });
+            if (rule?.enabled === false) return res.status(400).json({ error: 'rule_disabled', message: `第${i + 1}条事项已禁用` });
+            const ruleStore = String(rule?.store || '').trim();
+            if (ruleStore && ruleStore !== applicantStore) return res.status(400).json({ error: 'rule_store_mismatch', message: `第${i + 1}条事项门店不匹配` });
+            const rulePoints = safeNumber(rule?.points);
+            if (rulePoints == null || rulePoints <= 0) return res.status(400).json({ error: 'invalid_rule_points', message: `第${i + 1}条积分无效` });
+            validatedItems.push({ ruleId: rid, itemName: String(rule?.itemName || '').trim() || '积分事项', points: rulePoints, reason: rsn });
+            totalPoints += rulePoints;
+          }
+          payload.items = validatedItems;
+          payload.totalPoints = totalPoints;
+          payload.points = totalPoints;
+          payload.itemName = validatedItems.length === 1 ? validatedItems[0].itemName : `${validatedItems.length}项积分申请（共${totalPoints}分）`;
+        } else {
+          // Single item mode (backward compat)
+          const ruleId = String(payload?.ruleId || '').trim();
+          const reason = String(payload?.reason || '').trim();
+          if (!ruleId) return res.status(400).json({ error: 'missing_rule' });
+          if (!reason) return res.status(400).json({ error: 'missing_reason' });
+          const rule = rules.find(r => String(r?.id || '').trim() === ruleId);
+          if (!rule) return res.status(400).json({ error: 'invalid_rule' });
+          if (rule?.enabled === false) return res.status(400).json({ error: 'rule_disabled' });
+          const ruleStore = String(rule?.store || '').trim();
+          if (ruleStore && ruleStore !== applicantStore) return res.status(400).json({ error: 'rule_store_mismatch' });
+          const rulePoints = safeNumber(rule?.points);
+          if (rulePoints == null || rulePoints <= 0) return res.status(400).json({ error: 'invalid_rule_points' });
+          payload.itemName = String(rule?.itemName || payload?.itemName || '').trim() || '积分事项';
+          payload.points = rulePoints;
+          payload.ruleId = ruleId;
+        }
         payload.store = applicantStore;
         payload.applicantName = String(applicant?.name || '').trim() || username;
         payload.applicantPosition = String(applicant?.position || '').trim() || '';
         payload.applicantDepartment = String(applicant?.department || '').trim() || '';
-        payload.itemName = String(rule?.itemName || payload?.itemName || '').trim() || '积分事项';
-        payload.points = rulePoints;
-        payload.ruleId = ruleId;
+        payload.applicantLevel = String(applicant?.level || '').trim() || '';
         payload.evidenceUrls = Array.isArray(payload?.evidenceUrls) ? payload.evidenceUrls.map(x => String(x || '').trim()).filter(Boolean) : [];
       } else if (!(role === 'admin' || role === 'hq_manager' || role === 'hr_manager' || role === 'store_manager')) {
         return res.status(403).json({ error: 'forbidden' });
@@ -2465,8 +2518,9 @@ app.post('/api/approvals', authRequired, async (req, res) => {
           // 奖惩: 直属上级 → 人事经理
           assignees = [applicantManager, hrManagerUsername].filter(Boolean);
         } else if (type === 'points') {
-          // 积分: 直属上级 → 总部营运 → 人事经理
-          assignees = [applicantManager, hqManagerUsername, hrManagerUsername].filter(Boolean);
+          // 积分: 直属上级 → 门店店长(若直属非店长) → 总部营运 → 人事经理
+          const storeManagerForPoints = pickStoreRoleUsernameByStore(state, applicantStore, ['store_manager']);
+          assignees = [applicantManager, storeManagerForPoints, hqManagerUsername, hrManagerUsername].filter(Boolean);
         } else {
           assignees = [applicantManager, adminUsername].filter(Boolean);
         }
@@ -2653,7 +2707,7 @@ app.post('/api/approvals/:id/decide', authRequired, async (req, res) => {
     const idx = chain.findIndex(x => String(x?.assignee || '').toLowerCase() === username.toLowerCase() && String(x?.status || '') === 'pending');
     if (idx < 0) return res.status(403).json({ error: 'forbidden' });
 
-    const nowIso = new Date().toISOString();
+    const nowIso = hrmsNowISO();
     chain[idx] = { ...chain[idx], status: approved ? 'approved' : 'rejected', decidedAt: nowIso, note };
 
     let nextStatus = approved ? 'pending' : 'rejected';
@@ -2792,7 +2846,7 @@ app.post('/api/approvals/:id/decide', authRequired, async (req, res) => {
           email: String(emp?.email || '').trim() || '',
           status: 'active',
           promotionHistory: Array.isArray(emp?.promotionHistory) ? emp.promotionHistory : [],
-          createdAt: new Date().toISOString().slice(0, 10),
+          createdAt: hrmsNowISO().slice(0, 10),
           lastLogin: null
         };
         nextEmployees.push(nextEmp);
@@ -2809,7 +2863,7 @@ app.post('/api/approvals/:id/decide', authRequired, async (req, res) => {
           if (smRec) storeManagerUsername = String(smRec.username || '').trim();
         }
         const title = '新员工入职审批已通过';
-        const todayStr = new Date().toISOString().slice(0, 10).replace(/-/g, '年').replace(/年(\d{2})$/, '月$1日');
+        const todayStr = hrmsNowISO().slice(0, 10).replace(/-/g, '年').replace(/年(\d{2})$/, '月$1日');
         const submitterRec = stateFindUserRecord(state, submitter) || {};
         const submitterName = String(submitterRec?.name || submitter).trim() || submitter;
         const msg = `${submitterName}你好，你提交的新员工「${empName}」入职已经成功，该员工的系统账号是 ${newUsername}，密码是 ${empPassword}，请通知该员工上线吧！\n门店：${empStore || '-'}\n总部 ${todayStr}`;
@@ -2940,7 +2994,7 @@ app.post('/api/approvals/:id/decide', authRequired, async (req, res) => {
           }
 
           if (finalApproved) {
-            const today = new Date().toISOString().slice(0, 10);
+            const today = hrmsNowISO().slice(0, 10);
             const applicantUser = String(updated.applicant_username || '').trim();
             const employees = Array.isArray(state.employees) ? state.employees : [];
             const empIdx = employees.findIndex(e => String(e?.username || '').toLowerCase() === applicantUser.toLowerCase());
@@ -3009,7 +3063,7 @@ app.post('/api/approvals/:id/decide', authRequired, async (req, res) => {
             oldLevel = String(nextEmployees[empIdx].level || '').trim();
             oldPosition = String(nextEmployees[empIdx].position || '').trim();
             const promoRecord = {
-              date: new Date().toISOString().slice(0, 10),
+              date: hrmsNowISO().slice(0, 10),
               fromLevel: oldLevel,
               toLevel: newLevel || oldLevel,
               fromPosition: oldPosition,
@@ -3263,7 +3317,7 @@ app.post('/api/approvals/:id/decide', authRequired, async (req, res) => {
         const reasonText = String(updated.payload?.reason || '').trim();
         const points = safeNumber(updated.payload?.points) || 0;
         const store = String(updated.payload?.store || applicant?.store || '').trim();
-        const month = String(updated.created_at || updated.updated_at || '').slice(0, 7) || new Date().toISOString().slice(0, 7);
+        const month = String(updated.created_at || updated.updated_at || '').slice(0, 7) || hrmsNowISO().slice(0, 7);
         const subsidyAmount = Number((points * 0.5).toFixed(2));
 
         if (finalApproved) {
@@ -3351,9 +3405,9 @@ app.post('/api/approvals/:id/decide', authRequired, async (req, res) => {
           const mc = confirmations.find(c => c.id === confirmationId);
           if (mc) {
             mc.status = 'approved';
-            mc.approvedAt = new Date().toISOString();
+            mc.approvedAt = hrmsNowISO();
             mc.history = mc.history || [];
-            mc.history.push({ action: 'approved', by: 'system', at: new Date().toISOString() });
+            mc.history.push({ action: 'approved', by: 'system', at: hrmsNowISO() });
           }
           state.monthlyConfirmations = confirmations;
 
@@ -3370,7 +3424,7 @@ app.post('/api/approvals/:id/decide', authRequired, async (req, res) => {
           if (mc) {
             mc.status = 'rejected';
             mc.history = mc.history || [];
-            mc.history.push({ action: 'rejected', by: String(req.user?.username || ''), at: new Date().toISOString(), note });
+            mc.history.push({ action: 'rejected', by: String(req.user?.username || ''), at: hrmsNowISO(), note });
           }
           state.monthlyConfirmations = confirmations;
           const msg = `${mcMonth} ${mcStore || '全部门店'} 的月度考勤确认被驳回${note ? `：${note}` : ''}`;
@@ -3447,6 +3501,161 @@ app.post('/api/approvals/:id/decide', authRequired, async (req, res) => {
   }
 });
 
+// ── Return (退回) an approval back to applicant for modification ──
+app.post('/api/approvals/:id/return', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const id = String(req.params?.id || '').trim();
+  const note = String(req.body?.note || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  if (!id) return res.status(400).json({ error: 'missing_id' });
+
+  try {
+    const r0 = await pool.query(
+      'select id, type, status, applicant_username, current_assignee_username, chain, payload, effective_date, created_at, updated_at from approval_requests where id = $1 limit 1',
+      [id]
+    );
+    const row = r0.rows?.[0] || null;
+    if (!row) return res.status(404).json({ error: 'not_found' });
+    if (String(row.status || '') !== 'pending') return res.status(400).json({ error: 'not_pending' });
+
+    // Verify the current user is in the approval chain and is a pending assignee
+    const chain = Array.isArray(row.chain) ? row.chain : [];
+    const idx = chain.findIndex(x => String(x?.assignee || '').toLowerCase() === username.toLowerCase() && String(x?.status || '') === 'pending');
+    if (idx < 0) return res.status(403).json({ error: 'forbidden' });
+
+    const nowIso = hrmsNowISO();
+    // Mark the current step as returned
+    chain[idx] = { ...chain[idx], status: 'returned', decidedAt: nowIso, note };
+
+    // Reset all previous approved steps back to queued so the chain restarts on resubmit
+    for (let i = 0; i < idx; i++) {
+      if (chain[i] && String(chain[i].status || '') === 'approved') {
+        chain[i] = { ...chain[i], status: 'queued', decidedAt: null, note: '' };
+      }
+    }
+    // Reset any remaining queued steps
+    for (let i = idx + 1; i < chain.length; i++) {
+      if (chain[i]) chain[i] = { ...chain[i], status: 'queued', decidedAt: null, note: '' };
+    }
+
+    // Save the returned payload with return metadata
+    const updatedPayload = row.payload && typeof row.payload === 'object' ? { ...row.payload } : {};
+    updatedPayload.returnedAt = nowIso;
+    updatedPayload.returnedBy = username;
+    updatedPayload.returnNote = note;
+
+    const r1 = await pool.query(
+      `update approval_requests
+       set status='returned', current_assignee_username=null, chain=$2::jsonb, payload=$3::jsonb, updated_at=now()
+       where id=$1
+       returning id, type, status, applicant_username, current_assignee_username, chain, payload, effective_date, executed_at, created_at, updated_at`,
+      [id, JSON.stringify(chain), JSON.stringify(updatedPayload)]
+    );
+    const updated = r1.rows?.[0] || null;
+
+    // Notify applicant that the request was returned
+    try {
+      const state0 = (await getSharedState()) || {};
+      let stateN = state0;
+      const applicantUser = String(row.applicant_username || '').trim();
+      const applicant = stateFindUserRecord(stateN, applicantUser) || {};
+      const applicantName = String(applicant?.name || applicantUser).trim() || applicantUser;
+      const returnerRec = stateFindUserRecord(stateN, username) || {};
+      const returnerName = String(returnerRec?.name || username).trim() || username;
+      const label = approvalTypeLabel(String(row.type || ''));
+      const msg = `${applicantName}，你提交的${label}申请被${returnerName}退回${note ? `，原因：${note}` : ''}。请修改后重新提交。`;
+      stateN = addStateNotification(stateN, makeNotif(applicantUser, `${label}申请被退回`, msg, { type: `${row.type}_returned`, approvalId: id }));
+      await saveSharedState(stateN);
+
+      // 飞书通知申请人
+      try {
+        const fu = await lookupFeishuUserByUsername(applicantUser);
+        if (fu?.open_id) {
+          const feishuMsg = `📋 【HRMS 审批退回】\n\n${applicantName}，您的${label}申请被${returnerName}退回${note ? `，原因：${note}` : ''}。\n请修改后重新提交：https://nnyx.cc`;
+          await sendLarkMessage(fu.open_id, feishuMsg, { skipDedup: true });
+        }
+      } catch (e) { console.error('[approval-return] feishu notify error:', e?.message); }
+    } catch (e) { console.error('[approval-return] notification error:', e?.message); }
+
+    return res.json({ item: updated });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
+// ── Resubmit a returned approval ──
+app.post('/api/approvals/:id/resubmit', authRequired, async (req, res) => {
+  const username = String(req.user?.username || '').trim();
+  const id = String(req.params?.id || '').trim();
+  if (!username) return res.status(400).json({ error: 'missing_user' });
+  if (!id) return res.status(400).json({ error: 'missing_id' });
+
+  try {
+    const r0 = await pool.query(
+      'select id, type, status, applicant_username, current_assignee_username, chain, payload, effective_date, created_at, updated_at from approval_requests where id = $1 limit 1',
+      [id]
+    );
+    const row = r0.rows?.[0] || null;
+    if (!row) return res.status(404).json({ error: 'not_found' });
+    if (String(row.status || '') !== 'returned') return res.status(400).json({ error: 'not_returned' });
+
+    // Only the original applicant can resubmit
+    if (String(row.applicant_username || '').toLowerCase() !== username.toLowerCase()) {
+      return res.status(403).json({ error: 'forbidden' });
+    }
+
+    // Reset the chain: all steps back to pending/queued, first step becomes pending
+    const chain = Array.isArray(row.chain) ? row.chain : [];
+    for (let i = 0; i < chain.length; i++) {
+      chain[i] = { ...chain[i], status: i === 0 ? 'pending' : 'queued', decidedAt: null, note: '' };
+    }
+    const firstAssignee = chain.length > 0 ? String(chain[0]?.assignee || '').trim() : '';
+
+    // Clean up return metadata from payload
+    const updatedPayload = row.payload && typeof row.payload === 'object' ? { ...row.payload } : {};
+    updatedPayload.resubmittedAt = hrmsNowISO();
+    delete updatedPayload.returnedAt;
+    delete updatedPayload.returnedBy;
+    delete updatedPayload.returnNote;
+
+    const r1 = await pool.query(
+      `update approval_requests
+       set status='pending', current_assignee_username=$2, chain=$3::jsonb, payload=$4::jsonb, updated_at=now()
+       where id=$1
+       returning id, type, status, applicant_username, current_assignee_username, chain, payload, effective_date, executed_at, created_at, updated_at`,
+      [id, firstAssignee || null, JSON.stringify(chain), JSON.stringify(updatedPayload)]
+    );
+    const updated = r1.rows?.[0] || null;
+
+    // Notify the first assignee about the resubmission
+    try {
+      const state0 = (await getSharedState()) || {};
+      let stateN = state0;
+      const applicantRec = stateFindUserRecord(stateN, username) || {};
+      const applicantName = String(applicantRec?.name || username).trim() || username;
+      const label = approvalTypeLabel(String(row.type || ''));
+      if (firstAssignee) {
+        const msg = `${applicantName}重新提交了${label}申请，请审批。`;
+        stateN = addStateNotification(stateN, makeNotif(firstAssignee, `${label}申请待审批`, msg, { type: `${row.type}_resubmitted`, approvalId: id }));
+        await saveSharedState(stateN);
+
+        // 飞书通知审批人
+        try {
+          const fu = await lookupFeishuUserByUsername(firstAssignee);
+          if (fu?.open_id) {
+            const feishuMsg = `📋 【HRMS 审批通知】\n\n${applicantName}重新提交了${label}申请，请审批。\n审批地址：https://nnyx.cc`;
+            await sendLarkMessage(fu.open_id, feishuMsg, { skipDedup: true });
+          }
+        } catch (e) { console.error('[approval-resubmit] feishu notify error:', e?.message); }
+      }
+    } catch (e) { console.error('[approval-resubmit] notification error:', e?.message); }
+
+    return res.json({ item: updated });
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: String(e?.message || e) });
+  }
+});
+
 app.post('/api/payments/:id/pay', authRequired, async (req, res) => {
   const username = String(req.user?.username || '').trim();
   const role = String(req.user?.role || '').trim();
@@ -3466,7 +3675,7 @@ app.post('/api/payments/:id/pay', authRequired, async (req, res) => {
     if (String(row.type || '') !== 'payment') return res.status(400).json({ error: 'invalid_type' });
     if (String(row.status || '') !== 'approved') return res.status(400).json({ error: 'not_approved' });
 
-    const nowIso = new Date().toISOString();
+    const nowIso = hrmsNowISO();
     const nextPayload = {
       ...(row.payload && typeof row.payload === 'object' ? row.payload : {}),
       paidAt: nowIso,
@@ -5234,26 +5443,63 @@ app.post('/api/daily-reports', authRequired, async (req, res) => {
         updatedBy: username
       };
 
-      // 同时更新到daily_reports表（只保存实际数据，目标从系统设置读取）
+      // 同时更新到daily_reports表（保存所有业务字段供Agent/BI查询）
       try {
         const todayWechat = Math.max(0, Math.floor(Number(payload?.new_wechat_members) || 0));
-        // 先写入今日新增，然后自动计算本月累计（不接受客户端传入的wechat_month_total）
+        const dineOrders = Math.floor(Number(payload?.dine?.orders) || 0);
+        const dineRevenue = Number(payload?.dine?.revenue) || 0;
+        const dineTraffic = Math.floor(Number(payload?.dine?.traffic) || 0);
+        const preDiscountRevenue = Number(payload?.gross) || 0;
+        const totalDiscount = Number(payload?.discount?.total) || 0;
+        const efficiencyVal = Number(payload?.efficiency) || 0;
+        const laborTotalVal = Number(payload?.laborTotal) || 0;
+        const grossProfit = Number(payload?.margin) || 0;
+        const budgetVal = Number(payload?.budget) || 0;
+        const budgetRateVal = Number(payload?.budgetRate) || 0;
+        const deliveryElemeRev = Number(payload?.delivery?.eleme?.revenue) || 0;
+        const deliveryMeituanRev = Number(payload?.delivery?.meituan?.revenue) || 0;
+        const deliveryActual = Number(payload?.delivery?.eleme?.actual || 0) + Number(payload?.delivery?.meituan?.actual || 0);
+        const deliveryOrders = Math.floor(Number(payload?.delivery?.eleme?.orders || 0)) + Math.floor(Number(payload?.delivery?.meituan?.orders || 0));
+        const deliveryPreRevenue = deliveryElemeRev + deliveryMeituanRev;
+        const deliveryBadReviews = Math.floor(Number(payload?.badReviews?.meituan || 0)) + Math.floor(Number(payload?.badReviews?.eleme || 0));
+
         await pool.query(`
-          INSERT INTO daily_reports (store, brand, date, actual_revenue, actual_margin, dianping_rating, new_wechat_members, wechat_month_total, submitted, submitted_at)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, 0, true, NOW())
+          INSERT INTO daily_reports (store, brand, date, actual_revenue, actual_margin, dianping_rating, new_wechat_members, wechat_month_total, submitted, submitted_at,
+            pre_discount_revenue, total_discount, dine_orders, dine_revenue, dine_traffic, efficiency, labor_total, gross_profit, budget, budget_rate,
+            delivery_actual, delivery_orders, delivery_pre_revenue, delivery_bad_reviews)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, 0, true, NOW(),
+            $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
+            $18, $19, $20, $21)
           ON CONFLICT (store, date)
           DO UPDATE SET 
             actual_revenue = EXCLUDED.actual_revenue,
             actual_margin = EXCLUDED.actual_margin,
             dianping_rating = EXCLUDED.dianping_rating,
             new_wechat_members = EXCLUDED.new_wechat_members,
+            pre_discount_revenue = EXCLUDED.pre_discount_revenue,
+            total_discount = EXCLUDED.total_discount,
+            dine_orders = EXCLUDED.dine_orders,
+            dine_revenue = EXCLUDED.dine_revenue,
+            dine_traffic = EXCLUDED.dine_traffic,
+            efficiency = EXCLUDED.efficiency,
+            labor_total = EXCLUDED.labor_total,
+            gross_profit = EXCLUDED.gross_profit,
+            budget = EXCLUDED.budget,
+            budget_rate = EXCLUDED.budget_rate,
+            delivery_actual = EXCLUDED.delivery_actual,
+            delivery_orders = EXCLUDED.delivery_orders,
+            delivery_pre_revenue = EXCLUDED.delivery_pre_revenue,
+            delivery_bad_reviews = EXCLUDED.delivery_bad_reviews,
             updated_at = NOW()
         `, [
           store, brand, date, 
           payload?.actual || 0,
           payload?.margin || null, 
           payload?.dianping_rating || null,
-          todayWechat
+          todayWechat,
+          preDiscountRevenue, totalDiscount, dineOrders, dineRevenue, dineTraffic,
+          efficiencyVal, laborTotalVal, grossProfit, budgetVal, budgetRateVal,
+          deliveryActual, deliveryOrders, deliveryPreRevenue, deliveryBadReviews
         ]);
         // 重新计算本月累计并写回
         const monthStart = date.slice(0, 7) + '-01';
@@ -5264,7 +5510,7 @@ app.post('/api/daily-reports', authRequired, async (req, res) => {
             WHERE store = $1 AND date >= $2 AND date <= $3
           ) WHERE store = $1 AND date = $3
         `, [store, monthStart, date]);
-      } catch (e) { console.error('[daily_report_update_month]', e.message); }
+      } catch (e) { console.error('[daily_report_update]', e.message); }
 
       if (wantSubmit || submittedAt) {
         item.submittedAt = nextSubmittedAt;
@@ -5292,15 +5538,48 @@ app.post('/api/daily-reports', authRequired, async (req, res) => {
       // 新建日报时也必须同步到 daily_reports（否则评分模型/Agent 数据源会缺失）
       try {
         const todayWechat = Math.max(0, Math.floor(Number(payload?.new_wechat_members) || 0));
+        const dineOrders = Math.floor(Number(payload?.dine?.orders) || 0);
+        const dineRevenue = Number(payload?.dine?.revenue) || 0;
+        const dineTraffic = Math.floor(Number(payload?.dine?.traffic) || 0);
+        const preDiscountRevenue = Number(payload?.gross) || 0;
+        const totalDiscount = Number(payload?.discount?.total) || 0;
+        const efficiencyVal = Number(payload?.efficiency) || 0;
+        const laborTotalVal = Number(payload?.laborTotal) || 0;
+        const grossProfit = Number(payload?.margin) || 0;
+        const budgetVal = Number(payload?.budget) || 0;
+        const budgetRateVal = Number(payload?.budgetRate) || 0;
+        const deliveryActual = Number(payload?.delivery?.eleme?.actual || 0) + Number(payload?.delivery?.meituan?.actual || 0);
+        const deliveryOrders = Math.floor(Number(payload?.delivery?.eleme?.orders || 0)) + Math.floor(Number(payload?.delivery?.meituan?.orders || 0));
+        const deliveryPreRevenue = Number(payload?.delivery?.eleme?.revenue || 0) + Number(payload?.delivery?.meituan?.revenue || 0);
+        const deliveryBadReviews = Math.floor(Number(payload?.badReviews?.meituan || 0)) + Math.floor(Number(payload?.badReviews?.eleme || 0));
+
         await pool.query(`
-          INSERT INTO daily_reports (store, brand, date, actual_revenue, actual_margin, dianping_rating, new_wechat_members, wechat_month_total, submitted, submitted_at)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, 0, true, NOW())
+          INSERT INTO daily_reports (store, brand, date, actual_revenue, actual_margin, dianping_rating, new_wechat_members, wechat_month_total, submitted, submitted_at,
+            pre_discount_revenue, total_discount, dine_orders, dine_revenue, dine_traffic, efficiency, labor_total, gross_profit, budget, budget_rate,
+            delivery_actual, delivery_orders, delivery_pre_revenue, delivery_bad_reviews)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, 0, true, NOW(),
+            $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
+            $18, $19, $20, $21)
           ON CONFLICT (store, date)
           DO UPDATE SET
             actual_revenue = EXCLUDED.actual_revenue,
             actual_margin = EXCLUDED.actual_margin,
             dianping_rating = EXCLUDED.dianping_rating,
             new_wechat_members = EXCLUDED.new_wechat_members,
+            pre_discount_revenue = EXCLUDED.pre_discount_revenue,
+            total_discount = EXCLUDED.total_discount,
+            dine_orders = EXCLUDED.dine_orders,
+            dine_revenue = EXCLUDED.dine_revenue,
+            dine_traffic = EXCLUDED.dine_traffic,
+            efficiency = EXCLUDED.efficiency,
+            labor_total = EXCLUDED.labor_total,
+            gross_profit = EXCLUDED.gross_profit,
+            budget = EXCLUDED.budget,
+            budget_rate = EXCLUDED.budget_rate,
+            delivery_actual = EXCLUDED.delivery_actual,
+            delivery_orders = EXCLUDED.delivery_orders,
+            delivery_pre_revenue = EXCLUDED.delivery_pre_revenue,
+            delivery_bad_reviews = EXCLUDED.delivery_bad_reviews,
             updated_at = NOW()
         `, [
           store,
@@ -5309,7 +5588,10 @@ app.post('/api/daily-reports', authRequired, async (req, res) => {
           payload?.actual || 0,
           payload?.margin || null,
           payload?.dianping_rating || null,
-          todayWechat
+          todayWechat,
+          preDiscountRevenue, totalDiscount, dineOrders, dineRevenue, dineTraffic,
+          efficiencyVal, laborTotalVal, grossProfit, budgetVal, budgetRateVal,
+          deliveryActual, deliveryOrders, deliveryPreRevenue, deliveryBadReviews
         ]);
       } catch (e) { console.error('[daily_report_insert]', e.message); }
 
@@ -7095,7 +7377,7 @@ app.get('/api/reports/leave-owed', authRequired, async (req, res) => {
   if (!username) return res.status(400).json({ error: 'missing_user' });
   if (!canAccessAnalyticsReports(role)) return res.status(403).json({ error: 'forbidden' });
 
-  const month = safeMonthOnly(req.query?.month || '') || new Date().toISOString().slice(0, 7);
+  const month = safeMonthOnly(req.query?.month || '') || hrmsNowISO().slice(0, 7);
   const filterStore = String(req.query?.store || '').trim();
   const includeInactive = String(req.query?.includeInactive || '').trim() === '1';
 
@@ -9397,7 +9679,7 @@ app.get('/api/points/my', authRequired, async (req, res) => {
     const state0 = (await getSharedState()) || {};
     const list = Array.isArray(state0.pointRecords) ? state0.pointRecords : [];
     const mine = list.filter(x => String(x?.username || '').trim().toLowerCase() === username.toLowerCase());
-    const month = new Date().toISOString().slice(0, 7);
+    const month = hrmsNowISO().slice(0, 7);
     const monthPoints = mine
       .filter(x => String(x?.approvedAt || x?.createdAt || '').slice(0, 7) === month)
       .reduce((s, x) => s + (safeNumber(x?.points) || 0), 0);
@@ -9965,6 +10247,35 @@ app.put('/api/state', authRequired, async (req, res) => {
   // Auto-repair garbled UTF-8 before persisting
   const data = deepRepairGarbledStrings(rawData);
   try {
+    // Preserve server-side store location fields (latitude, longitude, address)
+    // that the frontend may not have in its stale localStorage copy
+    const existingState = await getSharedState();
+    if (existingState) {
+      const existingStores = Array.isArray(existingState.stores) ? existingState.stores : [];
+      const incomingStores = Array.isArray(data.stores) ? data.stores : [];
+      if (existingStores.length && incomingStores.length) {
+        const locMap = new Map();
+        for (const s of existingStores) {
+          const name = String(s?.name || '').trim();
+          if (name && (Number.isFinite(s?.latitude) || Number.isFinite(s?.longitude) || s?.address)) {
+            locMap.set(name, { latitude: s.latitude, longitude: s.longitude, address: s.address });
+          }
+        }
+        if (locMap.size) {
+          data.stores = incomingStores.map(s => {
+            const name = String(s?.name || '').trim();
+            const existing = locMap.get(name);
+            if (!existing) return s;
+            return {
+              ...s,
+              latitude: Number.isFinite(s?.latitude) ? s.latitude : existing.latitude,
+              longitude: Number.isFinite(s?.longitude) ? s.longitude : existing.longitude,
+              address: s.address || existing.address || ''
+            };
+          });
+        }
+      }
+    }
     await pool.query(
       `insert into hrms_state (key, data, updated_at)
        values ($1, $2::jsonb, now())
@@ -12933,8 +13244,8 @@ app.post('/api/checkin/monthly-confirm', authRequired, async (req, res) => {
       submitterRole: role,
       summary,
       status: 'pending_supervisor',
-      createdAt: new Date().toISOString(),
-      history: [{ action: 'submitted', by: username, at: new Date().toISOString() }]
+      createdAt: hrmsNowISO(),
+      history: [{ action: 'submitted', by: username, at: hrmsNowISO() }]
     };
 
     // Create approval request for the monthly confirmation
@@ -12966,7 +13277,7 @@ app.post('/api/checkin/monthly-confirm', authRequired, async (req, res) => {
       }
     } else {
       confirmation.status = 'approved';
-      confirmation.approvedAt = new Date().toISOString();
+      confirmation.approvedAt = hrmsNowISO();
     }
 
     confirmations.push(confirmation);
@@ -12982,7 +13293,7 @@ app.post('/api/checkin/monthly-confirm', authRequired, async (req, res) => {
         title: '【月度考勤确认】待审批',
         message: `${username} 提交了 ${month} ${store || '全部门店'} 的月度考勤确认，请审批。`,
         read: false,
-        createdAt: new Date().toISOString()
+        createdAt: hrmsNowISO()
       });
       await saveSharedState({ ...(await getSharedState()), notifications: notifs });
     }

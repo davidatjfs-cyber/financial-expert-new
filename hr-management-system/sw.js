@@ -1,4 +1,4 @@
-const CACHE_NAME = 'hrms-pwa-v205';
+const CACHE_NAME = 'hrms-pwa-v207';
 const PRECACHE_URLS = [
   '/',
   '/index.html',
@@ -59,6 +59,7 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
   if (isApiRequest(url)) return;
+  if (url.pathname.startsWith('/agents-admin/')) return;
 
   if (req.mode === 'navigate') {
     event.respondWith(

@@ -14,6 +14,22 @@ import { logger } from '../utils/logger.js';
 import { runAnomalyChecks } from './anomaly-engine.js';
 import { pushAnomalyAlert, pushRhythmReport } from './feishu-client.js';
 import { checkCampaignProgress, evaluateCompletedCampaigns } from './agent-collaboration.js';
+import { getRhythmSchedule } from './config-service.js';
+
+// ─── 检查任务是否启用 ───
+async function isRhythmTaskEnabled(taskKey) {
+  try {
+    const cfg = await getRhythmSchedule();
+    const items = cfg?.rhythmItems;
+    if (!Array.isArray(items) || !items.length) return true; // no config = all enabled
+    const item = items.find(it => it.key === taskKey);
+    if (!item) return true; // not in config = enabled by default
+    return item.enabled !== false;
+  } catch (e) {
+    logger.warn({ err: e?.message, taskKey }, 'Failed to check rhythm config, defaulting to enabled');
+    return true;
+  }
+}
 
 // ─── 获取活跃门店列表 ───
 async function getActiveStores() {
@@ -126,8 +142,14 @@ export async function patrol(waveLabel = 'am') {
       await pushAnomalyAlert(t.store, t.anomalyKey, t.severity, t.detail || '').catch(() => {});
     }
     // ── 推送红色通道告警到HQ ──
+    const RED_TYPE_LABELS = { high_no_response_24h: '高危任务24h未响应', consecutive_3day: '连续3天指标异常', food_safety_open: '食品安全未结案' };
     if (redChannel.length) {
-      await pushRhythmReport('🚨 红色通道告警 ' + redChannel.length + '条\n' + redChannel.slice(0, 5).map(a => `[${a.type}] ${a.store||''} ${a.anomaly||a.task?.title||''}`).join('\n')).catch(() => {});
+      await pushRhythmReport('🚨 红色通道告警 ' + redChannel.length + '条\n' + redChannel.slice(0, 5).map(a => {
+        const label = RED_TYPE_LABELS[a.type] || a.type;
+        const store = a.store || a.task?.store || '';
+        const detail = a.anomaly || a.task?.title || '';
+        return `• ${label} — ${store} ${detail}`;
+      }).join('\n')).catch(() => {});
     }
     // ── 巡检摘要到HQ ──
     if (triggered.length) {
@@ -306,9 +328,49 @@ export async function weeklyReport() {
   await logRhythm('weekly_report', 'success', summary);
   logger.info({ triggered: triggered.length }, '周报生成完成');
 
+  // ── 运营数据汇总(来自daily_reports) ──
+  let opsData = [];
+  try {
+    const opsR = await query(
+      `SELECT store,
+              COUNT(*) AS report_days,
+              ROUND(AVG(revenue)::numeric, 0) AS avg_revenue,
+              ROUND(SUM(revenue)::numeric, 0) AS total_revenue,
+              ROUND(AVG(table_count)::numeric, 0) AS avg_tables,
+              ROUND(AVG(guest_count)::numeric, 0) AS avg_guests
+       FROM daily_reports
+       WHERE date >= CURRENT_DATE - 7
+       GROUP BY store`
+    );
+    opsData = opsR.rows;
+    summary.opsDataByStore = opsData;
+  } catch (e) { logger.warn({ err: e?.message }, 'weekly ops data query failed'); }
+
   // ── 主动推送周报 ──
-  const wkLines = ['📊 周报摘要', `本周检测: ${summary.weeklyChecks} | 触发异常: ${summary.triggered}`];
-  if (summary.top3ProblemStores?.length) wkLines.push('问题门店Top3: ' + summary.top3ProblemStores.map(s => `${s.store}(${s.anomaly_count}次)`).join(', '));
+  const wkLines = ['📊 本周运营周报'];
+  wkLines.push(`异常检测: ${summary.weeklyChecks}项 | 触发异常: ${summary.triggered}项`);
+  if (opsData.length) {
+    wkLines.push('');
+    wkLines.push('📈 门店运营数据(本周):');
+    for (const s of opsData) {
+      wkLines.push(`  ${s.store}: 总营收¥${s.total_revenue || 0} | 日均¥${s.avg_revenue || 0} | 日均桌数${s.avg_tables || 0} | 日均客数${s.avg_guests || 0} (${s.report_days}天数据)`);
+    }
+  }
+  if (summary.kpiByStore?.length) {
+    wkLines.push('');
+    wkLines.push('📋 KPI汇总:');
+    for (const k of summary.kpiByStore) {
+      const closeRate = k.total_tasks > 0 ? ((k.closed_tasks / k.total_tasks) * 100).toFixed(1) : '-';
+      wkLines.push(`  ${k.store}: 任务${k.total_tasks || 0}个 | 闭环率${closeRate}% | 超时率${(parseFloat(k.avg_timeout || 0) * 100).toFixed(1)}%`);
+    }
+  }
+  if (summary.top3ProblemStores?.length) {
+    wkLines.push('');
+    wkLines.push('⚠️ 问题门店Top3: ' + summary.top3ProblemStores.map(s => `${s.store}(${s.anomaly_count}次异常)`).join(', '));
+  }
+  if (!opsData.length && !summary.kpiByStore?.length && !summary.top3ProblemStores?.length) {
+    wkLines.push('暂无本周运营数据');
+  }
   await pushRhythmReport(wkLines.join('\n')).catch(() => {});
 
   return summary;
@@ -354,37 +416,43 @@ export async function monthlyEvaluation() {
   return summary;
 }
 
-// ─── 启动Cron调度 ───
+// ─── 启动Cron调度（读取配置，尊重enabled开关） ───
 export function startRhythmScheduler() {
   // 09:30 晨检 (Asia/Shanghai)
   cron.schedule('30 9 * * *', async () => {
+    if (!await isRhythmTaskEnabled('morning')) { logger.info('Cron: morning standup SKIPPED (disabled in config)'); return; }
     try { await morningStandup(); } catch (e) { logger.error({ err: e }, 'Cron: morning standup failed'); }
   }, { timezone: 'Asia/Shanghai' });
 
   // 11:30 巡检
   cron.schedule('30 11 * * *', async () => {
+    if (!await isRhythmTaskEnabled('patrol_am')) { logger.info('Cron: AM patrol SKIPPED (disabled in config)'); return; }
     try { await patrol('am'); } catch (e) { logger.error({ err: e }, 'Cron: AM patrol failed'); }
   }, { timezone: 'Asia/Shanghai' });
 
   // 16:30 巡检
   cron.schedule('30 16 * * *', async () => {
+    if (!await isRhythmTaskEnabled('patrol_pm')) { logger.info('Cron: PM patrol SKIPPED (disabled in config)'); return; }
     try { await patrol('pm'); } catch (e) { logger.error({ err: e }, 'Cron: PM patrol failed'); }
   }, { timezone: 'Asia/Shanghai' });
 
   // 21:30 日终
   cron.schedule('30 21 * * *', async () => {
+    if (!await isRhythmTaskEnabled('eod')) { logger.info('Cron: end of day SKIPPED (disabled in config)'); return; }
     try { await endOfDay(); } catch (e) { logger.error({ err: e }, 'Cron: end of day failed'); }
   }, { timezone: 'Asia/Shanghai' });
 
   // 周一 10:00 周报
   cron.schedule('0 10 * * 1', async () => {
+    if (!await isRhythmTaskEnabled('weekly')) { logger.info('Cron: weekly report SKIPPED (disabled in config)'); return; }
     try { await weeklyReport(); } catch (e) { logger.error({ err: e }, 'Cron: weekly report failed'); }
   }, { timezone: 'Asia/Shanghai' });
 
   // 每月1日 10:00 月度评估
   cron.schedule('0 10 1 * *', async () => {
+    if (!await isRhythmTaskEnabled('monthly')) { logger.info('Cron: monthly evaluation SKIPPED (disabled in config)'); return; }
     try { await monthlyEvaluation(); } catch (e) { logger.error({ err: e }, 'Cron: monthly evaluation failed'); }
   }, { timezone: 'Asia/Shanghai' });
 
-  logger.info('✅ HQ Rhythm Scheduler started (晨检09:30 / 巡检11:30+16:30 / 日终21:30 / 周报周一10:00 / 月评每月1日)');
+  logger.info('✅ HQ Rhythm Scheduler started — config-aware (晨检09:30 / 巡检11:30+16:30 / 日终21:30 / 周报周一10:00 / 月评每月1日)');
 }
