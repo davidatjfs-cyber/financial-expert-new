@@ -23,6 +23,10 @@ wheels/
 .installed.cfg
 *.egg
 
+# Next.js
+.next/
+out/
+
 # Virtual environments
 venv/
 ENV/
@@ -76,3 +80,45 @@ ocr_*.txt
 
 restaurant-site-evaluator-2/
 restaurant-site-evaluator-2
+
+# Exclude all non-Financial Expert applications
+agents-service-v2/
+agents-v2-fix/
+ai-tutor/
+hr-management-system/
+store-assistant-miniprogram/
+deploy/
+
+# Exclude non-Financial Expert files
+ARCHITECTURE_OVERVIEW.md
+check-db-debug.js
+check-db.sql
+check-table-visit-fields.sql
+test_stores.js
+tmp_*.sql
+tmp_*.mjs
+tmp_*.js
+token
+zeabur.json
+deploy_hrms_fixes.sh
+hongchao-poster*.png
+poster-design.skill
+=
+
+# Exclude workflow files not related to Financial Expert
+.windsurf/workflows/AGENTS_V2_README.md
+.windsurf/workflows/HRMS_CODE_STANDARDS.md
+.windsurf/workflows/agents-v2-deploy.sh
+.windsurf/workflows/ai-tutor-deploy.md
+.windsurf/workflows/feishu-sync.md
+.windsurf/workflows/hrms-deploy.md
+.windsurf/workflows/hrms-deploy.sh
+.windsurf/workflows/hrms-monitor.sh
+.windsurf/workflows/postgres-connection.md
+
+# Exclude docs not related to Financial Expert
+docs/DEPLOY_PLAYBOOK.md
+
+# Keep only Financial Expert related files
+!.windsurf/workflows/financial-expert-deploy.md
+!docs/PDF_EXTRACTION_GUIDE.md
