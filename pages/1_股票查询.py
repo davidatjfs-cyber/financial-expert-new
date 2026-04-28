@@ -1099,22 +1099,9 @@ def main() -> None:
 
     st.markdown('''
     <div class="category-card">
-        <div class="category-header">🔍 搜索股票</div>
-        <div style="font-size:0.875rem;color:#666;">支持美国市场（如 AAPL、TSLA）、中国沪市（如 600000.SS）、深市（如 000001.SZ）</div>
+        <div class="category-header">Search Stocks</div>
+        <div style="font-size:0.8125rem;color:var(--text-3);">US (AAPL, TSLA), A-share (600000.SS), Shenzhen (000001.SZ)</div>
     </div>
-    ''', unsafe_allow_html=True)
-
-    # 修复输入框文字不可见问题
-    st.markdown('''
-    <style>
-    .stTextInput input {
-        color: #1a1a2e !important;
-        background-color: #ffffff !important;
-    }
-    .stTextInput input::placeholder {
-        color: #999 !important;
-    }
-    </style>
     ''', unsafe_allow_html=True)
 
     with st.form("stock_search_form", clear_on_submit=False):
@@ -1147,7 +1134,7 @@ def main() -> None:
         clean_history = []
 
     if clean_history:
-        st.markdown('<div style="font-size:0.8125rem;color:#666;margin-top:0.5rem;">最近搜索：</div>', unsafe_allow_html=True)
+        st.markdown('<div style="font-size:0.75rem;color:var(--text-3);margin-top:var(--space-2);">Recent:</div>', unsafe_allow_html=True)
         cols = st.columns(min(len(clean_history), 5))
         for i, h in enumerate(clean_history[:5]):
             label = str(h.get("_label") or "")
@@ -1157,7 +1144,7 @@ def main() -> None:
                 st.session_state["selected_stock"] = {"symbol": symbol0, "name": name0}
                 st.rerun()
 
-    st.markdown('<div style="font-size:0.8125rem;color:#666;margin-top:0.5rem;">示例：</div>', unsafe_allow_html=True)
+    st.markdown('<div style="font-size:0.75rem;color:var(--text-3);margin-top:var(--space-2);">Examples:</div>', unsafe_allow_html=True)
     examples = ["AAPL", "TSLA", "600519.SS", "000001.SZ", "BABA"]
     cols = st.columns(len(examples))
     for i, ex in enumerate(examples):

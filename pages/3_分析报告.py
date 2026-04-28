@@ -575,14 +575,14 @@ def _show_report_detail(report_id: str) -> None:
 
     st.markdown(f'''
     <div style="margin-bottom:1.5rem;">
-        <div style="display:flex;align-items:center;gap:1rem;margin-bottom:0.75rem;">
-            <h2 style="margin:0;font-size:1.5rem;font-weight:600;color:#1a1a2e;">{r.report_name}</h2>
-            <span style="background:#e3f2fd;color:#1976d2;padding:0.25rem 0.75rem;border-radius:4px;font-size:0.875rem;font-weight:500;">{period_display}</span>
+        <div style="display:flex;align-items:center;gap:1rem;margin-bottom:var(--space-3);">
+            <h2 style="margin:0;font-size:1.375rem;font-weight:700;color:var(--text-1);letter-spacing:-0.02em;">{r.report_name}</h2>
+            <span style="background:var(--accent-dim);color:var(--accent);padding:4px 10px;border-radius:6px;font-size:0.75rem;font-weight:600;letter-spacing:0.02em;">{period_display}</span>
         </div>
-        <div style="display:flex;gap:2rem;flex-wrap:wrap;background:#f8f9fa;padding:0.75rem 1rem;border-radius:8px;border:1px solid #eee;">
-            <div><span style="color:#666;font-size:0.875rem;">来源</span> <span style="font-weight:500;color:#1a1a2e;margin-left:0.5rem;">{r.source_type}</span></div>
-            <div><span style="color:#666;font-size:0.875rem;">状态</span> <span style="margin-left:0.5rem;">{badge(t, s)}</span></div>
-            <div><span style="color:#666;font-size:0.875rem;">报告期</span> <span style="font-weight:500;color:#1a1a2e;margin-left:0.5rem;">{period_text}</span></div>
+        <div style="display:flex;gap:1.5rem;flex-wrap:wrap;background:var(--bg-surface);padding:var(--space-3) var(--space-4);border-radius:var(--radius-sm);border:1px solid var(--border);">
+            <div><span style="color:var(--text-3);font-size:0.8125rem;">Source</span> <span style="font-weight:500;color:var(--text-1);margin-left:var(--space-2);">{r.source_type}</span></div>
+            <div><span style="color:var(--text-3);font-size:0.8125rem;">Status</span> <span style="margin-left:var(--space-2);">{badge(t, s)}</span></div>
+            <div><span style="color:var(--text-3);font-size:0.8125rem;">Period</span> <span style="font-weight:500;color:var(--text-1);margin-left:var(--space-2);">{period_text}</span></div>
         </div>
     </div>
     ''', unsafe_allow_html=True)

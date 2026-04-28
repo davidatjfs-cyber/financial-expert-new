@@ -28,7 +28,7 @@ def main() -> None:
     st.markdown('''
     <div class="category-card">
         <div class="category-header">📁 选择文件</div>
-        <div style="font-size:0.875rem;color:#888;">支持 PDF、Excel、CSV 格式，文件大小不超过 16MB</div>
+        <div style="font-size:0.8125rem;color:var(--text-3);">PDF, Excel, CSV — max 16MB</div>
     </div>
     ''', unsafe_allow_html=True)
 
@@ -47,7 +47,7 @@ def main() -> None:
     st.markdown('''
     <div class="category-card">
         <div class="category-header">🏢 公司信息（可选）</div>
-        <div style="font-size:0.875rem;color:#888;">如果 AI 无法从报表中识别公司名称，将使用此处填写的名称</div>
+        <div style="font-size:0.8125rem;color:var(--text-3);">If AI can't identify the company name from the report</div>
     </div>
     ''', unsafe_allow_html=True)
 

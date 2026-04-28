@@ -5,3 +5,11 @@ enableCORS = false
 
 [browser]
 gatherUsageStats = false
+
+[theme]
+base = "dark"
+primaryColor = "#C9A96E"
+backgroundColor = "#000000"
+secondaryBackgroundColor = "#0C0C0E"
+textColor = "#F5F5F7"
+font = "sans serif"

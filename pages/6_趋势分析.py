@@ -38,7 +38,7 @@ def main() -> None:
         st.markdown('''
         <div class="category-card">
             <div class="category-header">📈 盈利能力趋势</div>
-            <div style="font-size:0.875rem;color:#888;">毛利率与净利率变化</div>
+            <div style="font-size:0.8125rem;color:var(--text-3);">Gross margin & net margin changes</div>
         </div>
         ''', unsafe_allow_html=True)
 
@@ -56,7 +56,8 @@ def main() -> None:
                 height=280, margin=dict(l=20, r=20, t=20, b=20),
                 legend=dict(orientation="h", yanchor="bottom", y=-0.3),
                 yaxis_title="百分比 (%)", xaxis_title="",
-                plot_bgcolor="white", paper_bgcolor="white",
+                plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="#8E8E93"),
             )
             st.plotly_chart(fig1, use_container_width=True)
         else:
@@ -66,7 +67,7 @@ def main() -> None:
         st.markdown('''
         <div class="category-card">
             <div class="category-header">📊 偿债能力趋势</div>
-            <div style="font-size:0.875rem;color:#888;">流动比率变化</div>
+            <div style="font-size:0.8125rem;color:var(--text-3);">Current ratio changes</div>
         </div>
         ''', unsafe_allow_html=True)
 
@@ -84,7 +85,8 @@ def main() -> None:
                 height=280, margin=dict(l=20, r=20, t=20, b=20),
                 legend=dict(orientation="h", yanchor="bottom", y=-0.3),
                 yaxis_title="倍数 / 百分比", xaxis_title="",
-                plot_bgcolor="white", paper_bgcolor="white",
+                plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="#8E8E93"),
             )
             st.plotly_chart(fig2, use_container_width=True)
         else:
@@ -106,7 +108,7 @@ def main() -> None:
             with col1:
                 st.markdown(f'''
                 <div class="report-item">
-                    <div class="report-icon" style="background:#e3f2fd;">📅</div>
+                    <div class="report-icon" style="background:var(--blue-bg);color:var(--blue);"></div>
                     <div class="report-info">
                         <div class="report-title">{r.report_name}</div>
                         <div class="report-meta">{r.source_type} · {r.period_end}</div>

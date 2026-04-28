@@ -246,7 +246,7 @@ def main() -> None:
     st.markdown('''
     <div class="category-card">
         <div class="category-header">📋 查看报表指标</div>
-        <div style="font-size:0.875rem;color:#888;">选择已分析的报表查看具体指标数值</div>
+        <div style="font-size:0.8125rem;color:var(--text-3);">Select an analyzed report to view specific metrics</div>
     </div>
     ''', unsafe_allow_html=True)
 
@@ -266,41 +266,41 @@ def main() -> None:
     st.markdown('''
     <div class="category-card">
         <div class="category-header">📊 行业基准参考</div>
-        <div style="font-size:0.875rem;color:#888;margin-bottom:1rem;">以下为一般性行业参考标准，具体标准因行业而异</div>
+        <div style="font-size:0.8125rem;color:var(--text-3);margin-bottom:var(--space-4);">Industry benchmarks for reference</div>
     </div>
     ''', unsafe_allow_html=True)
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.markdown('''
-        <div style="text-align:center;padding:1rem;background:white;border-radius:8px;border:1px solid #eee;">
-            <div style="font-size:0.75rem;color:#888;">流动比率</div>
-            <div style="font-size:1.5rem;font-weight:600;color:#1976d2;">≥ 2.0</div>
-            <div style="font-size:0.75rem;color:#4caf50;">健康水平</div>
+        <div style="text-align:center;padding:var(--space-4);background:var(--bg-surface);border-radius:var(--radius-sm);border:1px solid var(--border);">
+            <div style="font-size:0.6875rem;color:var(--text-3);text-transform:uppercase;letter-spacing:0.04em;">Current Ratio</div>
+            <div style="font-size:1.5rem;font-weight:700;color:var(--accent);">≥ 2.0</div>
+            <div style="font-size:0.6875rem;color:var(--green);">Healthy</div>
         </div>
         ''', unsafe_allow_html=True)
     with col2:
         st.markdown('''
-        <div style="text-align:center;padding:1rem;background:white;border-radius:8px;border:1px solid #eee;">
-            <div style="font-size:0.75rem;color:#888;">速动比率</div>
-            <div style="font-size:1.5rem;font-weight:600;color:#1976d2;">≥ 1.0</div>
-            <div style="font-size:0.75rem;color:#4caf50;">健康水平</div>
+        <div style="text-align:center;padding:var(--space-4);background:var(--bg-surface);border-radius:var(--radius-sm);border:1px solid var(--border);">
+            <div style="font-size:0.6875rem;color:var(--text-3);text-transform:uppercase;letter-spacing:0.04em;">Quick Ratio</div>
+            <div style="font-size:1.5rem;font-weight:700;color:var(--accent);">≥ 1.0</div>
+            <div style="font-size:0.6875rem;color:var(--green);">Healthy</div>
         </div>
         ''', unsafe_allow_html=True)
     with col3:
         st.markdown('''
-        <div style="text-align:center;padding:1rem;background:white;border-radius:8px;border:1px solid #eee;">
-            <div style="font-size:0.75rem;color:#888;">资产负债率</div>
-            <div style="font-size:1.5rem;font-weight:600;color:#ff9800;">≤ 60%</div>
-            <div style="font-size:0.75rem;color:#ff9800;">适中水平</div>
+        <div style="text-align:center;padding:var(--space-4);background:var(--bg-surface);border-radius:var(--radius-sm);border:1px solid var(--border);">
+            <div style="font-size:0.6875rem;color:var(--text-3);text-transform:uppercase;letter-spacing:0.04em;">Debt/Asset</div>
+            <div style="font-size:1.5rem;font-weight:700;color:var(--yellow);">≤ 60%</div>
+            <div style="font-size:0.6875rem;color:var(--yellow);">Moderate</div>
         </div>
         ''', unsafe_allow_html=True)
     with col4:
         st.markdown('''
-        <div style="text-align:center;padding:1rem;background:white;border-radius:8px;border:1px solid #eee;">
-            <div style="font-size:0.75rem;color:#888;">ROE</div>
-            <div style="font-size:1.5rem;font-weight:600;color:#4caf50;">≥ 15%</div>
-            <div style="font-size:0.75rem;color:#4caf50;">良好水平</div>
+        <div style="text-align:center;padding:var(--space-4);background:var(--bg-surface);border-radius:var(--radius-sm);border:1px solid var(--border);">
+            <div style="font-size:0.6875rem;color:var(--text-3);text-transform:uppercase;letter-spacing:0.04em;">ROE</div>
+            <div style="font-size:1.5rem;font-weight:700;color:var(--green);">≥ 15%</div>
+            <div style="font-size:0.6875rem;color:var(--green);">Good</div>
         </div>
         ''', unsafe_allow_html=True)
 
@@ -345,47 +345,49 @@ def _render_report_metrics(report_id: str) -> None:
         st.markdown("""
         <style>
         .metric-card {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            border-radius: 12px;
-            padding: 1.25rem;
-            margin-bottom: 0.75rem;
-            color: white;
-            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
+            background: var(--bg-surface);
+            border-radius: var(--radius-sm);
+            padding: var(--space-4);
+            margin-bottom: var(--space-2);
+            color: var(--text-1);
+            border: 1px solid var(--border);
         }
         .metric-card.green {
-            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
-            box-shadow: 0 4px 15px rgba(17, 153, 142, 0.3);
+            border-left: 3px solid var(--green);
         }
         .metric-card.orange {
-            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-            box-shadow: 0 4px 15px rgba(245, 87, 108, 0.3);
+            border-left: 3px solid var(--yellow);
         }
         .metric-card.blue {
-            background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
-            box-shadow: 0 4px 15px rgba(79, 172, 254, 0.3);
+            border-left: 3px solid var(--blue);
         }
         .metric-label {
-            font-size: 0.85rem;
-            opacity: 0.9;
-            margin-bottom: 0.25rem;
+            font-size: 0.75rem;
+            color: var(--text-2);
+            margin-bottom: var(--space-1);
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            font-weight: 500;
         }
         .metric-value {
-            font-size: 1.75rem;
+            font-size: 1.5rem;
             font-weight: 700;
+            color: var(--text-1);
+            letter-spacing: -0.02em;
         }
         .metric-avg {
-            font-size: 0.8rem;
-            opacity: 0.9;
-            margin-top: 0.35rem;
-            line-height: 1.3;
+            font-size: 0.6875rem;
+            color: var(--text-3);
+            margin-top: var(--space-2);
+            line-height: 1.4;
         }
         .category-title {
-            font-size: 1.1rem;
+            font-size: 0.9375rem;
             font-weight: 600;
-            color: #1a1a2e;
-            margin-bottom: 1rem;
-            padding-bottom: 0.5rem;
-            border-bottom: 2px solid #eee;
+            color: var(--text-1);
+            margin-bottom: var(--space-3);
+            padding-bottom: var(--space-2);
+            border-bottom: 1px solid var(--border);
         }
         </style>
         """, unsafe_allow_html=True)
@@ -411,7 +413,7 @@ def _render_report_metrics(report_id: str) -> None:
                 </div>
                 ''', unsafe_allow_html=True)
             if not profitability:
-                st.markdown('<div style="color:#888;font-size:0.875rem;">暂无数据</div>', unsafe_allow_html=True)
+                st.markdown('<div style="color:var(--text-3);font-size:0.8125rem;">No data</div>', unsafe_allow_html=True)
         
         with col2:
             st.markdown('<div class="category-title">🏦 偿债能力</div>', unsafe_allow_html=True)
@@ -432,7 +434,7 @@ def _render_report_metrics(report_id: str) -> None:
                 </div>
                 ''', unsafe_allow_html=True)
             if not solvency:
-                st.markdown('<div style="color:#888;font-size:0.875rem;">暂无数据</div>', unsafe_allow_html=True)
+                st.markdown('<div style="color:var(--text-3);font-size:0.8125rem;">No data</div>', unsafe_allow_html=True)
         
         with col3:
             st.markdown('<div class="category-title">⚡ 营运能力</div>', unsafe_allow_html=True)
@@ -453,7 +455,7 @@ def _render_report_metrics(report_id: str) -> None:
                 </div>
                 ''', unsafe_allow_html=True)
             if not efficiency:
-                st.markdown('<div style="color:#888;font-size:0.875rem;">暂无数据</div>', unsafe_allow_html=True)
+                st.markdown('<div style="color:var(--text-3);font-size:0.8125rem;">No data</div>', unsafe_allow_html=True)
 
 
 if __name__ == "__main__":

@@ -68,9 +68,9 @@ def main() -> None:
     for i, rd in enumerate(reports_data):
         with cols[i]:
             st.markdown(f'''
-            <div style="background:#f8f9fa;padding:1rem;border-radius:8px;text-align:center;">
-                <div style="font-weight:600;color:#1a1a2e;">{rd["name"]}</div>
-                <div style="font-size:0.8rem;color:#666;">{rd["period"]}</div>
+            <div style="background:var(--bg-surface);padding:var(--space-4);border-radius:var(--radius-sm);text-align:center;border:1px solid var(--border);">
+                <div style="font-weight:600;color:var(--text-1);">{rd["name"]}</div>
+                <div style="font-size:0.75rem;color:var(--text-3);">{rd["period"]}</div>
             </div>
             ''', unsafe_allow_html=True)
 
@@ -137,7 +137,7 @@ def main() -> None:
     
     fig = go.Figure()
     
-    colors = ['#1976d2', '#e53935', '#43a047', '#fb8c00', '#8e24aa']
+    colors = ['#C9A96E', '#C45454', '#3E7C5A', '#D4A84B', '#6B8AB8']
     
     for i, rd in enumerate(reports_data):
         values = []
@@ -176,12 +176,17 @@ def main() -> None:
         polar=dict(
             radialaxis=dict(
                 visible=True,
-                range=[0, 100]
-            )
+                range=[0, 100],
+                gridcolor="rgba(255,255,255,0.06)",
+            ),
+            bgcolor="rgba(0,0,0,0)",
         ),
         showlegend=True,
         height=500,
-        margin=dict(l=80, r=80, t=40, b=40)
+        margin=dict(l=80, r=80, t=40, b=40),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#8E8E93"),
     )
     
     st.plotly_chart(fig, use_container_width=True)
@@ -210,7 +215,10 @@ def main() -> None:
             title="盈利能力对比",
             barmode='group',
             height=350,
-            yaxis_title="%"
+            yaxis_title="%",
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#8E8E93"),
         )
         st.plotly_chart(fig_profit, use_container_width=True)
 
@@ -231,6 +239,9 @@ def main() -> None:
             title="偿债能力对比",
             barmode='group',
             height=350,
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#8E8E93"),
         )
         st.plotly_chart(fig_debt, use_container_width=True)
 

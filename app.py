@@ -16,7 +16,7 @@ from core.styles import inject_css, render_sidebar_nav, render_mobile_nav, stat_
 
 
 def main() -> None:
-    st.set_page_config(page_title="财务分析专家", page_icon="📊", layout="wide")
+    st.set_page_config(page_title="Financial Expert", page_icon="", layout="wide", initial_sidebar_state="auto")
     inject_css()
     init_db()
 
@@ -24,38 +24,38 @@ def main() -> None:
         render_sidebar_nav()
 
     # 移动端导航栏
-    render_mobile_nav(title="仪表盘", show_back=False)
+    render_mobile_nav(title="Dashboard", show_back=False)
 
     # 页面标题
-    st.markdown('<div class="page-title">财务分析仪表盘</div>', unsafe_allow_html=True)
-    st.markdown('<div class="page-desc">智能分析财务报表，洞察经营状况</div>', unsafe_allow_html=True)
+    st.markdown('<div class="page-title">Dashboard</div>', unsafe_allow_html=True)
+    st.markdown('<div class="page-desc">Intelligent financial analysis & insights</div>', unsafe_allow_html=True)
 
     # 统计卡片
     stats = _get_stats()
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        st.markdown(stat_card("分析报告", stats["total"], "已上传的财务报表", "📄"), unsafe_allow_html=True)
+        st.markdown(stat_card("Reports", stats["total"], "Total uploaded", ""), unsafe_allow_html=True)
     with c2:
-        st.markdown(stat_card("已完成分析", stats["done"], "分析完成的报表", "✅"), unsafe_allow_html=True)
+        st.markdown(stat_card("Completed", stats["done"], "Analysis done", ""), unsafe_allow_html=True)
     with c3:
-        st.markdown(stat_card("风险预警", stats["risks"], "高风险报表数量", "⚠️"), unsafe_allow_html=True)
+        st.markdown(stat_card("Risk Alerts", stats["risks"], "High-risk items", ""), unsafe_allow_html=True)
     with c4:
         rate = f"{stats['rate']}%" if stats["total"] > 0 else "0%"
-        st.markdown(stat_card("分析完成率", rate, "报表分析完成比例", "📊"), unsafe_allow_html=True)
+        st.markdown(stat_card("Completion", rate, "Analysis rate", ""), unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # 快速操作
-    st.markdown("#### 快速操作")
+    # Quick actions
+    st.markdown("#### Quick Actions")
 
-    if st.button("📤 上传财务报表", type="primary", use_container_width=True):
+    if st.button("Upload Report", type="primary", use_container_width=True):
         st.switch_page("pages/2_上传报表.py")
 
-    if st.button("📋 查看分析报告", use_container_width=True):
+    if st.button("View Analysis", use_container_width=True):
         st.switch_page("pages/3_分析报告.py")
 
-    if st.button("⚠️ 风险预警中心", use_container_width=True):
+    if st.button("Risk Alerts", use_container_width=True):
         st.switch_page("pages/5_风险预警.py")
 
     st.markdown("<br>", unsafe_allow_html=True)
@@ -63,8 +63,8 @@ def main() -> None:
     # 多公司对比功能
     st.markdown('''
     <div style="margin-bottom:1rem;">
-        <div style="font-size:1.125rem;font-weight:600;color:#1a1a2e;margin-bottom:0.5rem;">📊 多公司财务对比</div>
-        <div style="font-size:0.8125rem;color:#666;">选择多家公司进行横向财务指标对比分析</div>
+        <div style="font-size:1.0625rem;font-weight:600;color:var(--text-1);margin-bottom:var(--space-2);">Multi-Company Comparison</div>
+        <div style="font-size:0.8125rem;color:var(--text-3);">Select 2-5 companies for cross-comparison analysis</div>
     </div>
     ''', unsafe_allow_html=True)
     
@@ -73,7 +73,7 @@ def main() -> None:
     
     if len(done_reports) >= 2:
         selected_reports = st.multiselect(
-            "选择要对比的公司（2-5家）",
+            "Select companies to compare (2-5)",
             options=[(r.id, r.report_name) for r in done_reports],
             format_func=lambda x: x[1],
             max_selections=5,
@@ -81,40 +81,40 @@ def main() -> None:
         )
         
         if len(selected_reports) >= 2:
-            if st.button("🔍 开始对比分析", type="primary"):
+            if st.button("Start Comparison", type="primary"):
                 st.session_state["compare_report_ids"] = [r[0] for r in selected_reports]
                 st.switch_page("pages/7_公司对比.py")
         else:
-            st.markdown('<div style="font-size:0.8125rem;color:#888;">请至少选择 2 家公司进行对比</div>', unsafe_allow_html=True)
-    else:
-        st.markdown('''
-        <div style="padding:1rem;background:#f8f9fa;border-radius:8px;border:1px solid #eee;">
-            <div style="font-size:0.875rem;color:#666;">💡 需要至少 2 份已完成分析的报告才能进行对比</div>
-        </div>
-        ''', unsafe_allow_html=True)
+            st.markdown('<div style="font-size:0.8125rem;color:var(--text-3);">Select at least 2 companies to compare</div>', unsafe_allow_html=True)
+        else:
+            st.markdown('''
+            <div style="padding:var(--space-4);background:var(--bg-surface);border-radius:var(--radius-sm);border:1px solid var(--border);">
+                <div style="font-size:0.8125rem;color:var(--text-3);">Need at least 2 analyzed reports to compare</div>
+            </div>
+            ''', unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # 最近分析
+    # Recent analysis
     col1, col2 = st.columns([3, 1])
     with col1:
-        st.markdown("#### 最近分析")
+        st.markdown("#### Recent Analysis")
     with col2:
-        if st.button("查看全部", type="secondary"):
+        if st.button("View All", type="secondary"):
             st.switch_page("pages/3_分析报告.py")
 
     reports = list_reports(limit=10)
     if not reports:
-        st.info("暂无报告，点击上方「上传财务报表」开始")
+        st.info("No reports yet. Tap 'Upload Report' to get started.")
     else:
         for r in reports:
             status_map = {
-                "done": ("success", "已完成"),
-                "running": ("warning", "分析中"),
-                "failed": ("danger", "失败"),
-                "pending": ("pending", "待识别"),
+                "done": ("success", "Done"),
+                "running": ("warning", "Processing"),
+                "failed": ("danger", "Failed"),
+                "pending": ("pending", "Pending"),
             }
-            s, t = status_map.get(r.status, ("pending", "待识别"))
+            s, t = status_map.get(r.status, ("pending", "Pending"))
 
             col1, col2 = st.columns([6, 1])
             with col1:

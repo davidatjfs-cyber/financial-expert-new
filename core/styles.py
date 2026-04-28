@@ -2,359 +2,380 @@ from __future__ import annotations
 
 GLOBAL_CSS = """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Inter:wght@300;400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&display=swap');
 
-/* ========== Apple 深色简约高级风格 ========== */
+/* ========== OBSIDIAN — iPhone 17 Dark Luxury Theme ========== */
 
-/* CSS 变量 - 设计令牌 */
 :root {
-    /* 背景 */
-    --bg-page: #0B0B0E;
-    --bg-surface: #16161A;
-    --bg-elevated: #1A1A1E;
-    
-    /* 主色 */
-    --accent-primary: #32D583;
-    --accent-secondary: #6366F1;
-    --accent-coral: #E85A4F;
-    
-    /* 中性色 */
-    --text-primary: #FAFAF9;
-    --text-secondary: #6B6B70;
-    --text-muted: #4A4A50;
-    --border-color: #2A2A2E;
-    --border-subtle: #3A3A40;
-    
-    /* 语义色 */
-    --green-success: #32D583;
-    --yellow-warning: #FFB547;
-    --red-error: #E85A4F;
-    --blue-info: #60A5FA;
-    
-    /* 字体 */
-    --font-heading: 'DM Sans', -apple-system, sans-serif;
-    --font-body: 'DM Sans', -apple-system, sans-serif;
-    
-    /* 间距 */
-    --space-xs: 4px;
-    --space-sm: 8px;
-    --space-md: 12px;
-    --space-lg: 16px;
-    --space-xl: 24px;
-    --space-2xl: 32px;
-    --space-3xl: 48px;
-    
-    /* 圆角 */
-    --radius-sm: 8px;
-    --radius-md: 12px;
-    --radius-lg: 16px;
+    --bg-void: #000000;
+    --bg-page: #050505;
+    --bg-surface: #0C0C0E;
+    --bg-elevated: #141416;
+    --bg-hover: #1A1A1E;
+
+    --accent: #C9A96E;
+    --accent-dim: rgba(201, 169, 110, 0.12);
+    --accent-glow: rgba(201, 169, 110, 0.06);
+    --accent-soft: #A88B5A;
+
+    --green: #3E7C5A;
+    --green-bg: rgba(62, 124, 90, 0.12);
+    --red: #C45454;
+    --red-bg: rgba(196, 84, 84, 0.12);
+    --yellow: #D4A84B;
+    --yellow-bg: rgba(212, 168, 75, 0.12);
+    --blue: #6B8AB8;
+    --blue-bg: rgba(107, 138, 184, 0.12);
+
+    --text-1: #F5F5F7;
+    --text-2: #8E8E93;
+    --text-3: #48484A;
+    --text-4: #2C2C2E;
+
+    --border: rgba(255, 255, 255, 0.06);
+    --border-accent: rgba(201, 169, 110, 0.2);
+
+    --font: -apple-system, 'DM Sans', 'SF Pro Display', 'SF Pro Text', system-ui, sans-serif;
+    --font-mono: 'SF Mono', 'Fira Code', ui-monospace, monospace;
+
+    --radius-xs: 8px;
+    --radius-sm: 12px;
+    --radius-md: 16px;
+    --radius-lg: 20px;
+    --radius-xl: 24px;
+
+    --space-1: 4px;
+    --space-2: 8px;
+    --space-3: 12px;
+    --space-4: 16px;
+    --space-5: 20px;
+    --space-6: 24px;
+    --space-8: 32px;
+    --space-10: 40px;
+    --space-12: 48px;
+
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+    --safe-left: env(safe-area-inset-left, 0px);
+    --safe-right: env(safe-area-inset-right, 0px);
 }
 
-/* 全局字体和背景 */
+/* ===== Reset & Base ===== */
 html, body, [class*="css"] {
-    font-family: var(--font-body) !important;
+    font-family: var(--font) !important;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
-    color: var(--text-primary);
-    background: var(--bg-page);
+    color: var(--text-1);
+    background: var(--bg-void);
+    text-size-adjust: 100%;
+    -webkit-text-size-adjust: 100%;
 }
 
 .stApp {
-    background: var(--bg-page);
+    background: var(--bg-void);
 }
 
-/* 确保所有文本使用正确颜色 */
 .stApp, .stApp p, .stApp span, .stApp div, .stApp label {
-    color: var(--text-primary);
+    color: var(--text-1);
 }
 
 .stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp h5, .stApp h6 {
-    color: var(--text-primary) !important;
+    color: var(--text-1) !important;
 }
 
-/* Markdown 文本颜色 */
 .stMarkdown, .stMarkdown p, [data-testid="stMarkdownContainer"] p {
-    color: var(--text-primary) !important;
+    color: var(--text-1) !important;
 }
 
-/* 隐藏 Streamlit 默认元素（保留侧边栏展开按钮） */
-#MainMenu, footer {visibility: hidden;}
-.stDeployButton {display: none;}
-[data-testid="stSidebarNav"] {display: none !important;}
+/* ===== Hide Streamlit Chrome ===== */
+#MainMenu, footer { visibility: hidden; }
+.stDeployButton { display: none; }
+[data-testid="stSidebarNav"] { display: none !important; }
 
-/* 侧边栏展开按钮（汉堡菜单）- 确保在手机上可见且易点 */
+/* ===== Sidebar Toggle (Hamburger) ===== */
 [data-testid="stSidebarCollapsedControl"],
 [data-testid="collapsedControl"] {
     visibility: visible !important;
     display: flex !important;
     position: fixed !important;
-    top: 0.75rem !important;
-    left: 0.75rem !important;
+    top: calc(var(--safe-top) + 12px) !important;
+    left: 12px !important;
     z-index: 999999 !important;
     background: var(--bg-surface) !important;
-    border-radius: var(--radius-md) !important;
-    padding: 0.5rem !important;
+    border: 1px solid var(--border) !important;
+    border-radius: var(--radius-sm) !important;
+    padding: 6px !important;
+    backdrop-filter: blur(20px) !important;
+    -webkit-backdrop-filter: blur(20px) !important;
 }
 
 [data-testid="stSidebarCollapsedControl"] button,
 [data-testid="collapsedControl"] button {
     min-width: 44px !important;
     min-height: 44px !important;
-    padding: 0.5rem !important;
+    padding: 6px !important;
 }
 
 [data-testid="stSidebarCollapsedControl"] svg,
 [data-testid="collapsedControl"] svg {
-    width: 24px !important;
-    height: 24px !important;
-    color: var(--text-primary) !important;
+    width: 22px !important;
+    height: 22px !important;
+    color: var(--text-2) !important;
 }
 
-/* 主内容区 */
+/* ===== Main Content Area ===== */
 .main .block-container {
-    padding: var(--space-3xl) var(--space-3xl);
-    max-width: 1000px;
-    background: var(--bg-page);
+    padding: var(--space-8) var(--space-6);
+    max-width: 960px;
+    background: var(--bg-void);
 }
 
-/* ========== 侧边栏 - Apple 深色风格 ========== */
+/* ===== Sidebar ===== */
 [data-testid="stSidebar"] {
     background: var(--bg-surface) !important;
-    border-right: 1px solid var(--border-color) !important;
+    border-right: 1px solid var(--border) !important;
 }
 
 [data-testid="stSidebar"] > div:first-child {
-    padding: var(--space-xl) var(--space-lg);
+    padding: var(--space-6) var(--space-4);
     background: var(--bg-surface) !important;
 }
 
-/* 侧边栏标题 */
 .sidebar-title {
-    font-family: var(--font-heading);
-    font-size: 1rem;
+    font-family: var(--font);
+    font-size: 0.8125rem;
     font-weight: 600;
-    color: var(--text-primary);
-    margin-bottom: var(--space-xl);
+    color: var(--accent);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-bottom: var(--space-6);
+    padding: var(--space-4) var(--space-4);
+    background: var(--accent-dim);
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-accent);
     display: flex;
     align-items: center;
-    gap: var(--space-sm);
-    letter-spacing: -0.02em;
-    padding: var(--space-md);
-    background: linear-gradient(135deg, var(--accent-primary) 0%, #059669 100%);
-    border-radius: var(--radius-md);
+    gap: var(--space-2);
 }
 
-/* 侧边栏导航 */
 [data-testid="stSidebar"] .stPageLink a,
 [data-testid="stSidebar"] .stPageLink span,
 [data-testid="stSidebar"] .stPageLink p,
 [data-testid="stSidebar"] a {
-    font-family: var(--font-heading) !important;
-    color: var(--text-secondary) !important;
-    font-size: 0.875rem !important;
-    font-weight: 500 !important;
+    font-family: var(--font) !important;
+    color: var(--text-2) !important;
+    font-size: 0.9375rem !important;
+    font-weight: 400 !important;
     text-decoration: none !important;
 }
 
 [data-testid="stSidebar"] .stPageLink > a,
 [data-testid="stSidebar"] [data-testid="stPageLink-NavLink"] {
-    color: var(--text-secondary) !important;
-    font-size: 0.875rem !important;
-    padding: var(--space-md) var(--space-lg) !important;
-    border-radius: var(--radius-md) !important;
-    margin-bottom: var(--space-xs) !important;
+    color: var(--text-2) !important;
+    font-size: 0.9375rem !important;
+    padding: var(--space-3) var(--space-4) !important;
+    border-radius: var(--radius-sm) !important;
+    margin-bottom: 2px !important;
     display: flex !important;
     align-items: center !important;
-    gap: var(--space-md) !important;
-    transition: all 0.2s ease !important;
+    gap: var(--space-3) !important;
+    transition: all 0.15s ease !important;
     border-left: none !important;
+    min-height: 44px !important;
 }
 
 [data-testid="stSidebar"] .stPageLink > a:hover,
 [data-testid="stSidebar"] [data-testid="stPageLink-NavLink"]:hover {
     background: var(--bg-elevated) !important;
-    color: var(--text-primary) !important;
+    color: var(--text-1) !important;
 }
 
-/* 当前活动页面高亮 */
 [data-testid="stSidebar"] .stPageLink > a[aria-current="page"],
 [data-testid="stSidebar"] [data-testid="stPageLink-NavLink"][aria-current="page"] {
-    background: var(--accent-primary) !important;
-    color: white !important;
+    background: var(--accent-dim) !important;
+    color: var(--accent) !important;
+    font-weight: 500 !important;
 }
 
-/* ========== 页面标题 ========== */
+/* ===== Page Title ===== */
 .page-title {
-    font-family: var(--font-heading);
-    font-size: 1.5rem;
-    font-weight: 600;
-    color: var(--text-primary);
-    margin-bottom: var(--space-sm);
-    letter-spacing: -0.02em;
+    font-family: var(--font);
+    font-size: 1.625rem;
+    font-weight: 700;
+    color: var(--text-1);
+    margin-bottom: var(--space-1);
+    letter-spacing: -0.025em;
+    line-height: 1.2;
 }
 
 .page-desc {
-    font-family: var(--font-body);
+    font-family: var(--font);
     font-size: 0.875rem;
-    color: var(--text-secondary);
-    margin-bottom: var(--space-xl);
+    color: var(--text-2);
+    margin-bottom: var(--space-6);
     font-weight: 400;
+    line-height: 1.5;
 }
 
-/* ========== 统计卡片 - Apple 深色风格 ========== */
+/* ===== Stat Cards ===== */
 .stat-card {
     background: var(--bg-surface);
-    border-radius: var(--radius-lg);
-    padding: var(--space-lg) var(--space-xl);
-    border: 1px solid var(--border-color);
-    transition: all 0.2s ease;
+    border-radius: var(--radius-md);
+    padding: var(--space-5) var(--space-5);
+    border: 1px solid var(--border);
+    transition: border-color 0.2s ease;
 }
 
 .stat-card:hover {
-    border-color: var(--accent-primary);
-    background: var(--bg-elevated);
+    border-color: var(--border-accent);
 }
 
 .stat-header {
     display: flex;
     align-items: center;
-    gap: var(--space-sm);
-    font-family: var(--font-body);
+    gap: var(--space-2);
+    font-family: var(--font);
     font-size: 0.75rem;
-    color: var(--text-secondary);
-    margin-bottom: var(--space-md);
+    color: var(--text-2);
+    margin-bottom: var(--space-3);
     font-weight: 500;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
 }
 
 .stat-icon {
-    width: 20px;
-    height: 20px;
+    width: 16px;
+    height: 16px;
+    opacity: 0.6;
 }
 
 .stat-value {
-    font-family: var(--font-heading);
+    font-family: var(--font);
     font-size: 1.75rem;
     font-weight: 700;
-    color: var(--text-primary);
-    letter-spacing: -0.02em;
+    color: var(--text-1);
+    letter-spacing: -0.03em;
+    line-height: 1;
 }
 
 .stat-sub {
-    font-family: var(--font-body);
-    font-size: 0.75rem;
-    color: var(--text-secondary);
-    margin-top: var(--space-sm);
+    font-family: var(--font);
+    font-size: 0.6875rem;
+    color: var(--text-3);
+    margin-top: var(--space-2);
     font-weight: 400;
 }
 
-/* ========== 按钮样式 - Apple 深色风格 ========== */
+/* ===== Buttons ===== */
 .action-btn-primary {
-    background: var(--accent-primary);
-    color: white;
+    background: var(--accent);
+    color: #000;
     border: none;
-    border-radius: var(--radius-md);
-    padding: 0.875rem 1.5rem;
-    font-family: var(--font-heading);
-    font-size: 0.875rem;
+    border-radius: var(--radius-sm);
+    padding: 14px var(--space-5);
+    font-family: var(--font);
+    font-size: 0.9375rem;
     font-weight: 600;
     width: 100%;
     cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: var(--space-sm);
-    margin-bottom: var(--space-md);
-    transition: all 0.2s ease;
+    gap: var(--space-2);
+    margin-bottom: var(--space-3);
+    transition: all 0.15s ease;
+    min-height: 48px;
 }
 
 .action-btn-primary:hover {
-    background: #28b870;
+    background: var(--accent-soft);
     transform: translateY(-1px);
 }
 
 .action-btn-secondary {
     background: var(--bg-surface);
-    color: var(--text-primary);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius-md);
-    padding: 0.875rem 1.5rem;
-    font-family: var(--font-heading);
-    font-size: 0.875rem;
+    color: var(--text-1);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 14px var(--space-5);
+    font-family: var(--font);
+    font-size: 0.9375rem;
     font-weight: 500;
     width: 100%;
     cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: var(--space-sm);
-    margin-bottom: var(--space-md);
-    transition: all 0.2s ease;
+    gap: var(--space-2);
+    margin-bottom: var(--space-3);
+    transition: all 0.15s ease;
+    min-height: 48px;
 }
 
 .action-btn-secondary:hover {
-    border-color: var(--accent-primary);
+    border-color: var(--border-accent);
     background: var(--bg-elevated);
 }
 
-/* ========== Streamlit 按钮覆盖 ========== */
+/* ===== Streamlit Button Overrides ===== */
 .stButton > button {
-    font-family: var(--font-heading) !important;
-    border-radius: var(--radius-md) !important;
+    font-family: var(--font) !important;
+    border-radius: var(--radius-sm) !important;
     font-weight: 600 !important;
-    font-size: 0.875rem !important;
-    transition: all 0.2s ease !important;
-    letter-spacing: 0.01em !important;
+    font-size: 0.9375rem !important;
+    transition: all 0.15s ease !important;
+    letter-spacing: -0.01em !important;
+    min-height: 48px !important;
+    padding: 10px var(--space-5) !important;
 }
 
 .stButton > button[kind="primary"] {
-    background: var(--accent-primary) !important;
+    background: var(--accent) !important;
     border: none !important;
-    color: white !important;
+    color: #000 !important;
 }
 
 .stButton > button[kind="primary"]:hover {
-    background: #28b870 !important;
-    transform: translateY(-1px);
+    background: var(--accent-soft) !important;
 }
 
 .stButton > button[kind="secondary"] {
     background: var(--bg-surface) !important;
-    border: 1px solid var(--border-color) !important;
-    color: var(--text-primary) !important;
+    border: 1px solid var(--border) !important;
+    color: var(--text-1) !important;
 }
 
 .stButton > button[kind="secondary"]:hover {
-    border-color: var(--accent-primary) !important;
+    border-color: var(--border-accent) !important;
     background: var(--bg-elevated) !important;
 }
 
-/* ========== 报告列表项 - Apple 深色风格 ========== */
+/* ===== Report List Items ===== */
 .report-item {
     background: var(--bg-surface);
-    border-radius: var(--radius-md);
-    padding: var(--space-md) var(--space-lg);
-    border: 1px solid var(--border-color);
-    margin-bottom: var(--space-sm);
+    border-radius: var(--radius-sm);
+    padding: var(--space-4) var(--space-4);
+    border: 1px solid var(--border);
+    margin-bottom: var(--space-2);
     display: flex;
     align-items: center;
-    gap: var(--space-md);
-    transition: all 0.2s ease;
+    gap: var(--space-3);
+    transition: border-color 0.15s ease;
 }
 
 .report-item:hover {
-    background: var(--bg-elevated);
-    border-color: var(--accent-primary);
+    border-color: var(--border-accent);
 }
 
 .report-icon {
     width: 40px;
     height: 40px;
-    background: linear-gradient(135deg, var(--accent-primary) 0%, #059669 100%);
-    border-radius: var(--radius-sm);
+    background: var(--accent-dim);
+    border-radius: var(--radius-xs);
     display: flex;
     align-items: center;
     justify-content: center;
-    color: white;
+    color: var(--accent);
     font-size: 1rem;
     flex-shrink: 0;
 }
@@ -365,100 +386,103 @@ html, body, [class*="css"] {
 }
 
 .report-title {
-    font-family: var(--font-heading);
-    font-size: 0.875rem;
+    font-family: var(--font);
+    font-size: 0.9375rem;
     font-weight: 600;
-    color: var(--text-primary);
-    margin-bottom: var(--space-xs);
+    color: var(--text-1);
+    margin-bottom: 2px;
     display: flex;
     align-items: center;
-    gap: var(--space-sm);
+    gap: var(--space-2);
+    line-height: 1.3;
 }
 
 .report-meta {
-    font-family: var(--font-body);
+    font-family: var(--font);
     font-size: 0.75rem;
-    color: var(--text-secondary);
+    color: var(--text-3);
     display: flex;
     align-items: center;
-    gap: var(--space-sm);
+    gap: var(--space-2);
 }
 
 .report-arrow {
-    color: var(--text-secondary);
+    color: var(--text-3);
     font-size: 1.25rem;
-    transition: all 0.2s ease;
+    transition: all 0.15s ease;
+    flex-shrink: 0;
 }
 
 .report-item:hover .report-arrow {
-    transform: translateX(4px);
-    color: var(--accent-primary);
+    transform: translateX(3px);
+    color: var(--accent);
 }
 
-/* ========== 状态徽章 - Apple 深色风格 ========== */
+/* ===== Status Badges ===== */
 .badge {
     display: inline-flex;
     align-items: center;
-    padding: 0.25rem 0.5rem;
-    border-radius: var(--radius-sm);
-    font-family: var(--font-body);
+    padding: 3px 8px;
+    border-radius: var(--radius-xs);
+    font-family: var(--font);
     font-size: 0.625rem;
     font-weight: 600;
-    letter-spacing: 0.02em;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
 }
 
-.badge-success { background: rgba(50, 213, 131, 0.2); color: var(--green-success); }
-.badge-warning { background: rgba(255, 181, 71, 0.2); color: var(--yellow-warning); }
-.badge-danger { background: rgba(232, 90, 79, 0.2); color: var(--red-error); }
-.badge-pending { background: var(--bg-elevated); color: var(--text-secondary); border: 1px solid var(--border-color); }
+.badge-success { background: var(--green-bg); color: var(--green); }
+.badge-warning { background: var(--yellow-bg); color: var(--yellow); }
+.badge-danger { background: var(--red-bg); color: var(--red); }
+.badge-pending { background: var(--bg-elevated); color: var(--text-3); border: 1px solid var(--border); }
 
-/* ========== 修复 Streamlit 警告和信息框 ========== */
+/* ===== Alerts & Notifications ===== */
 .stAlert > div {
-    color: var(--text-primary) !important;
-    border-radius: var(--radius-md) !important;
+    color: var(--text-1) !important;
+    border-radius: var(--radius-sm) !important;
     background: var(--bg-surface) !important;
-    border: 1px solid var(--border-color) !important;
+    border: 1px solid var(--border) !important;
 }
 .stAlert [data-testid="stMarkdownContainer"] p {
-    color: var(--text-primary) !important;
+    color: var(--text-1) !important;
 }
 div[data-baseweb="notification"] {
-    color: var(--text-primary) !important;
-    border-radius: var(--radius-md) !important;
+    color: var(--text-1) !important;
+    border-radius: var(--radius-sm) !important;
     background: var(--bg-surface) !important;
 }
 div[data-baseweb="notification"] div {
-    color: var(--text-primary) !important;
+    color: var(--text-1) !important;
 }
 
-/* ========== 分类卡片 - Apple 深色风格 ========== */
+/* ===== Category Cards ===== */
 .category-card {
     background: var(--bg-surface);
-    border-radius: var(--radius-lg);
-    padding: var(--space-lg);
-    border: 1px solid var(--border-color);
-    margin-bottom: var(--space-lg);
+    border-radius: var(--radius-md);
+    padding: var(--space-5);
+    border: 1px solid var(--border);
+    margin-bottom: var(--space-4);
 }
 
 .category-header {
     display: flex;
     align-items: center;
-    gap: var(--space-sm);
-    font-family: var(--font-heading);
-    font-size: 1rem;
+    gap: var(--space-2);
+    font-family: var(--font);
+    font-size: 0.9375rem;
     font-weight: 600;
-    color: var(--text-primary);
-    margin-bottom: var(--space-md);
+    color: var(--text-1);
+    margin-bottom: var(--space-3);
     letter-spacing: -0.01em;
 }
 
-/* ========== 指标行 - Apple 深色风格 ========== */
+/* ===== Metric Rows ===== */
 .metric-row {
     display: flex;
     justify-content: space-between;
     align-items: flex-start;
-    padding: var(--space-md) 0;
-    border-bottom: 1px solid var(--border-color);
+    padding: var(--space-3) 0;
+    border-bottom: 1px solid var(--border);
 }
 
 .metric-row:last-child {
@@ -467,329 +491,341 @@ div[data-baseweb="notification"] div {
 }
 
 .metric-name {
-    font-family: var(--font-heading);
+    font-family: var(--font);
     font-size: 0.875rem;
     font-weight: 500;
-    color: var(--text-primary);
-    margin-bottom: var(--space-xs);
+    color: var(--text-1);
+    margin-bottom: 2px;
 }
 
 .metric-benchmark {
-    font-family: var(--font-body);
+    font-family: var(--font);
     font-size: 0.75rem;
-    color: var(--text-secondary);
+    color: var(--text-3);
+    line-height: 1.4;
 }
 
 .metric-compare-up {
-    color: var(--green-success);
+    color: var(--green);
     font-size: 0.75rem;
     font-weight: 600;
 }
 
 .metric-compare-down {
-    color: var(--red-error);
+    color: var(--red);
     font-size: 0.75rem;
     font-weight: 600;
 }
 
 .metric-value {
-    font-family: var(--font-heading);
-    font-size: 1.125rem;
+    font-family: var(--font);
+    font-size: 1.0625rem;
     font-weight: 700;
-    color: var(--text-primary);
+    color: var(--text-1);
     letter-spacing: -0.02em;
 }
 
-/* ========== 风险卡片 - Apple 深色风格 ========== */
+/* ===== Risk Cards ===== */
 .risk-card {
     background: var(--bg-surface);
-    border-radius: var(--radius-lg);
-    padding: var(--space-lg);
+    border-radius: var(--radius-md);
+    padding: var(--space-5);
     text-align: center;
-    border: 1px solid var(--border-color);
+    border: 1px solid var(--border);
 }
 
 .risk-label {
-    font-family: var(--font-body);
-    font-size: 0.75rem;
-    color: var(--text-secondary);
-    margin-bottom: var(--space-md);
+    font-family: var(--font);
+    font-size: 0.6875rem;
+    color: var(--text-2);
+    margin-bottom: var(--space-3);
     font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
 }
 
 .risk-value {
-    font-family: var(--font-heading);
+    font-family: var(--font);
     font-size: 2rem;
     font-weight: 700;
-    letter-spacing: -0.02em;
+    letter-spacing: -0.03em;
+    line-height: 1;
 }
 
-.risk-value.critical { color: var(--red-error); }
-.risk-value.high { color: var(--yellow-warning); }
-.risk-value.medium { color: var(--yellow-warning); }
+.risk-value.critical { color: var(--red); }
+.risk-value.high { color: var(--yellow); }
+.risk-value.medium { color: var(--yellow); }
 
 .risk-sub {
-    font-family: var(--font-body);
-    font-size: 0.75rem;
-    color: var(--text-secondary);
-    margin-top: var(--space-sm);
+    font-family: var(--font);
+    font-size: 0.6875rem;
+    color: var(--text-3);
+    margin-top: var(--space-2);
 }
 
-/* ========== 上传区域 - Apple 深色风格 ========== */
+/* ===== Upload Area ===== */
 .upload-area {
-    border: 2px dashed var(--border-color);
+    border: 1.5px dashed var(--text-4);
     border-radius: var(--radius-lg);
-    padding: var(--space-2xl) var(--space-xl);
+    padding: var(--space-8) var(--space-6);
     text-align: center;
     background: var(--bg-surface);
-    margin: var(--space-lg) 0;
-    transition: all 0.2s ease;
+    margin: var(--space-4) 0;
+    transition: all 0.15s ease;
 }
 
 .upload-area:hover {
-    border-color: var(--accent-primary);
-    background: var(--bg-elevated);
+    border-color: var(--accent);
+    background: var(--accent-glow);
 }
 
 .upload-icon {
-    font-size: 2.5rem;
-    color: var(--text-secondary);
-    margin-bottom: var(--space-md);
+    font-size: 2rem;
+    color: var(--text-3);
+    margin-bottom: var(--space-3);
 }
 
 .upload-text {
-    font-family: var(--font-body);
+    font-family: var(--font);
     font-size: 0.875rem;
-    color: var(--text-secondary);
+    color: var(--text-2);
 }
 
-/* ========== 搜索框 - Apple 深色风格 ========== */
+/* ===== Text Input ===== */
 .stTextInput > div > div > input {
-    font-family: var(--font-body) !important;
-    border-radius: var(--radius-md) !important;
-    border: 1px solid var(--border-color) !important;
-    padding: 0.875rem 1rem !important;
+    font-family: var(--font) !important;
+    border-radius: var(--radius-sm) !important;
+    border: 1px solid var(--border) !important;
+    padding: 14px var(--space-4) !important;
     background: var(--bg-surface) !important;
-    color: var(--text-primary) !important;
-    font-size: 0.875rem !important;
-    transition: all 0.2s ease !important;
+    color: var(--text-1) !important;
+    font-size: 1rem !important;
+    transition: all 0.15s ease !important;
+    min-height: 48px !important;
 }
 
 .stTextInput > div > div > input:focus {
-    border-color: var(--accent-primary) !important;
-    box-shadow: 0 0 0 2px rgba(50, 213, 131, 0.2) !important;
+    border-color: var(--accent) !important;
+    box-shadow: 0 0 0 3px var(--accent-dim) !important;
 }
 
 .stTextInput > div > div > input::placeholder {
-    color: var(--text-secondary) !important;
+    color: var(--text-3) !important;
 }
 
-/* ========== 选择框 - Apple 深色风格 ========== */
+/* ===== Select & MultiSelect ===== */
 .stSelectbox > div > div {
-    border-radius: var(--radius-md) !important;
-    border-color: var(--border-color) !important;
+    border-radius: var(--radius-sm) !important;
+    border-color: var(--border) !important;
     background: var(--bg-surface) !important;
+    min-height: 48px !important;
 }
 
 .stSelectbox [data-baseweb="select"] > div {
     background: var(--bg-surface) !important;
-    border-color: var(--border-color) !important;
-    color: var(--text-primary) !important;
+    border-color: var(--border) !important;
+    color: var(--text-1) !important;
 }
 
 .stMultiSelect > div > div {
-    border-radius: var(--radius-md) !important;
-    border-color: var(--border-color) !important;
+    border-radius: var(--radius-sm) !important;
+    border-color: var(--border) !important;
     background: var(--bg-surface) !important;
 }
 
 .stMultiSelect [data-baseweb="select"] > div {
     background: var(--bg-surface) !important;
-    color: var(--text-primary) !important;
+    color: var(--text-1) !important;
 }
 
-/* ========== Tab 样式 - Apple 深色风格 ========== */
+/* ===== Tabs ===== */
 .stTabs [data-baseweb="tab-list"] {
-    gap: var(--space-sm);
+    gap: var(--space-1);
     background: transparent;
     border-radius: 0;
     padding: 0;
-    border-bottom: 1px solid var(--border-color);
+    border-bottom: 1px solid var(--border);
 }
 
 .stTabs [data-baseweb="tab"] {
-    font-family: var(--font-heading);
-    padding: 0.75rem 1rem;
+    font-family: var(--font);
+    padding: var(--space-3) var(--space-4);
     font-size: 0.875rem;
-    color: var(--text-secondary);
-    border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+    color: var(--text-3);
+    border-radius: var(--radius-xs) var(--radius-xs) 0 0;
     border-bottom: 2px solid transparent;
     margin-bottom: -1px;
     font-weight: 500;
-    transition: all 0.2s ease;
+    transition: all 0.15s ease;
 }
 
 .stTabs [data-baseweb="tab"]:hover {
-    color: var(--text-primary);
+    color: var(--text-2);
     background: var(--bg-elevated);
 }
 
 .stTabs [aria-selected="true"] {
-    color: var(--text-primary) !important;
+    color: var(--accent) !important;
     background: transparent !important;
-    border-bottom-color: var(--accent-primary) !important;
+    border-bottom-color: var(--accent) !important;
 }
 
-/* 分隔线 */
+/* ===== Dividers ===== */
 hr {
     border: none;
-    border-top: 1px solid var(--border-color);
-    margin: var(--space-lg) 0;
+    border-top: 1px solid var(--border);
+    margin: var(--space-4) 0;
 }
 
-/* 信息提示 */
 .stAlert {
-    border-radius: var(--radius-md) !important;
+    border-radius: var(--radius-sm) !important;
 }
 
-/* ========== 移动端适配 ========== */
-@media (max-width: 768px) {
-    /* 主内容区 */
+/* ========== iPhone 17 — Mobile First ========== */
+@media (max-width: 430px) {
+    /* Dynamic Island top safe area */
     .main .block-container {
-        padding: 1rem !important;
+        padding: var(--space-4) var(--space-4);
+        padding-top: calc(var(--safe-top) + 56px) !important;
+        padding-bottom: calc(80px + var(--safe-bottom)) !important;
         max-width: 100% !important;
     }
-    
-    /* 页面标题 */
+
     .page-title {
-        font-size: 1.25rem !important;
+        font-size: 1.375rem !important;
+        letter-spacing: -0.02em;
     }
-    
+
     .page-desc {
-        font-size: 0.8rem !important;
+        font-size: 0.8125rem !important;
+        margin-bottom: var(--space-4) !important;
     }
-    
-    /* 统计卡片 */
+
+    /* Stat cards — 2-column grid */
     .stat-card {
-        padding: 0.875rem 1rem !important;
+        padding: var(--space-4) !important;
+        border-radius: var(--radius-sm) !important;
     }
-    
+
     .stat-value {
         font-size: 1.5rem !important;
     }
-    
+
     .stat-header {
-        font-size: 0.75rem !important;
+        font-size: 0.6875rem !important;
     }
-    
+
     .stat-sub {
-        font-size: 0.7rem !important;
+        font-size: 0.625rem !important;
     }
-    
-    /* 报告列表项 */
+
+    /* Report items */
     .report-item {
-        padding: 0.875rem 1rem !important;
-        gap: 0.75rem !important;
+        padding: var(--space-3) var(--space-4) !important;
+        gap: var(--space-3) !important;
+        border-radius: var(--radius-sm) !important;
     }
-    
+
     .report-icon {
         width: 36px !important;
         height: 36px !important;
-        font-size: 1rem !important;
+        font-size: 0.875rem !important;
     }
-    
+
     .report-title {
         font-size: 0.875rem !important;
     }
-    
+
     .report-meta {
-        font-size: 0.75rem !important;
+        font-size: 0.6875rem !important;
     }
-    
-    /* 分类卡片 */
+
+    /* Category cards */
     .category-card {
-        padding: 1rem !important;
+        padding: var(--space-4) !important;
+        border-radius: var(--radius-sm) !important;
     }
-    
+
     .category-header {
         font-size: 0.875rem !important;
     }
-    
-    /* 指标卡片 */
+
+    /* Metric cards */
     .metric-card {
-        padding: 1rem !important;
-        margin-bottom: 0.5rem !important;
+        padding: var(--space-4) !important;
+        margin-bottom: var(--space-2) !important;
     }
-    
+
     .metric-label {
         font-size: 0.75rem !important;
     }
-    
+
     .metric-value {
-        font-size: 1.5rem !important;
+        font-size: 1.375rem !important;
     }
-    
-    /* 风险卡片 */
+
+    /* Risk cards */
     .risk-card {
-        padding: 1rem !important;
+        padding: var(--space-4) !important;
     }
-    
+
     .risk-value {
         font-size: 1.5rem !important;
     }
-    
-    /* 上传区域 */
+
+    /* Upload area */
     .upload-area {
-        padding: 2rem 1rem !important;
+        padding: var(--space-6) var(--space-4) !important;
     }
-    
+
     .upload-icon {
-        font-size: 2rem !important;
+        font-size: 1.75rem !important;
     }
-    
-    /* 表单控件：增大可点击区域（移动端 44px 触控标准） */
+
+    /* Buttons — 48px min touch target */
     .stButton > button {
-        min-height: 46px !important;
-        padding: 0.75rem 1rem !important;
-        font-size: 0.95rem !important;
+        min-height: 48px !important;
+        padding: 12px var(--space-4) !important;
+        font-size: 0.9375rem !important;
+        border-radius: var(--radius-sm) !important;
     }
 
-    /* 按钮之间留白，避免误触 */
     div.stButton {
-        margin-top: 0.5rem !important;
+        margin-top: var(--space-2) !important;
     }
 
-    /* 输入框/选择器：避免 iOS 自动放大（font-size >= 16px） */
+    /* Input fields — prevent iOS zoom (font-size >= 16px) */
     .stTextInput input,
     .stTextArea textarea {
-        min-height: 46px !important;
+        min-height: 48px !important;
         font-size: 16px !important;
-        line-height: 1.2 !important;
+        line-height: 1.3 !important;
     }
 
     [data-testid="stSelectbox"] [data-baseweb="select"] > div,
     [data-testid="stMultiSelect"] [data-baseweb="select"] > div {
-        min-height: 46px !important;
+        min-height: 48px !important;
         font-size: 16px !important;
     }
 
-    /* 列布局在手机上堆叠为单列，避免一排太多小按钮/卡片 */
+    /* Columns stack vertically */
     .main .block-container [data-testid="stHorizontalBlock"] {
         flex-direction: column !important;
-        gap: 0.75rem !important;
+        gap: var(--space-3) !important;
     }
 
     .main .block-container [data-testid="column"] {
         width: 100% !important;
         flex: 1 1 100% !important;
     }
-    
-    /* Tab：支持横向滚动，避免挤压 */
+
+    /* Tabs — horizontal scroll */
     .stTabs [data-baseweb="tab-list"] {
         overflow-x: auto !important;
         overflow-y: hidden !important;
         white-space: nowrap !important;
         scrollbar-width: none;
+        -webkit-overflow-scrolling: touch;
     }
 
     .stTabs [data-baseweb="tab-list"]::-webkit-scrollbar {
@@ -797,94 +833,41 @@ hr {
     }
 
     .stTabs [data-baseweb="tab"] {
-        padding: 0.6rem 0.9rem !important;
-        font-size: 0.9rem !important;
+        padding: var(--space-3) var(--space-3) !important;
+        font-size: 0.8125rem !important;
         flex: 0 0 auto !important;
     }
-    
-    /* 侧边栏 */
+
+    /* Sidebar */
     [data-testid="stSidebar"] > div:first-child {
-        padding: 1rem 0.75rem !important;
+        padding: var(--space-4) var(--space-3) !important;
     }
-    
+
     .sidebar-title {
-        font-size: 0.9rem !important;
-        margin-bottom: 1.5rem !important;
-    }
-}
-
-/* 超小屏幕 */
-@media (max-width: 480px) {
-    .main .block-container {
-        padding: 0.75rem !important;
-        padding-top: 4rem !important;
+        font-size: 0.75rem !important;
+        margin-bottom: var(--space-4) !important;
     }
 
-    /* 超小屏再加大按钮，提升可点性 */
-    .stButton > button {
-        min-height: 48px !important;
-        font-size: 1rem !important;
-    }
-    
-    .stat-value {
-        font-size: 1.25rem !important;
-    }
-    
-    .metric-value {
-        font-size: 1.25rem !important;
-    }
-}
-
-/* ========== 移动端整体优化 ========== */
-@media (max-width: 768px) {
-    /* 隐藏 Streamlit 默认 header/footer/menu */
-    header[data-testid="stHeader"],
-    footer,
-    #MainMenu {
+    /* Hide Streamlit header */
+    header[data-testid="stHeader"] {
         display: none !important;
     }
 
-    /* 页面标题简化 */
+    /* Typography */
     h1 {
-        font-size: 1.4rem !important;
-        line-height: 1.3 !important;
-        margin-bottom: 0.75rem !important;
+        font-size: 1.375rem !important;
+        line-height: 1.2 !important;
+        margin-bottom: var(--space-2) !important;
     }
     h2 {
-        font-size: 1.2rem !important;
-        margin-bottom: 0.5rem !important;
+        font-size: 1.125rem !important;
+        margin-bottom: var(--space-2) !important;
     }
     h3 {
-        font-size: 1.05rem !important;
+        font-size: 1rem !important;
     }
 
-    /* 统计卡片移动端优化 */
-    .stat-card {
-        padding: 1rem !important;
-        margin-bottom: 0.75rem !important;
-    }
-    .stat-card .stat-value {
-        font-size: 1.5rem !important;
-    }
-    .stat-card .stat-header {
-        font-size: 0.85rem !important;
-    }
-
-    /* 风险卡片 */
-    .risk-card {
-        padding: 0.75rem !important;
-    }
-
-    /* 报告项 */
-    .report-item {
-        padding: 0.875rem !important;
-        margin-bottom: 0.5rem !important;
-    }
-    .report-item .report-title {
-        font-size: 0.95rem !important;
-    }
-
-    /* 表格移动端：横向滚动 + 更紧凑 */
+    /* Tables */
     .stDataFrame,
     [data-testid="stDataFrame"] {
         overflow-x: auto !important;
@@ -892,117 +875,122 @@ hr {
     }
     .stDataFrame table,
     [data-testid="stDataFrame"] table {
-        font-size: 0.8rem !important;
+        font-size: 0.75rem !important;
         min-width: max-content !important;
     }
     .stDataFrame th,
     .stDataFrame td,
     [data-testid="stDataFrame"] th,
     [data-testid="stDataFrame"] td {
-        padding: 0.4rem 0.5rem !important;
+        padding: var(--space-2) var(--space-3) !important;
         white-space: nowrap !important;
     }
 
-    /* Expander 折叠面板 */
+    /* Expanders */
     .streamlit-expanderHeader {
-        font-size: 0.95rem !important;
-        padding: 0.75rem !important;
+        font-size: 0.875rem !important;
+        padding: var(--space-3) !important;
+        min-height: 48px !important;
     }
     .streamlit-expanderContent {
-        padding: 0.75rem !important;
+        padding: var(--space-3) !important;
     }
 
-    /* Markdown 内容 */
+    /* Markdown */
     .stMarkdown p {
-        font-size: 0.95rem !important;
+        font-size: 0.9375rem !important;
         line-height: 1.6 !important;
     }
     .stMarkdown ul, .stMarkdown ol {
         padding-left: 1.25rem !important;
     }
     .stMarkdown li {
-        margin-bottom: 0.4rem !important;
+        margin-bottom: var(--space-2) !important;
     }
 
-    /* Alert/Info/Warning boxes */
+    /* Alerts */
     .stAlert {
-        padding: 0.75rem !important;
-        font-size: 0.9rem !important;
+        padding: var(--space-3) !important;
+        font-size: 0.875rem !important;
     }
 
-    /* 文件上传区域 */
+    /* File uploader */
     [data-testid="stFileUploader"] {
-        padding: 1rem !important;
+        padding: var(--space-4) !important;
     }
     [data-testid="stFileUploader"] section {
-        padding: 1.5rem 1rem !important;
+        padding: var(--space-5) var(--space-4) !important;
+        min-height: 120px !important;
     }
 
-    /* Metric 组件 */
+    /* Metric component */
     [data-testid="stMetric"] {
-        padding: 0.5rem !important;
+        padding: var(--space-2) !important;
     }
     [data-testid="stMetricValue"] {
         font-size: 1.25rem !important;
     }
     [data-testid="stMetricLabel"] {
-        font-size: 0.85rem !important;
+        font-size: 0.8125rem !important;
     }
 
-    /* Plotly 图表容器 */
+    /* Plotly charts */
     .stPlotlyChart {
-        margin: 0 -0.5rem !important;
+        margin: 0 calc(-1 * var(--space-2)) !important;
     }
 
-    /* 进度条 */
+    /* Progress bar */
     .stProgress > div {
-        height: 8px !important;
+        height: 6px !important;
     }
 
-    /* 代码块 */
+    /* Code blocks */
     .stCodeBlock {
-        font-size: 0.75rem !important;
+        font-size: 0.6875rem !important;
     }
-
-    /* JSON 展示 */
     pre {
-        font-size: 0.75rem !important;
+        font-size: 0.6875rem !important;
         overflow-x: auto !important;
         white-space: pre !important;
     }
 }
 
-/* ========== 移动端固定顶部导航栏 ========== */
+/* ========== Mobile Navigation Bar ========== */
 .mobile-nav-bar {
     display: none;
 }
 
-@media (max-width: 768px) {
+@media (max-width: 430px) {
     .mobile-nav-bar {
         display: flex !important;
         position: fixed;
         top: 0;
         left: 0;
         right: 0;
-        height: 56px;
-        background: var(--bg-surface);
-        border-bottom: 1px solid var(--border-color);
+        height: calc(48px + var(--safe-top));
+        padding-top: var(--safe-top);
+        background: rgba(5, 5, 5, 0.85);
+        -webkit-backdrop-filter: saturate(180%) blur(20px);
+        backdrop-filter: saturate(180%) blur(20px);
+        border-bottom: 0.5px solid var(--border);
         z-index: 999998;
         align-items: center;
-        justify-content: space-between;
-        padding: 0 1rem;
+        justify-content: center;
+        padding-left: var(--space-4);
+        padding-right: var(--space-4);
     }
 
     .mobile-nav-bar .nav-title {
-        color: var(--text-primary);
-        font-size: 1rem;
+        color: var(--text-1);
+        font-size: 0.9375rem;
         font-weight: 600;
         flex: 1;
         text-align: center;
-        margin: 0 0.5rem;
+        margin: 0 var(--space-4);
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
+        letter-spacing: -0.01em;
     }
 
     .mobile-nav-bar .nav-btn {
@@ -1012,42 +1000,68 @@ hr {
         min-width: 44px;
         min-height: 44px;
         background: var(--bg-elevated);
-        border: 1px solid var(--border-color);
-        border-radius: var(--radius-md);
-        color: var(--text-primary);
-        font-size: 1.25rem;
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm);
+        color: var(--text-2);
+        font-size: 1.125rem;
         cursor: pointer;
         text-decoration: none;
-        transition: all 0.2s;
+        transition: all 0.15s;
     }
 
     .mobile-nav-bar .nav-btn:hover,
     .mobile-nav-bar .nav-btn:active {
-        background: var(--accent-primary);
-        border-color: var(--accent-primary);
+        background: var(--accent-dim);
+        border-color: var(--border-accent);
+        color: var(--accent);
     }
 
-    /* 为固定导航栏留出空间 */
-    .main .block-container {
-        padding-top: 4.5rem !important;
-        padding-bottom: calc(6.5rem + env(safe-area-inset-bottom)) !important;
+    /* Bottom navigation buttons */
+    .mobile-nav-buttons {
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        padding: var(--space-2) var(--space-4);
+        padding-bottom: calc(var(--space-2) + var(--safe-bottom));
+        z-index: 999999;
+        background: rgba(5, 5, 5, 0.9);
+        -webkit-backdrop-filter: saturate(180%) blur(20px);
+        backdrop-filter: saturate(180%) blur(20px);
+        border-top: 0.5px solid var(--border);
+        display: flex;
+        justify-content: space-around;
+        align-items: center;
     }
 
-    /* 让 columns 在手机上自动换行，避免内容被挤压到不可用 */
-    [data-testid="stHorizontalBlock"] {
-        flex-wrap: wrap !important;
-        gap: 0.75rem !important;
+    .mobile-nav-buttons > div {
+        flex: 1;
     }
-    [data-testid="column"] {
+
+    .mobile-nav-buttons .stButton > button {
+        min-height: 44px !important;
+        border-radius: var(--radius-sm) !important;
+        font-size: 0.75rem !important;
+        padding: var(--space-2) var(--space-2) !important;
+        background: transparent !important;
+        color: var(--text-2) !important;
+        border: none !important;
+        box-shadow: none !important;
+        font-weight: 500 !important;
+        letter-spacing: 0 !important;
         width: 100% !important;
-        flex: 1 1 100% !important;
-        min-width: 0 !important;
     }
 
-    /* 底部导航按钮内部保持横排，不受全局 columns 堆叠规则影响 */
+    .mobile-nav-buttons .stButton > button:active {
+        background: var(--accent-dim) !important;
+        color: var(--accent) !important;
+        transform: scale(0.97);
+    }
+
+    /* Keep bottom nav buttons horizontal */
     .mobile-nav-buttons [data-testid="stHorizontalBlock"] {
         flex-wrap: nowrap !important;
-        gap: 0.5rem !important;
+        gap: var(--space-1) !important;
         flex-direction: row !important;
     }
     .mobile-nav-buttons [data-testid="column"] {
@@ -1056,9 +1070,17 @@ hr {
         min-width: 0 !important;
     }
 
-    /* 隐藏侧边栏展开按钮（用我们的导航栏代替） */
+    /* Hide sidebar toggle on mobile (we use nav bar instead) */
     [data-testid="stSidebarCollapsedControl"],
     [data-testid="collapsedControl"] {
+        display: none !important;
+    }
+}
+
+/* Desktop: hide mobile nav */
+@media (min-width: 431px) {
+    .mobile-bottom-nav,
+    .mobile-nav-buttons {
         display: none !important;
     }
 }
@@ -1073,132 +1095,111 @@ def inject_css():
 
 def render_sidebar():
     import streamlit as st
-    st.markdown('<div class="sidebar-title">📊 财务分析专家</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-title">Financial Expert</div>', unsafe_allow_html=True)
 
 
 def render_sidebar_nav():
-    """渲染侧边栏导航"""
+    """Render sidebar navigation"""
     import streamlit as st
     render_sidebar()
-    st.page_link("app.py", label="仪表盘", icon="📊")
-    st.page_link("pages/1_股票查询.py", label="股票查询", icon="🔎")
-    st.page_link("pages/2_上传报表.py", label="上传报表", icon="📁")
-    st.page_link("pages/3_分析报告.py", label="分析报告", icon="📑")
-    st.page_link("pages/4_财务指标.py", label="财务指标", icon="📈")
-    st.page_link("pages/5_风险预警.py", label="风险预警", icon="🔔")
-    st.page_link("pages/6_趋势分析.py", label="趋势分析", icon="📉")
+    st.page_link("app.py", label="Dashboard", icon="")
+    st.page_link("pages/1_股票查询.py", label="Stock Search", icon="")
+    st.page_link("pages/2_上传报表.py", label="Upload Report", icon="")
+    st.page_link("pages/3_分析报告.py", label="Analysis", icon="")
+    st.page_link("pages/4_财务指标.py", label="Metrics", icon="")
+    st.page_link("pages/5_风险预警.py", label="Risk Alerts", icon="")
+    st.page_link("pages/6_趋势分析.py", label="Trends", icon="")
 
 
-def render_mobile_nav(title: str = "财务分析专家", show_back: bool = True, back_url: str = "app.py"):
-    """渲染移动端固定底部导航栏（更稳定的实现，避免 iOS 交互问题）"""
+def render_mobile_nav(title: str = "Financial Expert", show_back: bool = True, back_url: str = "app.py"):
+    """Render iPhone 17 optimized navigation bar with safe area support"""
     import streamlit as st
-    
-    # 顶部标题栏
+
+    # Top navigation bar
     st.markdown(f'''
     <div class="mobile-nav-bar">
-        <span class="nav-title">📊 {title}</span>
+        <span class="nav-title">{title}</span>
     </div>
     ''', unsafe_allow_html=True)
-    
-    # 底部固定导航栏样式
+
+    # Bottom tab bar styles
     st.markdown('''
     <style>
-    @media (max-width: 768px) {
-        /* 底部导航栏容器 */
-        .mobile-bottom-nav {
+    @media (max-width: 430px) {
+        .mobile-tab-bar {
             position: fixed;
             bottom: 0;
             left: 0;
             right: 0;
-            background: var(--bg-surface);
-            border-top: 1px solid var(--border-color);
-            padding: 0.5rem 0;
-            padding-bottom: calc(0.5rem + env(safe-area-inset-bottom));
+            background: rgba(5, 5, 5, 0.92);
+            -webkit-backdrop-filter: saturate(180%) blur(20px);
+            backdrop-filter: saturate(180%) blur(20px);
+            border-top: 0.5px solid rgba(255,255,255,0.06);
+            padding: 6px 0;
+            padding-bottom: calc(6px + env(safe-area-inset-bottom, 0px));
             z-index: 999998;
             display: flex;
             justify-content: space-around;
             align-items: center;
         }
-        .mobile-bottom-nav .nav-item {
+        .mobile-tab-bar .tab-item {
             display: flex;
             flex-direction: column;
             align-items: center;
-            gap: 0.25rem;
-            padding: 0.5rem 1rem;
-            color: var(--text-secondary);
+            gap: 2px;
+            padding: 4px 8px;
+            color: var(--text-3);
             text-decoration: none;
-            font-size: 0.7rem;
-            border-radius: var(--radius-sm);
-            transition: all 0.2s;
-            min-width: 60px;
+            font-size: 0.625rem;
+            font-weight: 500;
+            border-radius: 8px;
+            transition: color 0.15s;
+            min-width: 56px;
+            letter-spacing: 0.01em;
         }
-        .mobile-bottom-nav .nav-item:active {
-            background: var(--bg-elevated);
+        .mobile-tab-bar .tab-item.active {
+            color: var(--accent);
         }
-        .mobile-bottom-nav .nav-item .nav-icon {
+        .mobile-tab-bar .tab-item .tab-icon {
             font-size: 1.25rem;
-        }
-        
-        /* 底部导航按钮区域 */
-        .mobile-nav-buttons {
-            position: fixed;
-            bottom: calc(env(safe-area-inset-bottom) + 0.5rem);
-            left: 0;
-            right: 0;
-            padding: 0 1rem;
-            z-index: 999999;
-            display: flex;
-            justify-content: center;
-            gap: 1rem;
-            pointer-events: none;
-        }
-        .mobile-nav-buttons > div {
-            pointer-events: auto;
-        }
-        .mobile-nav-buttons .stButton > button {
-            min-width: 70px !important;
-            min-height: 44px !important;
-            border-radius: 22px !important;
-            font-size: 0.85rem !important;
-            padding: 0.5rem 1rem !important;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.3) !important;
-            background: var(--bg-surface) !important;
-            color: var(--text-primary) !important;
-            border: 1px solid var(--border-color) !important;
-        }
-        .mobile-nav-buttons .stButton > button:active {
-            background: var(--bg-elevated) !important;
-            transform: scale(0.98);
+            line-height: 1;
         }
     }
-    @media (min-width: 769px) {
-        .mobile-bottom-nav,
-        .mobile-nav-buttons {
-            display: none !important;
-        }
+    @media (min-width: 431px) {
+        .mobile-tab-bar { display: none !important; }
     }
     </style>
     ''', unsafe_allow_html=True)
-    
-    # 简化的底部导航按钮（使用 Streamlit 原生按钮，放在页面底部）
+
+    # Bottom tab bar
+    st.markdown('''
+    <div class="mobile-tab-bar">
+        <div class="tab-item active"><span class="tab-icon"></span>Home</div>
+        <div class="tab-item"><span class="tab-icon"></span>Search</div>
+        <div class="tab-item"><span class="tab-icon"></span>Reports</div>
+        <div class="tab-item"><span class="tab-icon"></span>Risks</div>
+    </div>
+    ''', unsafe_allow_html=True)
+
+    # Functional bottom navigation (Streamlit buttons for actual navigation)
     st.markdown('<div class="mobile-nav-buttons">', unsafe_allow_html=True)
     cols = st.columns([1, 1, 1, 1])
     with cols[0]:
-        if st.button("← 返回", key=f"m_back_{title}"):
+        if st.button("", key=f"m_back_{title}"):
             st.switch_page(back_url)
     with cols[1]:
-        if st.button("🏠 首页", key=f"m_home_{title}"):
+        if st.button("", key=f"m_home_{title}"):
             st.switch_page("app.py")
     with cols[2]:
-        if st.button("🔎 查询", key=f"m_search_{title}"):
+        if st.button("", key=f"m_search_{title}"):
             st.switch_page("pages/1_股票查询.py")
     with cols[3]:
-        if st.button("📑 报告", key=f"m_report_{title}"):
+        if st.button("", key=f"m_report_{title}"):
             st.switch_page("pages/3_分析报告.py")
     st.markdown('</div>', unsafe_allow_html=True)
 
 
-def stat_card(label: str, value, sub: str = "", icon: str = "📄") -> str:
+def stat_card(label: str, value, sub: str = "", icon: str = "") -> str:
     return f'''
     <div class="stat-card">
         <div class="stat-header">
@@ -1218,7 +1219,7 @@ def badge(text: str, status: str = "pending") -> str:
 def report_item(title: str, meta: str, status: str, status_text: str) -> str:
     return f'''
     <div class="report-item">
-        <div class="report-icon">📄</div>
+        <div class="report-icon"></div>
         <div class="report-info">
             <div class="report-title">{title} {badge(status_text, status)}</div>
             <div class="report-meta">{meta}</div>

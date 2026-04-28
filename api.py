@@ -5604,6 +5604,75 @@ async def upload_report(
         raise HTTPException(status_code=500, detail=f"上传失败: {str(e)}")
 
 
+
+def _query_latest_annual_period(market: str, symbol_norm: str) -> str | None:
+    """Query AkShare for the latest available annual report period date."""
+    try:
+        disable_proxies_for_process()
+        import akshare as ak
+        mkt = (market or '').upper()
+
+        if mkt == 'HK':
+            code = symbol_norm.replace('.HK', '').zfill(5)
+            try:
+                df = ak.stock_financial_hk_report_em(stock=code, symbol='利润表', indicator='年度')
+                if df is not None and not df.empty and 'REPORT_DATE' in df.columns:
+                    latest = df['REPORT_DATE'].max()
+                    return str(latest.date()) if hasattr(latest, 'date') else str(latest)[:10]
+            except Exception:
+                pass
+            try:
+                ind_df = ak.stock_hk_financial_indicator_em(symbol=code)
+                if ind_df is not None and not ind_df.empty:
+                    for col in ind_df.columns:
+                        if 'REPORT_DATE' in col or 'STD_REPORT_DATE' in col:
+                            latest = ind_df[col].max()
+                            return str(latest.date()) if hasattr(latest, 'date') else str(latest)[:10]
+            except Exception:
+                pass
+
+        elif mkt == 'US':
+            base = symbol_norm.split('.')[0].upper()
+            try:
+                df = ak.stock_financial_us_report_em(stock=base, symbol='综合损益表', indicator='年报')
+                if df is not None and not df.empty and 'REPORT_DATE' in df.columns:
+                    latest = df['REPORT_DATE'].max()
+                    return str(latest.date()) if hasattr(latest, 'date') else str(latest)[:10]
+            except Exception:
+                pass
+            try:
+                ind_df = ak.stock_financial_us_analysis_indicator_em(symbol=base, indicator='年报')
+                if ind_df is not None and not ind_df.empty:
+                    for col in ('STD_REPORT_DATE', 'REPORT_DATE'):
+                        if col in ind_df.columns:
+                            latest = ind_df[col].max()
+                            return str(latest.date()) if hasattr(latest, 'date') else str(latest)[:10]
+            except Exception:
+                pass
+
+        elif mkt == 'CN':
+            code = symbol_norm.split('.')[0]
+            try:
+                df = ak.stock_financial_abstract_ths(symbol=code, indicator='按报告期')
+                if df is not None and not df.empty and '报告期' in df.columns:
+                    periods = df['报告期'].unique()
+                    annual = [p for p in periods if '12-31' in str(p)]
+                    if annual:
+                        return str(sorted(annual, reverse=True)[0])[:10]
+            except Exception:
+                pass
+            try:
+                ratio_df = ak.stock_financial_analysis_indicator(symbol=code)
+                if ratio_df is not None and not ratio_df.empty and '日期' in ratio_df.columns:
+                    latest = ratio_df['日期'].max()
+                    return str(latest.date()) if hasattr(latest, 'date') else str(latest)[:10]
+            except Exception:
+                pass
+
+    except Exception:
+        pass
+    return None
+
 @app.post("/api/reports/fetch")
 def fetch_market_report(
     background_tasks: BackgroundTasks,
@@ -5620,9 +5689,11 @@ def fetch_market_report(
         # Normalize symbol
         symbol_norm = normalize_symbol(market, symbol)
 
-        # Use latest closed annual period by default (e.g. 2025-12-31 in 2026).
+        # Query latest available annual period from data source, fallback to year-1
+        queried_latest = _query_latest_annual_period(market, symbol_norm) if not (period_end or "").strip() else None
         today = _dt.date.today()
-        latest_annual_period_end = f"{today.year - 1}-12-31"
+        fallback_annual_period_end = f"{today.year - 1}-12-31"
+        latest_annual_period_end = queried_latest or fallback_annual_period_end
         period_end_norm = (period_end or "").strip()
         if not period_end_norm:
             period_end_norm = latest_annual_period_end
