@@ -4328,103 +4328,42 @@ def _calc_slope_pct_linear(series, window=20):
 
 def _build_buy_condition_desc(
     *,
-    last_close: float | None,
-    ma20_now: float | None,
-    ma60_now: float | None,
-    slope_pct: float | None,
-    rsi14: float | None,
-    rsi_rebound: bool | None,
-    rsi_before_yesterday_v: float | None,
-    rsi_yesterday_v: float | None,
-    rsi_today_v: float | None,
-    aggressive_ok: bool | None,
-    tol: float = 0.02,
+    buy_score: int | None = None,
+    buy_grade: str | None = None,
+    buy_score_details: dict | None = None,
+    **_kwargs,
 ) -> str | None:
     try:
-        if ma20_now is None or ma60_now is None or slope_pct is None:
+        if buy_grade is None:
             return None
-
-        low_p = float(ma20_now) * (1.0 - float(tol))
-        high_p = float(ma20_now) * (1.0 + float(tol))
-
-        c1 = bool(last_close is not None and float(last_close) > float(ma60_now))
-        c2 = bool(float(slope_pct) > 0)
-        c3 = bool(
-            last_close is not None
-            and abs(float(last_close) - float(ma20_now)) / max(abs(float(ma20_now)), 1e-9) <= float(tol)
-        )
-        c4 = bool(rsi_rebound)
-
-        missing = []
-        if not c1:
-            missing.append(">MA60")
-        if not c2:
-            missing.append("MA60上行")
-        if not c3:
-            missing.append("≈MA20")
-        if not c4:
-            missing.append("RSI拐头")
-
-        rsi_part = ""
-        if rsi14 is not None:
-            rsi_part = f"RSI14={float(rsi14):.1f}"
-        if rsi_before_yesterday_v is not None and rsi_yesterday_v is not None and rsi_today_v is not None:
-            if rsi_part:
-                rsi_part = rsi_part + (
-                    f"（前天={float(rsi_before_yesterday_v):.1f}, 昨天={float(rsi_yesterday_v):.1f}, 今天={float(rsi_today_v):.1f}）"
-                )
-            else:
-                rsi_part = (
-                    f"RSI（前天={float(rsi_before_yesterday_v):.1f}, 昨天={float(rsi_yesterday_v):.1f}, 今天={float(rsi_today_v):.1f}）"
-                )
-
-        tail = "可以买入" if aggressive_ok is True else ("暂不满足：" + "、".join(missing) if aggressive_ok is False else "-")
-        return (
-            f"当价格进入 {low_p:.2f}~{high_p:.2f}（≈MA20={float(ma20_now):.2f}）且 价格>MA60={float(ma60_now):.2f}，"
-            f"且 MA60趋势向上（Slope%={float(slope_pct):.3f}%/天），"
-            f"且 RSI出现低位拐头（{rsi_part or '-'}），则{tail}。"
-        )
+        parts = []
+        for k, v in sorted(buy_score_details.items(), key=lambda x: x[1]["score"], reverse=True):
+            if v["score"] > 0:
+                parts.append(f"{v['reason']}({v['score']}/{v['max']}分)")
+        if parts:
+            return f"综合评分{buy_score}分-{buy_grade}：" + "；".join(parts)
+        return f"综合评分{buy_score}分-{buy_grade}：暂无明显买入信号"
     except Exception:
         return None
 
 
 def _build_sell_condition_desc(
     *,
-    last_close: float | None,
-    ma20_now: float | None,
-    atr14: float | None,
-    rsi14: float | None,
-    prev_max_close: float | None,
-    prev_max_rsi: float | None,
+    sell_score: int | None = None,
+    sell_grade: str | None = None,
+    sell_score_details: dict | None = None,
+    **_kwargs,
 ) -> str | None:
     try:
-        if last_close is None:
+        if sell_grade is None:
             return None
-
-        stop_part = None
-        if atr14 is not None:
-            stop_line2 = float(last_close) - 2 * float(atr14)
-            stop_part = f"B：止损条件：当价格≤{stop_line2:.2f}马上卖出（{float(last_close):.2f}-2×ATR{float(atr14):.3f}）"
-        else:
-            stop_part = "B：止损条件：当价格≤(今日价-2×ATR)马上卖出"
-
-        tp_parts = []
-        if rsi14 is not None:
-            if prev_max_close is not None and prev_max_rsi is not None:
-                tp_parts.append(
-                    f"RSI={float(rsi14):.1f}>70且顶背离：价格创新高>={float(prev_max_close):.2f}且RSI<{float(prev_max_rsi):.1f}"
-                )
-            else:
-                tp_parts.append(f"RSI={float(rsi14):.1f}>70且顶背离（创新高阈值取近窗历史高点）")
-        else:
-            tp_parts.append("RSI>70且顶背离")
-
-        if ma20_now is not None:
-            tp_parts.append(f"跌破MA20：当价格<{float(ma20_now):.2f}")
-        else:
-            tp_parts.append("跌破MA20")
-
-        return "A：止盈条件：" + " 或 ".join(tp_parts) + "；" + (stop_part or "")
+        parts = []
+        for k, v in sorted(sell_score_details.items(), key=lambda x: x[1]["score"], reverse=True):
+            if v["score"] > 0:
+                parts.append(f"{v['reason']}({v['score']}/{v['max']}分)")
+        if parts:
+            return f"综合评分{sell_score}分-{sell_grade}：" + "；".join(parts)
+        return f"综合评分{sell_score}分-{sell_grade}：暂无明显卖出信号"
     except Exception:
         return None
 
@@ -4945,17 +4884,15 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
         if slope_pct is None:
             slope_advice = None
         elif abs(slope_pct) <= eps:
-            slope_advice = "不要买"
+            slope_advice = "横盘"
         elif slope_pct < 0:
-            slope_advice = "不要买"
-        elif 0 < slope_pct < 0.1:
-            slope_advice = "小心买"
-        elif 0.2 <= slope_pct <= 0.3:
-            slope_advice = "放心买"
-        elif slope_pct >= 0.4:
-            slope_advice = "有危险"
+            slope_advice = "下跌"
+        elif 0 < slope_pct < 0.05:
+            slope_advice = "缓慢上涨"
+        elif slope_pct < 0.2:
+            slope_advice = "上涨"
         else:
-            slope_advice = "小心买"
+            slope_advice = "急涨"
     except Exception:
         slope_raw = None
         slope_pct = None
@@ -5404,9 +5341,9 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
             sell_price = float(ma20_now)
         else:
             sell_price = float(last_close) if last_close is not None else None
-        if sell_score >= 50:
-            top_rs = sorted(sell_score_details.items(), key=lambda x: x[1]["score"], reverse=True)[:3]
-            sell_reason = "；".join(v["reason"] for _, v in top_rs if v["score"] > 0) or sell_grade
+        if sell_grade and sell_score > 0:
+            top_rs = sorted(sell_score_details.items(), key=lambda x: x[1]["score"], reverse=True)[:4]
+            sell_reason = f"{sell_grade}({sell_score}分)：" + "；".join(v["reason"] for _, v in top_rs if v["score"] > 0)
         else:
             sell_reason = "继续持有"
     except Exception:
@@ -5427,26 +5364,15 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
     buy_price_stable = float(ma60_now) if 'ma60_now' in locals() and ma60_now is not None else None
 
     buy_condition_desc = _build_buy_condition_desc(
-        last_close=last_close,
-        ma20_now=ma20_now,
-        ma60_now=ma60_now,
-        slope_pct=slope_pct,
-        rsi14=rsi14,
-        rsi_rebound=rsi_rebound,
-        rsi_before_yesterday_v=rsi_before_yesterday_v,
-        rsi_yesterday_v=rsi_yesterday_v,
-        rsi_today_v=rsi_today_v,
-        aggressive_ok=aggressive_ok,
-        tol=0.02,
+        buy_score=buy_score,
+        buy_grade=buy_grade,
+        buy_score_details=buy_score_details,
     )
 
     sell_condition_desc = _build_sell_condition_desc(
-        last_close=last_close,
-        ma20_now=ma20_now,
-        atr14=atr14,
-        rsi14=rsi14,
-        prev_max_close=prev_max_close,
-        prev_max_rsi=prev_max_rsi,
+        sell_score=sell_score,
+        sell_grade=sell_grade,
+        sell_score_details=sell_score_details,
     )
 
     payload = StockIndicatorsResponse(
