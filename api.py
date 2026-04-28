@@ -2972,15 +2972,8 @@ def _build_report_pdf_bytes(report: Report, metrics: list[ComputedMetric], alert
         # Composite recommendation from rating engine
         if _rating is not None:
             story.append(Paragraph(f"• 综合建议：{_rating['recommendation']}（评级{_rating['grade']} {_rating['total_score']}分）", styles["Normal"]))
-        elif scores:
-            avg_score = sum(scores) / len(scores) if scores else 0
-            if avg_score >= 1.5:
-                rec = "综合财务质量较好，建议关注估值水平和行业前景，在合理估值区间内可考虑配置。"
-            elif avg_score >= 1:
-                rec = "财务表现中等，存在改善空间。建议等待更多积极信号后再做配置决策。"
-            else:
-                rec = "当前财务指标偏弱，建议谨慎观望。重点关注管理层改善计划和行业周期位置。"
-            story.append(Paragraph(f"• 综合建议：{rec}", styles["Normal"]))
+        else:
+            story.append(Paragraph("• 暂无足够数据生成综合评级建议。", styles["Normal"]))
     else:
         story.append(Paragraph("暂无足够数据生成AI洞察，请确保报告已完成分析。", styles["Normal"]))
 

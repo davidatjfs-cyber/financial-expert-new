@@ -490,52 +490,41 @@ def _generate_fallback_analysis(company_name: str, metrics: dict[str, float]) ->
 
 
 def _calculate_health_score(metrics: dict[str, float]) -> int:
-    """计算财务健康度评分"""
-    score = 50  # 基础分
+    from rating_engine import compute_enterprise_rating
+    r = compute_enterprise_rating(
+        net_margin=metrics.get("NET_MARGIN"),
+        gross_margin=metrics.get("GROSS_MARGIN"),
+        roe=metrics.get("ROE"),
+        roa=metrics.get("ROA"),
+        debt_ratio=metrics.get("DEBT_ASSET"),
+        current_ratio=metrics.get("CURRENT_RATIO"),
+        asset_turnover=metrics.get("ASSET_TURNOVER"),
+        inv_turnover=metrics.get("INVENTORY_TURNOVER"),
+        recv_turnover=metrics.get("RECEIVABLE_TURNOVER"),
+        revenue_growth=metrics.get("REVENUE_GROWTH"),
+        profit_growth=metrics.get("PROFIT_GROWTH"),
+        pe_ratio=metrics.get("PE_RATIO"),
+        operating_cash_flow=metrics.get("OPERATING_CASH_FLOW"),
+        net_profit=metrics.get("NET_PROFIT"),
+    )
+    return round(r["total_score"])
 
-    gross_margin = metrics.get("GROSS_MARGIN")
-    if gross_margin:
-        if gross_margin > 40:
-            score += 15
-        elif gross_margin > 25:
-            score += 10
-        elif gross_margin > 15:
-            score += 5
 
-    net_margin = metrics.get("NET_MARGIN")
-    if net_margin:
-        if net_margin > 15:
-            score += 15
-        elif net_margin > 8:
-            score += 10
-        elif net_margin > 3:
-            score += 5
-        elif net_margin < 0:
-            score -= 10
-
-    roe = metrics.get("ROE")
-    if roe:
-        if roe > 20:
-            score += 10
-        elif roe > 12:
-            score += 5
-        elif roe < 5:
-            score -= 5
-
-    debt_asset = metrics.get("DEBT_ASSET")
-    if debt_asset:
-        if debt_asset < 40:
-            score += 10
-        elif debt_asset < 55:
-            score += 5
-        elif debt_asset > 70:
-            score -= 10
-
-    current_ratio = metrics.get("CURRENT_RATIO")
-    if current_ratio:
-        if current_ratio > 2:
-            score += 5
-        elif current_ratio < 1:
-            score -= 10
-
-    return max(0, min(100, score))
+def _calculate_rating_details(metrics: dict[str, float]) -> dict:
+    from rating_engine import compute_enterprise_rating
+    return compute_enterprise_rating(
+        net_margin=metrics.get("NET_MARGIN"),
+        gross_margin=metrics.get("GROSS_MARGIN"),
+        roe=metrics.get("ROE"),
+        roa=metrics.get("ROA"),
+        debt_ratio=metrics.get("DEBT_ASSET"),
+        current_ratio=metrics.get("CURRENT_RATIO"),
+        asset_turnover=metrics.get("ASSET_TURNOVER"),
+        inv_turnover=metrics.get("INVENTORY_TURNOVER"),
+        recv_turnover=metrics.get("RECEIVABLE_TURNOVER"),
+        revenue_growth=metrics.get("REVENUE_GROWTH"),
+        profit_growth=metrics.get("PROFIT_GROWTH"),
+        pe_ratio=metrics.get("PE_RATIO"),
+        operating_cash_flow=metrics.get("OPERATING_CASH_FLOW"),
+        net_profit=metrics.get("NET_PROFIT"),
+    )

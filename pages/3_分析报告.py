@@ -17,7 +17,7 @@ from core.styles import inject_css, render_sidebar_nav, render_mobile_nav, badge
 from core.pdf_text import extract_pdf_text
 from core.pdf_analyzer import extract_financials_from_pdf, compute_metrics_from_extracted
 from core.ui import pretty_json
-from core.llm_qwen import analyze_financials_with_qwen, _calculate_health_score, get_api_key, test_qwen_connection
+from core.llm_qwen import analyze_financials_with_qwen, _calculate_health_score, _calculate_rating_details, get_api_key, test_qwen_connection
 import plotly.graph_objects as go
 
 from io import BytesIO
@@ -575,14 +575,14 @@ def _show_report_detail(report_id: str) -> None:
 
     st.markdown(f'''
     <div style="margin-bottom:1.5rem;">
-        <div style="display:flex;align-items:center;gap:1rem;margin-bottom:var(--space-3);">
-            <h2 style="margin:0;font-size:1.375rem;font-weight:700;color:var(--text-1);letter-spacing:-0.02em;">{r.report_name}</h2>
-            <span style="background:var(--accent-dim);color:var(--accent);padding:4px 10px;border-radius:6px;font-size:0.75rem;font-weight:600;letter-spacing:0.02em;">{period_display}</span>
+        <div style="display:flex;align-items:center;gap:1rem;margin-bottom:0.75rem;">
+            <h2 style="margin:0;font-size:1.5rem;font-weight:600;color:#1a1a2e;">{r.report_name}</h2>
+            <span style="background:#e3f2fd;color:#1976d2;padding:0.25rem 0.75rem;border-radius:4px;font-size:0.875rem;font-weight:500;">{period_display}</span>
         </div>
-        <div style="display:flex;gap:1.5rem;flex-wrap:wrap;background:var(--bg-surface);padding:var(--space-3) var(--space-4);border-radius:var(--radius-sm);border:1px solid var(--border);">
-            <div><span style="color:var(--text-3);font-size:0.8125rem;">Source</span> <span style="font-weight:500;color:var(--text-1);margin-left:var(--space-2);">{r.source_type}</span></div>
-            <div><span style="color:var(--text-3);font-size:0.8125rem;">Status</span> <span style="margin-left:var(--space-2);">{badge(t, s)}</span></div>
-            <div><span style="color:var(--text-3);font-size:0.8125rem;">Period</span> <span style="font-weight:500;color:var(--text-1);margin-left:var(--space-2);">{period_text}</span></div>
+        <div style="display:flex;gap:2rem;flex-wrap:wrap;background:#f8f9fa;padding:0.75rem 1rem;border-radius:8px;border:1px solid #eee;">
+            <div><span style="color:#666;font-size:0.875rem;">来源</span> <span style="font-weight:500;color:#1a1a2e;margin-left:0.5rem;">{r.source_type}</span></div>
+            <div><span style="color:#666;font-size:0.875rem;">状态</span> <span style="margin-left:0.5rem;">{badge(t, s)}</span></div>
+            <div><span style="color:#666;font-size:0.875rem;">报告期</span> <span style="font-weight:500;color:#1a1a2e;margin-left:0.5rem;">{period_text}</span></div>
         </div>
     </div>
     ''', unsafe_allow_html=True)
@@ -1653,18 +1653,27 @@ def _render_overview(r, metrics: pd.DataFrame, alerts: pd.DataFrame) -> None:
         </div>
         ''', unsafe_allow_html=True)
 
-        # 雷达图数据
-        categories = ['盈利能力', '偿债能力', '营运能力', '成长能力', '现金流']
-
-        # 计算各维度得分 (0-100)
-        profit_score = min(100, ((metric_dict.get("GROSS_MARGIN") or 0) / 50 + (metric_dict.get("NET_MARGIN") or 0) / 20) * 50)
-        debt_score = max(0, 100 - (metric_dict.get("DEBT_ASSET") or 50))
-        operation_score = min(100, ((metric_dict.get("CURRENT_RATIO") or 1) / 2) * 100)
-        growth_score = 60  # 默认值
-        cashflow_score = 70  # 默认值
-
-        values = [profit_score, debt_score, operation_score, growth_score, cashflow_score]
-        values.append(values[0])  # 闭合雷达图
+        # 雷达图数据 - use 8-dimension rating engine
+        from rating_engine import compute_enterprise_rating
+        _rating_result = compute_enterprise_rating(
+            net_margin=metric_dict.get("NET_MARGIN"),
+            gross_margin=metric_dict.get("GROSS_MARGIN"),
+            roe=metric_dict.get("ROE"),
+            roa=metric_dict.get("ROA"),
+            debt_ratio=metric_dict.get("DEBT_ASSET"),
+            current_ratio=metric_dict.get("CURRENT_RATIO"),
+            asset_turnover=metric_dict.get("ASSET_TURNOVER"),
+            inv_turnover=metric_dict.get("INVENTORY_TURNOVER"),
+            recv_turnover=metric_dict.get("RECEIVABLE_TURNOVER"),
+            revenue_growth=metric_dict.get("REVENUE_GROWTH"),
+            profit_growth=metric_dict.get("PROFIT_GROWTH"),
+            pe_ratio=metric_dict.get("PE_RATIO"),
+            operating_cash_flow=metric_dict.get("OPERATING_CASH_FLOW"),
+            net_profit=metric_dict.get("NET_PROFIT"),
+        )
+        categories = [v["label"] for v in _rating_result["dim_summary"].values()]
+        values = [v["pct"] for v in _rating_result["dim_summary"].values()]
+        values.append(values[0])
 
         fig_radar = go.Figure()
         fig_radar.add_trace(go.Scatterpolar(
@@ -1755,24 +1764,30 @@ def _render_overview(r, metrics: pd.DataFrame, alerts: pd.DataFrame) -> None:
         </div>
         ''', unsafe_allow_html=True)
     else:
-        # 显示默认分析
-        health_score = _calculate_health_score(metric_dict)
-        gross_margin = metric_dict.get('GROSS_MARGIN', 0) or 0
-        net_margin = metric_dict.get('NET_MARGIN', 0) or 0
-        debt_asset = metric_dict.get('DEBT_ASSET', 0) or 0
+        # 显示默认分析 - use 8-dimension rating
+        _rd = _calculate_rating_details(metric_dict) if '_rating_result' not in dir() else _rating_result
+        if _rd is None:
+            _rd = _calculate_rating_details(metric_dict)
+        health_score = round(_rd["total_score"]) if _rd else 0
+        _grade = _rd.get("grade", "-") if _rd else "-"
+        _rec = _rd.get("recommendation", "") if _rd else ""
+        _strengths = "、".join(_rd.get("strengths", [])) if _rd else ""
+        _risks = "、".join(_rd.get("risks", [])) if _rd else ""
         
         st.markdown(f'''
         <div style="padding:1.25rem;background:#f8f9fa;border-radius:10px;border:1px solid #e0e0e0;">
-            <div style="font-size:1rem;font-weight:600;color:#1a1a2e;margin-bottom:0.75rem;">
-                📊 财务健康度评分：<span style="color:#1976d2;">{health_score}/100</span>
+            <div style="font-size:1.1rem;font-weight:700;color:#1a1a2e;margin-bottom:0.5rem;">
+                📊 企业综合评级：<span style="color:#1976d2;font-size:1.3rem;">{_grade}</span>
+                <span style="color:#666;font-size:0.9rem;"> {health_score}/100</span>
             </div>
             <div style="font-size:0.875rem;color:#333;line-height:1.8;">
-                根据上传的财务报表分析，该公司毛利率为 <b>{gross_margin:.2f}%</b>，
-                净利率为 <b>{net_margin:.2f}%</b>，
-                资产负债率为 <b>{debt_asset:.2f}%</b>。
+                {_rec}
             </div>
+            {f'<div style="font-size:0.8125rem;color:#2e7d32;margin-top:0.5rem;">✅ 优势：{_strengths}</div>' if _strengths else ''}
+            {f'<div style="font-size:0.8125rem;color:#c62828;margin-top:0.25rem;">⚠️ 风险：{_risks}</div>' if _risks else ''}
             <div style="font-size:0.8125rem;color:#666;margin-top:0.75rem;">
                 💡 点击上方「生成 AI 分析」按钮获取更详细的智能分析报告。
+            </div>
             </div>
         </div>
         ''', unsafe_allow_html=True)
