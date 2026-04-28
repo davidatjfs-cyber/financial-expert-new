@@ -2643,6 +2643,32 @@ def _build_report_pdf_bytes(report: Report, metrics: list[ComputedMetric], alert
     asset_turnover = _value("ASSET_TURNOVER")
     inv_turnover = _value("INVENTORY_TURNOVER")
     recv_turnover = _value("RECEIVABLE_TURNOVER")
+    revenue_growth = _value("REVENUE_GROWTH")
+    profit_growth = _value("PROFIT_GROWTH")
+    operating_cash_flow = _value("OPERATING_CASH_FLOW")
+
+    try:
+        from rating_engine import compute_enterprise_rating
+        _rating = compute_enterprise_rating(
+            net_margin=net_margin,
+            gross_margin=gross_margin,
+            roe=roe,
+            roa=roa,
+            debt_ratio=debt_ratio,
+            current_ratio=current_ratio,
+            asset_turnover=asset_turnover,
+            inv_turnover=inv_turnover,
+            recv_turnover=recv_turnover,
+            revenue_growth=revenue_growth,
+            profit_growth=profit_growth,
+            pe_ratio=pe_ratio,
+            industry_pe=industry_avg.get("peRatio"),
+            operating_cash_flow=operating_cash_flow,
+            net_profit=_value("NET_PROFIT") if _value("NET_PROFIT") else None,
+            gross_margin_3y=None,
+        )
+    except Exception:
+        _rating = None
 
     # Same heuristic constants as frontend
     industry_avg = {
@@ -2862,10 +2888,26 @@ def _build_report_pdf_bytes(report: Report, metrics: list[ComputedMetric], alert
                     return g
             return thresholds[-1][1] if thresholds else "C"
 
-        profit_grade = _grade(net_margin, [(15, "A"), (10, "B+"), (5, "B")]) if net_margin is not None else "-"
-        safety_grade = _grade(debt_ratio, [(40, "A"), (50, "B+"), (65, "B")], reverse=True) if debt_ratio is not None else "-"
-        efficiency_grade = _grade(roe, [(20, "A"), (15, "B+"), (10, "B")]) if roe is not None else "-"
-        story.append(Paragraph(f"财务健康评分卡：盈利能力 {profit_grade} | 财务安全 {safety_grade} | 资本效率 {efficiency_grade}", styles["Normal"]))
+        if _rating is not None:
+            r = _rating
+            story.append(Paragraph(f"企业综合评级：{r['grade']} {r['total_score']}/100", styles["Normal"]))
+            story.append(Paragraph(f"评级建议：{r['recommendation']}", styles["Normal"]))
+            story.append(Spacer(1, 4))
+            dim_rows = [["维度", "评分", "强度", "权重"]]
+            for label, d in r["dim_summary"].items():
+                dim_rows.append([label, f"{d['score']}/25", d["flag"], f"{d['weight']*100:.0f}%"])
+            dim_tbl = Table(dim_rows, repeatRows=1, hAlign="LEFT", colWidths=[100, 60, 40, 50])
+            dim_tbl.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f0f2f6")),
+                ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#d0d7de")),
+                ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ]))
+            story.append(dim_tbl)
+            story.append(Spacer(1, 4))
+            if r["strengths"]:
+                story.append(Paragraph("优势：" + "、".join(r["strengths"]), styles["Normal"]))
+            if r["risks"]:
+                story.append(Paragraph("风险：" + "、".join(r["risks"]), styles["Normal"]))
         story.append(Spacer(1, 6))
 
         # Profitability
@@ -2927,24 +2969,18 @@ def _build_report_pdf_bytes(report: Report, metrics: list[ComputedMetric], alert
         if net_margin is not None and net_margin > 15:
             story.append(Paragraph(f"• [看多] 净利率 {_fmt(net_margin)}% 处于优秀水平。", styles["Normal"]))
 
-        # Composite recommendation
-        scores: list[int] = []
-        if roe is not None:
-            scores.append(2 if roe > 15 else (1 if roe > 10 else 0))
-        if net_margin is not None:
-            scores.append(2 if net_margin > 10 else (1 if net_margin > 5 else 0))
-        if debt_ratio is not None:
-            scores.append(2 if debt_ratio < 50 else (1 if debt_ratio < 65 else 0))
-        if current_ratio is not None:
-            scores.append(2 if current_ratio > 1.5 else (1 if current_ratio > 1 else 0))
-        avg_score = sum(scores) / len(scores) if scores else 0
-        if avg_score >= 1.5:
-            rec = "综合财务质量较好，建议关注估值水平和行业前景，在合理估值区间内可考虑配置。"
-        elif avg_score >= 1:
-            rec = "财务表现中等，存在改善空间。建议等待更多积极信号后再做配置决策。"
-        else:
-            rec = "当前财务指标偏弱，建议谨慎观望。重点关注管理层改善计划和行业周期位置。"
-        story.append(Paragraph(f"• 综合建议：{rec}", styles["Normal"]))
+        # Composite recommendation from rating engine
+        if _rating is not None:
+            story.append(Paragraph(f"• 综合建议：{_rating['recommendation']}（评级{_rating['grade']} {_rating['total_score']}分）", styles["Normal"]))
+        elif scores:
+            avg_score = sum(scores) / len(scores) if scores else 0
+            if avg_score >= 1.5:
+                rec = "综合财务质量较好，建议关注估值水平和行业前景，在合理估值区间内可考虑配置。"
+            elif avg_score >= 1:
+                rec = "财务表现中等，存在改善空间。建议等待更多积极信号后再做配置决策。"
+            else:
+                rec = "当前财务指标偏弱，建议谨慎观望。重点关注管理层改善计划和行业周期位置。"
+            story.append(Paragraph(f"• 综合建议：{rec}", styles["Normal"]))
     else:
         story.append(Paragraph("暂无足够数据生成AI洞察，请确保报告已完成分析。", styles["Normal"]))
 

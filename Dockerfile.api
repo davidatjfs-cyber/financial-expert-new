@@ -29,6 +29,7 @@ COPY pages ./pages
 COPY docs ./docs
 COPY scripts ./scripts
 COPY financial_analyzer.py ./
+COPY rating_engine.py ./
 COPY portfolio_optimizer.py ./
 
 ENV PORT=8000
