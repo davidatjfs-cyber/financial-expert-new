@@ -5203,140 +5203,164 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
         if kdj_k_now is not None and kdj_d_now is not None and kdj_k_prev is not None and kdj_d_prev is not None:
             kdj_golden_cross = bool(kdj_k_prev <= kdj_d_prev and kdj_k_now > kdj_d_now)
             kdj_death_cross = bool(kdj_k_prev >= kdj_d_prev and kdj_k_now < kdj_d_now)
-        # === BUY SCORING ===
-        if slope_pct is not None and slope_pct > 0.2:
-            buy_score_details["trend"] = {"score": 20, "max": 20, "reason": "MA60强势上行"}
+        # === BUY SCORING (optimized by backtest edge analysis) ===
+        # Edge rankings: RSI<30(+0.022) > boll<0.1(+0.005) > ma_full(+0.003) > kdj_j<20(+0.003)
+        #   > vol>ma10(+0.003) > macd_bull(+0.003) > slope>0(+0.002)
+        # Negative: price_near_ma20(-0.020) macd_cross_up(-0.008) rsi<50(-0.003)
+        if slope_pct is not None and slope_pct > 0.05:
+            buy_score_details["trend"] = {"score": 8, "max": 8, "reason": "上涨趋势"}
         elif slope_pct is not None and slope_pct > 0:
-            buy_score_details["trend"] = {"score": 10, "max": 20, "reason": "MA60缓慢上行"}
+            buy_score_details["trend"] = {"score": 5, "max": 8, "reason": "缓慢上行"}
         else:
-            buy_score_details["trend"] = {"score": 0, "max": 20, "reason": "MA60下行"}
+            buy_score_details["trend"] = {"score": 0, "max": 8, "reason": "下行趋势"}
         if ma5_now and ma20_now and ma60_now and last_close:
             if ma5_now > ma20_now > ma60_now:
-                buy_score_details["ma_align"] = {"score": 15, "max": 15, "reason": "多头排列"}
-            elif ma5_now > ma20_now or ma20_now > ma60_now:
-                buy_score_details["ma_align"] = {"score": 8, "max": 15, "reason": "部分多头"}
+                buy_score_details["ma_align"] = {"score": 8, "max": 8, "reason": "多头排列"}
+            elif ma20_now > ma60_now:
+                buy_score_details["ma_align"] = {"score": 3, "max": 8, "reason": "部分多头"}
             else:
-                buy_score_details["ma_align"] = {"score": 0, "max": 15, "reason": "非多头"}
+                buy_score_details["ma_align"] = {"score": 0, "max": 8, "reason": "非多头"}
         else:
-            buy_score_details["ma_align"] = {"score": 0, "max": 15, "reason": "数据不足"}
-        if last_close and ma20_now and ma60_now:
-            dist = abs(float(last_close) - float(ma20_now)) / max(abs(float(ma20_now)), 1e-9)
+            buy_score_details["ma_align"] = {"score": 0, "max": 8, "reason": "数据不足"}
+        if last_close and ma60_now:
             above60 = float(last_close) > float(ma60_now)
-            if dist <= 0.03 and above60:
-                buy_score_details["price_pos"] = {"score": 15, "max": 15, "reason": "回调至MA20(±3%)"}
-            elif dist <= 0.05 and above60:
-                buy_score_details["price_pos"] = {"score": 12, "max": 15, "reason": "接近MA20(±5%)"}
-            elif dist <= 0.08 and above60:
-                buy_score_details["price_pos"] = {"score": 8, "max": 15, "reason": "MA20附近(±8%)"}
-            elif above60:
-                buy_score_details["price_pos"] = {"score": 5, "max": 15, "reason": "高于MA60"}
+            if above60:
+                buy_score_details["price_pos"] = {"score": 5, "max": 5, "reason": "高于MA60"}
             else:
-                buy_score_details["price_pos"] = {"score": 0, "max": 15, "reason": "低于MA60"}
+                buy_score_details["price_pos"] = {"score": 0, "max": 5, "reason": "低于MA60"}
         else:
-            buy_score_details["price_pos"] = {"score": 0, "max": 15, "reason": "数据不足"}
-        if rsi14 is not None and rsi_rebound:
+            buy_score_details["price_pos"] = {"score": 0, "max": 5, "reason": "数据不足"}
+        if rsi14 is not None:
             if rsi14 < 30:
-                buy_score_details["rsi"] = {"score": 15, "max": 15, "reason": f"RSI超卖反弹({rsi14:.1f})"}
-            elif rsi14 < 45:
-                buy_score_details["rsi"] = {"score": 12, "max": 15, "reason": f"RSI低位拐头({rsi14:.1f})"}
-            else:
-                buy_score_details["rsi"] = {"score": 8, "max": 15, "reason": f"RSI反弹({rsi14:.1f})"}
-        elif rsi14 is not None:
-            if rsi14 < 45:
-                buy_score_details["rsi"] = {"score": 8, "max": 15, "reason": f"RSI低位({rsi14:.1f})"}
+                rsi_sc = 25
+                if rsi_rebound:
+                    rsi_sc = 25
+                rsi_reason = f"RSI极度超卖({rsi14:.1f})"
+            elif rsi14 < 40:
+                rsi_sc = 20
+                if rsi_rebound:
+                    rsi_sc = 22
+                    rsi_reason = f"RSI超卖反弹({rsi14:.1f})"
+                else:
+                    rsi_reason = f"RSI超卖({rsi14:.1f})"
+            elif rsi14 < 50 and rsi_rebound:
+                rsi_sc = 15
+                rsi_reason = f"RSI低位拐头({rsi14:.1f})"
+            elif rsi_rebound:
+                rsi_sc = 8
+                rsi_reason = f"RSI反弹({rsi14:.1f})"
+            elif rsi14 < 50:
+                rsi_sc = 5
+                rsi_reason = f"RSI偏低({rsi14:.1f})"
             elif rsi14 <= 60:
-                buy_score_details["rsi"] = {"score": 5, "max": 15, "reason": f"RSI中性({rsi14:.1f})"}
+                rsi_sc = 3
+                rsi_reason = f"RSI中性({rsi14:.1f})"
             else:
-                buy_score_details["rsi"] = {"score": 0, "max": 15, "reason": f"RSI偏高({rsi14:.1f})"}
+                rsi_sc = 0
+                rsi_reason = f"RSI偏高({rsi14:.1f})"
+            buy_score_details["rsi"] = {"score": rsi_sc, "max": 25, "reason": rsi_reason}
         else:
-            buy_score_details["rsi"] = {"score": 0, "max": 15, "reason": "无RSI"}
+            buy_score_details["rsi"] = {"score": 0, "max": 25, "reason": "无RSI"}
         if kdj_j_now is not None:
-            if kdj_golden_cross and kdj_j_now < 30:
-                buy_score_details["kdj"] = {"score": 10, "max": 10, "reason": f"KDJ超卖金叉(J={kdj_j_now:.1f})"}
+            if kdj_j_now < 20:
+                kdj_sc = 15
+                if kdj_golden_cross:
+                    kdj_sc = 15
+                kdj_reason = f"KDJ超卖(J={kdj_j_now:.1f})"
+            elif kdj_golden_cross and kdj_j_now < 30:
+                kdj_sc = 10
+                kdj_reason = f"KDJ金叉超卖(J={kdj_j_now:.1f})"
             elif kdj_golden_cross:
-                buy_score_details["kdj"] = {"score": 8, "max": 10, "reason": f"KDJ金叉(J={kdj_j_now:.1f})"}
+                kdj_sc = 5
+                kdj_reason = f"KDJ金叉(J={kdj_j_now:.1f})"
             elif kdj_k_now is not None and kdj_d_now is not None and kdj_k_now > kdj_d_now:
-                buy_score_details["kdj"] = {"score": 5, "max": 10, "reason": f"KDJ多头(J={kdj_j_now:.1f})"}
+                kdj_sc = 6
+                kdj_reason = f"KDJ多头(J={kdj_j_now:.1f})"
             else:
-                buy_score_details["kdj"] = {"score": 0, "max": 10, "reason": f"KDJ(J={kdj_j_now:.1f})"}
+                kdj_sc = 0
+                kdj_reason = f"KDJ(J={kdj_j_now:.1f})"
+            buy_score_details["kdj"] = {"score": kdj_sc, "max": 15, "reason": kdj_reason}
         else:
-            buy_score_details["kdj"] = {"score": 0, "max": 10, "reason": "无KDJ"}
-        if signal_vol_gt_ma5:
-            buy_score_details["volume"] = {"score": 10, "max": 10, "reason": "放量>MA5"}
-        elif signal_vol_gt_ma10:
-            buy_score_details["volume"] = {"score": 7, "max": 10, "reason": "放量>MA10"}
+            buy_score_details["kdj"] = {"score": 0, "max": 15, "reason": "无KDJ"}
+        if signal_vol_gt_ma10:
+            buy_score_details["volume"] = {"score": 10, "max": 10, "reason": "放量>MA10"}
+        elif signal_vol_gt_ma5:
+            buy_score_details["volume"] = {"score": 7, "max": 10, "reason": "放量>MA5"}
         else:
             buy_score_details["volume"] = {"score": 0, "max": 10, "reason": "缩量"}
         if signal_macd_bullish:
-            if macd_hist_prev is not None and macd_hist is not None and macd_hist_prev < 0 <= macd_hist:
-                buy_score_details["macd"] = {"score": 10, "max": 10, "reason": "MACD柱翻红"}
-            else:
-                buy_score_details["macd"] = {"score": 7, "max": 10, "reason": "MACD多头"}
+            buy_score_details["macd"] = {"score": 5, "max": 5, "reason": "MACD多头"}
         elif macd_hist is not None and macd_hist_prev is not None and macd_hist > macd_hist_prev:
-            buy_score_details["macd"] = {"score": 4, "max": 10, "reason": "MACD柱收窄"}
+            buy_score_details["macd"] = {"score": 3, "max": 5, "reason": "MACD柱收窄"}
         else:
-            buy_score_details["macd"] = {"score": 0, "max": 10, "reason": "MACD偏空"}
+            buy_score_details["macd"] = {"score": 0, "max": 5, "reason": "MACD偏空"}
         if boll_pct_b_now is not None:
-            if boll_pct_b_now < 0.1:
-                buy_score_details["boll"] = {"score": 5, "max": 5, "reason": "触及布林下轨"}
-            elif boll_pct_b_now < 0.3:
-                buy_score_details["boll"] = {"score": 3, "max": 5, "reason": "布林下方"}
+            if boll_pct_b_now < 0.05:
+                buy_score_details["boll"] = {"score": 12, "max": 12, "reason": "深度跌破布林下轨"}
+            elif boll_pct_b_now < 0.1:
+                buy_score_details["boll"] = {"score": 10, "max": 12, "reason": "触及布林下轨"}
+            elif boll_pct_b_now < 0.2:
+                buy_score_details["boll"] = {"score": 6, "max": 12, "reason": "布林下方"}
             else:
-                buy_score_details["boll"] = {"score": 0, "max": 5, "reason": f"布林%B={boll_pct_b_now:.2f}"}
+                buy_score_details["boll"] = {"score": 0, "max": 12, "reason": f"布林%B={boll_pct_b_now:.2f}"}
         else:
-            buy_score_details["boll"] = {"score": 0, "max": 5, "reason": "无布林"}
+            buy_score_details["boll"] = {"score": 0, "max": 12, "reason": "无布林"}
         buy_score = sum(v["score"] for v in buy_score_details.values())
-        if buy_score >= 80:
+        buy_total_max = 88
+        buy_pct = buy_score / buy_total_max if buy_total_max else 0
+        if buy_pct >= 0.75:
             buy_grade = "强烈买入"
-        elif buy_score >= 60:
+        elif buy_pct >= 0.55:
             buy_grade = "建议买入"
-        elif buy_score >= 40:
+        elif buy_pct >= 0.35:
             buy_grade = "观望"
         else:
             buy_grade = "不建议"
-        aggressive_ok = buy_score >= 70
-        # === SELL SCORING ===
-        if rsi14 is not None and rsi14 > 70:
-            sell_score_details["rsi_ob"] = {"score": 20, "max": 20, "reason": f"RSI超买({rsi14:.1f})"}
-        elif rsi14 is not None and rsi14 > 65:
-            sell_score_details["rsi_ob"] = {"score": 10, "max": 20, "reason": f"RSI偏高({rsi14:.1f})"}
+        aggressive_ok = buy_pct >= 0.60
+        # === SELL SCORING (optimized by backtest) ===
+        # Key insight: RSI>70 edge=+0.018 (trend continues!), macd_cross_dn edge=+0.009
+        # Sell signals should focus on trend REVERSAL, not overbought
+        if rsi14 is not None and rsi14 > 75:
+            sell_score_details["rsi_ob"] = {"score": 15, "max": 15, "reason": f"RSI严重超买({rsi14:.1f})"}
+        elif rsi14 is not None and rsi14 > 70:
+            sell_score_details["rsi_ob"] = {"score": 5, "max": 15, "reason": f"RSI超买({rsi14:.1f})"}
         else:
-            sell_score_details["rsi_ob"] = {"score": 0, "max": 20, "reason": "RSI正常"}
+            sell_score_details["rsi_ob"] = {"score": 0, "max": 15, "reason": "RSI正常"}
         if macd_hist_prev is not None and macd_hist is not None and macd_hist_prev > 0 > macd_hist:
-            sell_score_details["macd_death"] = {"score": 15, "max": 15, "reason": "MACD柱翻绿"}
+            sell_score_details["macd_death"] = {"score": 18, "max": 18, "reason": "MACD柱翻绿"}
         elif macd_dif is not None and macd_dea is not None and macd_dif < macd_dea:
-            sell_score_details["macd_death"] = {"score": 8, "max": 15, "reason": "MACD空头"}
+            sell_score_details["macd_death"] = {"score": 8, "max": 18, "reason": "MACD空头"}
         else:
-            sell_score_details["macd_death"] = {"score": 0, "max": 15, "reason": "MACD未死叉"}
+            sell_score_details["macd_death"] = {"score": 0, "max": 18, "reason": "MACD未死叉"}
         if last_close is not None and ma20_now is not None:
             if float(last_close) < float(ma20_now) * 0.97:
-                sell_score_details["break_ma20"] = {"score": 15, "max": 15, "reason": "跌破MA20超3%"}
+                sell_score_details["break_ma20"] = {"score": 12, "max": 12, "reason": "跌破MA20超3%"}
             elif float(last_close) < float(ma20_now):
-                sell_score_details["break_ma20"] = {"score": 8, "max": 15, "reason": "略低于MA20"}
+                sell_score_details["break_ma20"] = {"score": 5, "max": 12, "reason": "略低于MA20"}
             else:
-                sell_score_details["break_ma20"] = {"score": 0, "max": 15, "reason": "高于MA20"}
+                sell_score_details["break_ma20"] = {"score": 0, "max": 12, "reason": "高于MA20"}
         else:
-            sell_score_details["break_ma20"] = {"score": 0, "max": 15, "reason": "数据不足"}
+            sell_score_details["break_ma20"] = {"score": 0, "max": 12, "reason": "数据不足"}
         if kdj_j_now is not None:
             if kdj_death_cross and kdj_j_now > 80:
-                sell_score_details["kdj_sell"] = {"score": 15, "max": 15, "reason": f"KDJ超买死叉(J={kdj_j_now:.1f})"}
+                sell_score_details["kdj_sell"] = {"score": 12, "max": 12, "reason": f"KDJ超买死叉(J={kdj_j_now:.1f})"}
             elif kdj_death_cross:
-                sell_score_details["kdj_sell"] = {"score": 8, "max": 15, "reason": f"KDJ死叉(J={kdj_j_now:.1f})"}
-            elif kdj_j_now > 90:
-                sell_score_details["kdj_sell"] = {"score": 10, "max": 15, "reason": f"KDJ极度超买(J={kdj_j_now:.1f})"}
+                sell_score_details["kdj_sell"] = {"score": 6, "max": 12, "reason": f"KDJ死叉(J={kdj_j_now:.1f})"}
+            elif kdj_j_now > 95:
+                sell_score_details["kdj_sell"] = {"score": 8, "max": 12, "reason": f"KDJ极度超买(J={kdj_j_now:.1f})"}
             else:
-                sell_score_details["kdj_sell"] = {"score": 0, "max": 15, "reason": f"KDJ(J={kdj_j_now:.1f})"}
+                sell_score_details["kdj_sell"] = {"score": 0, "max": 12, "reason": f"KDJ(J={kdj_j_now:.1f})"}
         else:
-            sell_score_details["kdj_sell"] = {"score": 0, "max": 15, "reason": "无KDJ"}
+            sell_score_details["kdj_sell"] = {"score": 0, "max": 12, "reason": "无KDJ"}
         if boll_pct_b_now is not None:
             if boll_pct_b_now > 1.0:
-                sell_score_details["boll_sell"] = {"score": 10, "max": 10, "reason": "突破布林上轨"}
+                sell_score_details["boll_sell"] = {"score": 8, "max": 8, "reason": "突破布林上轨"}
             elif boll_pct_b_now > 0.85:
-                sell_score_details["boll_sell"] = {"score": 5, "max": 10, "reason": "接近布林上轨"}
+                sell_score_details["boll_sell"] = {"score": 3, "max": 8, "reason": "接近布林上轨"}
             else:
-                sell_score_details["boll_sell"] = {"score": 0, "max": 10, "reason": f"布林%B={boll_pct_b_now:.2f}"}
+                sell_score_details["boll_sell"] = {"score": 0, "max": 8, "reason": f"布林%B={boll_pct_b_now:.2f}"}
         else:
-            sell_score_details["boll_sell"] = {"score": 0, "max": 10, "reason": "无布林"}
+            sell_score_details["boll_sell"] = {"score": 0, "max": 8, "reason": "无布林"}
         rsi_divergence = False
         if rsi14 is not None and float(rsi14) > 50:
             try:
@@ -5351,9 +5375,9 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
             except Exception:
                 pass
         if rsi_divergence:
-            sell_score_details["divergence"] = {"score": 12, "max": 15, "reason": "RSI顶背离"}
+            sell_score_details["divergence"] = {"score": 10, "max": 10, "reason": "RSI顶背离"}
         else:
-            sell_score_details["divergence"] = {"score": 0, "max": 15, "reason": "无背离"}
+            sell_score_details["divergence"] = {"score": 0, "max": 10, "reason": "无背离"}
         stop_line = None
         if atr14 is not None and last_close is not None:
             atr_stop = float(last_close) - 2 * float(atr14)
@@ -5366,9 +5390,11 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
         else:
             sell_score_details["stop_loss"] = {"score": 0, "max": 10, "reason": "无ATR"}
         sell_score = sum(v["score"] for v in sell_score_details.values())
-        if sell_score >= 70:
+        sell_total_max = 85
+        sell_pct = sell_score / sell_total_max if sell_total_max else 0
+        if sell_pct >= 0.65:
             sell_grade = "强烈卖出"
-        elif sell_score >= 50:
+        elif sell_pct >= 0.40:
             sell_grade = "建议减仓"
         else:
             sell_grade = "继续持有"
