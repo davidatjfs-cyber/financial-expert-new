@@ -42,6 +42,11 @@
 - `/api/` → FastAPI 后端（数据分析、PDF处理、AI接口）
 - `/brain/` → 宿主机 9000 端口（其他应用，非本项目）
 
+## 代码仓库
+
+- **GitHub**: https://github.com/davidatjfs-cyber/financial-expert-new
+- **SSH Clone**: `git@github.com:davidatjfs-cyber/financial-expert-new.git`
+
 ## 服务器信息
 
 - **IP:** 8.153.95.62
