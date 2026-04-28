@@ -5360,8 +5360,27 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
 
     # 买入价位：输出为“参考买入价位”，默认用 MA20（更贴近回调买点）；若不可用则回退现价。
     # buy_price_aggressive_ok 仍表示是否满足当前策略的强条件。
-    buy_price_aggressive = float(ma20_now) if ma20_now is not None else (float(last_close) if last_close is not None else None)
-    buy_price_stable = float(ma60_now) if 'ma60_now' in locals() and ma60_now is not None else None
+    buy_price_aggressive = None
+    buy_price_stable = None
+    try:
+        rsi_v = rsi14
+        boll_v = boll_pct_b_now
+        if rsi_v is not None and rsi_v < 40 and boll_v is not None and boll_v < 0.2:
+            buy_price_aggressive = float(boll_lower.iloc[-1]) if boll_lower is not None and pd.notna(boll_lower.iloc[-1]) else None
+            buy_price_stable = float(ma60_now) if ma60_now is not None else None
+        elif rsi_v is not None and rsi_v < 50:
+            buy_price_aggressive = float(ma60_now) if ma60_now is not None else None
+            buy_price_stable = float(boll_lower.iloc[-1]) if boll_lower is not None and pd.notna(boll_lower.iloc[-1]) else None
+        else:
+            buy_price_aggressive = float(ma20_now) if ma20_now is not None else None
+            buy_price_stable = float(ma60_now) if ma60_now is not None else None
+        if buy_price_aggressive is None and last_close is not None:
+            buy_price_aggressive = float(last_close)
+        if buy_price_stable is None and ma60_now is not None:
+            buy_price_stable = float(ma60_now)
+    except Exception:
+        buy_price_aggressive = float(ma20_now) if ma20_now is not None else (float(last_close) if last_close is not None else None)
+        buy_price_stable = float(ma60_now) if 'ma60_now' in locals() and ma60_now is not None else None
 
     buy_condition_desc = _build_buy_condition_desc(
         buy_score=buy_score,
