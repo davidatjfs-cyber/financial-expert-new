@@ -3289,6 +3289,131 @@ def qwen_ping():
         return {"ok": False, "message": f"exception:{e}", "has_key": has_key}
 
 
+_AKSHARE_US_LAST_FETCH_TS = 0.0
+
+def _akshare_us_fetch_history_df(symbol: str, count: int = 500):
+    global _AKSHARE_US_LAST_FETCH_TS
+    try:
+        import pandas as pd
+        import datetime as dt
+        import time
+
+        sym = (symbol or "").strip().upper()
+        if not sym:
+            return None
+        base = sym.split(".", 1)[0]
+
+        disable_proxies_for_process()
+        import akshare as ak
+
+        now_ts = time.time()
+        elapsed = now_ts - _AKSHARE_US_LAST_FETCH_TS
+        if elapsed < 3.0:
+            time.sleep(3.0 - elapsed)
+
+        ak_sym = f"105.{base}"
+        df = ak.stock_us_hist(symbol=ak_sym, period="daily", adjust="qfq")
+        _AKSHARE_US_LAST_FETCH_TS = time.time()
+
+        if df is None or df.empty:
+            return None
+
+        out = pd.DataFrame(
+            {
+                "date": pd.to_datetime(df["日期"], errors="coerce"),
+                "open": pd.to_numeric(df.get("开盘"), errors="coerce"),
+                "high": pd.to_numeric(df.get("最高"), errors="coerce"),
+                "low": pd.to_numeric(df.get("最低"), errors="coerce"),
+                "close": pd.to_numeric(df.get("收盘"), errors="coerce"),
+                "volume": pd.to_numeric(df.get("成交量"), errors="coerce"),
+                "amount": pd.to_numeric(df.get("成交额"), errors="coerce"),
+            }
+        )
+        out = out.dropna(subset=["date"]).sort_values("date")
+        if out.empty:
+            return None
+
+        try:
+            closed_date = _latest_closed_trade_date_us()
+            dseries = pd.to_datetime(out["date"], errors="coerce")
+            out = out[dseries.dt.date <= closed_date]
+        except Exception:
+            pass
+
+        if out.empty:
+            return None
+
+        if count and len(out) > count:
+            out = out.tail(count)
+
+        return out if not out.empty else None
+    except Exception:
+        return None
+
+
+def _eodhd_fetch_history_df(symbol: str, count: int = 500):
+    try:
+        import pandas as pd
+        import datetime as dt
+
+        sym = (symbol or "").strip().upper()
+        if not sym:
+            return None
+        base = sym.split(".", 1)[0]
+        sym = f"{base}.US"
+
+        disable_proxies_for_process()
+        import httpx
+
+        url = f"https://eodhistoricaldata.com/api/eod/{sym}"
+        params = {
+            "api_token": "69f096c44e05b2.71478497",
+            "fmt": "json",
+            "from": (dt.date.today() - dt.timedelta(days=800)).isoformat(),
+            "to": dt.date.today().isoformat(),
+        }
+        with httpx.Client(timeout=20, follow_redirects=True) as client:
+            resp = client.get(url, params=params)
+            if resp.status_code != 200:
+                return None
+            rows = resp.json()
+
+        if not rows or not isinstance(rows, list):
+            return None
+
+        if count and len(rows) > count:
+            rows = rows[-count:]
+
+        out = pd.DataFrame(
+            {
+                "date": pd.to_datetime([r.get("date") for r in rows], errors="coerce"),
+                "open": pd.to_numeric([r.get("open") for r in rows], errors="coerce"),
+                "high": pd.to_numeric([r.get("high") for r in rows], errors="coerce"),
+                "low": pd.to_numeric([r.get("low") for r in rows], errors="coerce"),
+                "close": pd.to_numeric([r.get("close") for r in rows], errors="coerce"),
+                "volume": pd.to_numeric([r.get("volume") for r in rows], errors="coerce"),
+            }
+        )
+        out = out.dropna(subset=["date"]).sort_values("date")
+        if out.empty:
+            return None
+
+        try:
+            closed_date = _latest_closed_trade_date_us()
+            dseries = pd.to_datetime(out["date"], errors="coerce")
+            out = out[dseries.dt.date <= closed_date]
+        except Exception:
+            pass
+
+        if out.empty:
+            return None
+
+        out["amount"] = out["close"] * out["volume"]
+        return out if not out.empty else None
+    except Exception:
+        return None
+
+
 def _stooq_fetch_history_df(symbol: str, count: int = 800):
     try:
         import csv
@@ -4324,7 +4449,7 @@ def _fetch_history_df(symbol: str, market: str):
 
     key = ((market or "CN").upper(), (symbol or "").upper())
     now = dt.datetime.utcnow().timestamp()
-    ttl_seconds = float((os.environ.get("HISTORY_CACHE_TTL_SECONDS") or "3600").strip() or "3600")
+    ttl_seconds = float((os.environ.get("HISTORY_CACHE_TTL_SECONDS") or "14400").strip() or "14400")
     cached = _HISTORY_CACHE.get(key)
     if cached and (now - float(cached[0])) < ttl_seconds:
         try:
@@ -4415,7 +4540,7 @@ def _fetch_history_df(symbol: str, market: str):
             except Exception as e:
                 if m == "US" and _is_yf_rate_limited(str(e)):
                     try:
-                        _YF_US_COOLDOWN_UNTIL = now_ts + 300.0
+                        _YF_US_COOLDOWN_UNTIL = now_ts + 60.0
                     except Exception:
                         pass
                 raw = None
@@ -4423,7 +4548,7 @@ def _fetch_history_df(symbol: str, market: str):
         # yfinance sometimes returns empty on rate limit without raising
         if m == "US" and (raw is None or getattr(raw, "empty", True)):
             try:
-                _YF_US_COOLDOWN_UNTIL = max(float(_YF_US_COOLDOWN_UNTIL or 0.0), now_ts + 300.0)
+                _YF_US_COOLDOWN_UNTIL = max(float(_YF_US_COOLDOWN_UNTIL or 0.0), now_ts + 60.0)
             except Exception:
                 pass
 
@@ -4441,6 +4566,14 @@ def _fetch_history_df(symbol: str, market: str):
 
         if raw is None or raw.empty:
             if m == "US":
+                adf = _akshare_us_fetch_history_df(symbol)
+                if adf is not None and not adf.empty:
+                    _HISTORY_CACHE[key] = (now, adf)
+                    return adf
+                edf = _eodhd_fetch_history_df(symbol)
+                if edf is not None and not edf.empty:
+                    _HISTORY_CACHE[key] = (now, edf)
+                    return edf
                 sdf = _stooq_fetch_history_df(symbol)
                 if sdf is not None and not sdf.empty:
                     _HISTORY_CACHE[key] = (now, sdf)
@@ -4499,8 +4632,16 @@ def _fetch_history_df(symbol: str, market: str):
             except Exception:
                 return False
 
-        # US: Never use Tencent kline fallback (often returns only 2 bars). Prefer Stooq if yfinance data looks wrong.
+        # US: Never use Tencent kline fallback (often returns only 2 bars). Prefer AkShare -> EODHD -> Stooq if yfinance data looks wrong.
         if m == "US" and not _looks_valid_history(out):
+            adf = _akshare_us_fetch_history_df(symbol)
+            if adf is not None and not adf.empty and _looks_valid_history(adf):
+                _HISTORY_CACHE[key] = (now, adf)
+                return adf
+            edf = _eodhd_fetch_history_df(symbol)
+            if edf is not None and not edf.empty and _looks_valid_history(edf):
+                _HISTORY_CACHE[key] = (now, edf)
+                return edf
             sdf = _stooq_fetch_history_df(symbol)
             if sdf is not None and not sdf.empty and _looks_valid_history(sdf):
                 _HISTORY_CACHE[key] = (now, sdf)
@@ -4512,6 +4653,14 @@ def _fetch_history_df(symbol: str, market: str):
         return out
     except Exception:
         if m == "US":
+            adf = _akshare_us_fetch_history_df(symbol)
+            if adf is not None and not adf.empty:
+                _HISTORY_CACHE[key] = (now, adf)
+                return adf
+            edf = _eodhd_fetch_history_df(symbol)
+            if edf is not None and not edf.empty:
+                _HISTORY_CACHE[key] = (now, edf)
+                return edf
             sdf = _stooq_fetch_history_df(symbol)
             if sdf is not None and not sdf.empty:
                 _HISTORY_CACHE[key] = (now, sdf)
