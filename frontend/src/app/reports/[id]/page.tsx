@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { ArrowLeft, FileText, TrendingUp, AlertTriangle, Lightbulb, Brain, Download } from 'lucide-react';
 import { getReportDetail, getReportMetrics, getReportAlerts, getReportCompanyHistory, getReports, reanalyzeReport, type ReportDetail, type Metric, type Alert } from '@/services/api';
+import { computeEnterpriseRating } from '@/services/ratingEngine';
 
 type TabType = 'overview' | 'metrics' | 'risks' | 'opportunities' | 'insights';
 
@@ -338,6 +339,19 @@ export default function ReportDetailPage() {
 
   const metricValue = (m?: Metric | undefined) => (m?.value == null ? null : m.value);
   const fmtMetric = (v: number | null | undefined, digits = 2) => (v == null ? '-' : v.toFixed(digits));
+
+  const enterpriseRating = computeEnterpriseRating({
+    net_margin: metricValue(netMargin),
+    gross_margin: metricValue(grossMargin),
+    roe: metricValue(roe),
+    roa: metricValue(roa),
+    debt_ratio: metricValue(debtRatio),
+    current_ratio: metricValue(currentRatio),
+    asset_turnover: metricValue(assetTurnover),
+    inventory_turnover: metricValue(inventoryTurnover),
+    receivable_turnover: metricValue(receivableTurnover),
+    operating_cash_flow: metricValue(operatingCashFlow),
+  });
   const diffBadge = (cmp: { diff: number; status: 'good' | 'bad' | 'neutral' }, betterWhen: 'higher' | 'lower' = 'higher') => {
     let status = cmp.status;
     if (betterWhen === 'lower') {
@@ -487,93 +501,58 @@ export default function ReportDetailPage() {
         </button>
       )}
 
-      {/* Investment Tier Rating */}
+      {/* Enterprise Rating - 8-dimension */}
       {metrics.length > 0 && (() => {
-        const gm = metricValue(grossMargin);
-        const nm = metricValue(netMargin);
-        const r = metricValue(roe);
-        const dr = metricValue(debtRatio);
-        const cr = metricValue(currentRatio);
-        const at = metricValue(assetTurnover);
-
-        let tier: 'S' | 'A' | 'B' | 'C' | 'D' = 'B';
-        let tierLabel = '';
-        let tierDesc = '';
-        let tierColor = '';
-        let tierBg = '';
-        let tierBorder = '';
-
-        // Tier S: ROE>20%, gross margin >> industry avg (+10%), debt ratio low
-        if (r != null && r > 20 && gm != null && gm > industryAvg.grossMargin + 10 && (dr == null || dr < 50)) {
-          tier = 'S';
-          tierLabel = '卓越级 (Excellent)';
-          tierDesc = '典型的"印钞机"型企业，具有极强的溢价能力和竞争壁垒。ROE > 20%，毛利极高，负债率极低。';
-          tierColor = 'text-yellow-400';
-          tierBg = 'bg-yellow-500/8';
-          tierBorder = 'border-yellow-500/40';
-        }
-        // Tier A: balanced metrics, ROE 15-20%, stable
-        else if (r != null && r > 12 && nm != null && nm > 8 && (dr == null || dr < 60) && (at == null || at > 0.5)) {
-          tier = 'A';
-          tierLabel = '稳健级 (Good)';
-          tierDesc = '行业内的中流砥柱，各项指标均衡，管理水平卓越，抗风险能力强。';
-          tierColor = 'text-yellow-400';
-          tierBg = 'bg-yellow-500/5';
-          tierBorder = 'border-yellow-500/30';
-        }
-        // Tier D: extremely bad - debt > 90% or negative ROE with high debt
-        else if ((dr != null && dr > 90) || (r != null && r < -5 && dr != null && dr > 70)) {
-          tier = 'D';
-          tierLabel = '高危级 (Danger)';
-          tierDesc = '资不抵债风险高，连续亏损或现金流断裂。除非有重组预期，否则属于避雷范畴。';
-          tierColor = 'text-yellow-400';
-          tierBg = 'bg-red-500/8';
-          tierBorder = 'border-red-500/40';
-        }
-        // Tier C: revenue growing but profit declining, or cash flow issues
-        else if ((nm != null && nm < 2) || (dr != null && dr > 70) || (r != null && r < 3)) {
-          tier = 'C';
-          tierLabel = '预警级 (Warning)';
-          tierDesc = '经营模式可能出现问题，营收增长但利润下滑，或资产负债率快速攀升。';
-          tierColor = 'text-yellow-400';
-          tierBg = 'bg-amber-500/8';
-          tierBorder = 'border-amber-500/40';
-        }
-        // Tier B: average
-        else {
-          tier = 'B';
-          tierLabel = '平庸级 (Average)';
-          tierDesc = '盈利能力随宏观经济波动，处于同质化竞争中。需要通过精细化管理和规模效应生存。';
-          tierColor = 'text-yellow-400';
-          tierBg = 'bg-zinc-500/5';
-          tierBorder = 'border-zinc-500/30';
-        }
-
-        const tierIcon = tier === 'S' ? '👑' : tier === 'A' ? '🏆' : tier === 'B' ? '📊' : tier === 'C' ? '⚠️' : '🚨';
+        const r = enterpriseRating;
+        const totalPct = r.total_score;
+        const gradeColor = totalPct >= 70 ? 'text-emerald-400' : totalPct >= 50 ? 'text-amber-400' : totalPct >= 35 ? 'text-orange-400' : 'text-red-400';
+        const gradeBg = totalPct >= 70 ? 'bg-emerald-500/8 border-emerald-500/30' : totalPct >= 50 ? 'bg-amber-500/8 border-amber-500/30' : totalPct >= 35 ? 'bg-orange-500/8 border-orange-500/30' : 'bg-red-500/8 border-red-500/30';
+        const gradeIcon = totalPct >= 80 ? '👑' : totalPct >= 60 ? '🏆' : totalPct >= 40 ? '📊' : totalPct >= 25 ? '⚠️' : '🚨';
+        const gradeLabel = totalPct >= 90 ? '信用等级极高' : totalPct >= 80 ? '信用等级很高' : totalPct >= 70 ? '信用等级较高' : totalPct >= 60 ? '信用等级中等' : totalPct >= 50 ? '信用等级偏低' : totalPct >= 35 ? '信用等级较低' : '信用等级很低';
+        const dimEntries = Object.entries(r.dim_summary);
 
         return (
-          <div className={`${tierBg} border-2 ${tierBorder} rounded-[var(--radius-xl)] p-5`}>
+          <div className={`${gradeBg} border-2 rounded-[var(--radius-xl)] p-5`}>
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
-                <span className="text-2xl">{tierIcon}</span>
+                <span className="text-2xl">{gradeIcon}</span>
                 <div>
-                  <div className="text-[var(--text-muted)] text-[10px] font-medium tracking-wider uppercase">Investment Rating</div>
-                  <div className="text-[var(--text-secondary)] text-xs mt-0.5">{tierLabel}</div>
+                  <div className="text-[var(--text-muted)] text-[10px] font-medium tracking-wider uppercase">企业综合评级</div>
+                  <div className="text-[var(--text-secondary)] text-xs mt-0.5">{gradeLabel} · {r.recommendation}</div>
                 </div>
               </div>
-              <div className={`${tierColor} text-5xl font-black tracking-tighter leading-none`} style={{ textShadow: '0 0 20px rgba(250,204,21,0.3)' }}>
-                {tier}
+              <div className="text-right">
+                <div className={`${gradeColor} text-4xl font-black tracking-tighter leading-none`} style={{ textShadow: '0 0 20px rgba(250,204,21,0.3)' }}>
+                  {r.grade}
+                </div>
+                <div className="text-[var(--text-muted)] text-[10px] mt-1">{r.total_score}/100</div>
               </div>
             </div>
-            <div className="text-[var(--text-secondary)] text-xs leading-relaxed mt-3 border-t border-[var(--border-color)] pt-3">
-              {tierDesc}
+
+            {/* 8-dimension bar breakdown */}
+            <div className="mt-4 pt-3 border-t border-[var(--border-color)] space-y-2">
+              {dimEntries.map(([label, d]) => (
+                <div key={label} className="flex items-center gap-2 text-xs">
+                  <span className="text-[var(--text-secondary)] w-16 shrink-0">{label}</span>
+                  <div className="flex-1 h-2 bg-black/30 rounded-full overflow-hidden">
+                    <div
+                      className={`h-full rounded-full ${d.pct >= 80 ? 'bg-emerald-500' : d.pct >= 60 ? 'bg-emerald-400' : d.pct >= 40 ? 'bg-amber-400' : 'bg-red-400'}`}
+                      style={{ width: `${Math.min(100, d.pct)}%`, transition: 'width 0.6s ease' }}
+                    />
+                  </div>
+                  <span className={`w-8 text-right ${d.pct >= 60 ? 'text-emerald-400' : d.pct >= 40 ? 'text-amber-400' : 'text-red-400'}`}>{d.flag}</span>
+                  <span className="text-[var(--text-muted)] w-10 text-right">{d.pct}%</span>
+                </div>
+              ))}
             </div>
-            <div className="flex gap-3 mt-3 text-[10px]">
-              {r != null && <span className={`px-2 py-0.5 rounded-full ${r > 15 ? 'bg-emerald-500/15 text-emerald-400' : r > 8 ? 'bg-amber-500/15 text-amber-400' : 'bg-red-500/15 text-red-400'}`}>ROE {r.toFixed(1)}%</span>}
-              {gm != null && <span className={`px-2 py-0.5 rounded-full ${gm > industryAvg.grossMargin ? 'bg-emerald-500/15 text-emerald-400' : 'bg-red-500/15 text-red-400'}`}>毛利 {gm.toFixed(1)}%</span>}
-              {dr != null && <span className={`px-2 py-0.5 rounded-full ${dr < 50 ? 'bg-emerald-500/15 text-emerald-400' : dr < 65 ? 'bg-amber-500/15 text-amber-400' : 'bg-red-500/15 text-red-400'}`}>负债 {dr.toFixed(1)}%</span>}
-              {cr != null && <span className={`px-2 py-0.5 rounded-full ${cr > 1.5 ? 'bg-emerald-500/15 text-emerald-400' : cr > 1 ? 'bg-amber-500/15 text-amber-400' : 'bg-red-500/15 text-red-400'}`}>流动 {cr.toFixed(2)}</span>}
-            </div>
+
+            {/* Strengths & Risks */}
+            {(r.strengths.length > 0 || r.risks.length > 0) && (
+              <div className="flex flex-wrap gap-1.5 mt-3 text-[10px]">
+                {r.strengths.map((s, i) => <span key={`s${i}`} className="px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400">{s}</span>)}
+                {r.risks.map((s, i) => <span key={`r${i}`} className="px-2 py-0.5 rounded-full bg-red-500/15 text-red-400">{s}</span>)}
+              </div>
+            )}
           </div>
         );
       })()}
@@ -1199,28 +1178,24 @@ export default function ReportDetailPage() {
 
             {metrics.length > 0 ? (
               <div className="space-y-4">
-                {/* Financial Health Scorecard */}
+                {/* Financial Health Scorecard - 8-dimension */}
                 <div>
-                  <div className="text-[#FAFAF9] text-sm font-semibold mb-2">财务健康评分卡</div>
-                  <div className="grid grid-cols-3 gap-2">
-                    <div className="bg-black/30 rounded-lg p-3 text-center">
-                      <div className="text-[var(--text-muted)] text-[10px]">盈利能力</div>
-                      <div className={`text-lg font-bold mt-1 ${metricValue(netMargin) != null ? (metricValue(netMargin)! > 15 ? 'text-emerald-400' : metricValue(netMargin)! > 5 ? 'text-amber-400' : 'text-red-400') : 'text-zinc-500'}`}>
-                        {metricValue(netMargin) != null ? (metricValue(netMargin)! > 15 ? 'A' : metricValue(netMargin)! > 10 ? 'B+' : metricValue(netMargin)! > 5 ? 'B' : 'C') : '-'}
+                  <div className="text-[#FAFAF9] text-sm font-semibold mb-2">财务健康评分卡（8维评级）</div>
+                  <div className="grid grid-cols-4 gap-2">
+                    {Object.entries(enterpriseRating.dim_summary).map(([label, d]) => (
+                      <div key={label} className="bg-black/30 rounded-lg p-2.5 text-center">
+                        <div className="text-[var(--text-muted)] text-[10px]">{label}</div>
+                        <div className={`text-base font-bold mt-1 ${d.pct >= 60 ? 'text-emerald-400' : d.pct >= 40 ? 'text-amber-400' : 'text-red-400'}`}>
+                          {d.pct}%
+                        </div>
+                        <div className="mt-1 h-1 bg-black/30 rounded-full overflow-hidden">
+                          <div
+                            className={`h-full rounded-full ${d.pct >= 60 ? 'bg-emerald-500' : d.pct >= 40 ? 'bg-amber-500' : 'bg-red-500'}`}
+                            style={{ width: `${d.pct}%` }}
+                          />
+                        </div>
                       </div>
-                    </div>
-                    <div className="bg-black/30 rounded-lg p-3 text-center">
-                      <div className="text-[var(--text-muted)] text-[10px]">财务安全</div>
-                      <div className={`text-lg font-bold mt-1 ${metricValue(debtRatio) != null ? (metricValue(debtRatio)! < 40 ? 'text-emerald-400' : metricValue(debtRatio)! < 60 ? 'text-amber-400' : 'text-red-400') : 'text-zinc-500'}`}>
-                        {metricValue(debtRatio) != null ? (metricValue(debtRatio)! < 40 ? 'A' : metricValue(debtRatio)! < 50 ? 'B+' : metricValue(debtRatio)! < 65 ? 'B' : 'C') : '-'}
-                      </div>
-                    </div>
-                    <div className="bg-black/30 rounded-lg p-3 text-center">
-                      <div className="text-[var(--text-muted)] text-[10px]">资本效率</div>
-                      <div className={`text-lg font-bold mt-1 ${metricValue(roe) != null ? (metricValue(roe)! > 20 ? 'text-emerald-400' : metricValue(roe)! > 10 ? 'text-amber-400' : 'text-red-400') : 'text-zinc-500'}`}>
-                        {metricValue(roe) != null ? (metricValue(roe)! > 20 ? 'A' : metricValue(roe)! > 15 ? 'B+' : metricValue(roe)! > 10 ? 'B' : 'C') : '-'}
-                      </div>
-                    </div>
+                    ))}
                   </div>
                 </div>
 
@@ -1306,17 +1281,13 @@ export default function ReportDetailPage() {
                 <div className="bg-[var(--bg-page)] rounded-[var(--radius-sm)] p-3">
                   <div className="text-[var(--text-muted)] text-xs font-semibold">综合建议</div>
                   <div className="text-[var(--text-secondary)] text-xs mt-1">
-                    {(() => {
-                      const scores: number[] = [];
-                      if (metricValue(roe) != null) scores.push(metricValue(roe)! > 15 ? 2 : metricValue(roe)! > 10 ? 1 : 0);
-                      if (metricValue(netMargin) != null) scores.push(metricValue(netMargin)! > 10 ? 2 : metricValue(netMargin)! > 5 ? 1 : 0);
-                      if (metricValue(debtRatio) != null) scores.push(metricValue(debtRatio)! < 50 ? 2 : metricValue(debtRatio)! < 65 ? 1 : 0);
-                      if (metricValue(currentRatio) != null) scores.push(metricValue(currentRatio)! > 1.5 ? 2 : metricValue(currentRatio)! > 1 ? 1 : 0);
-                      const avg = scores.length > 0 ? scores.reduce((a, b) => a + b, 0) / scores.length : 0;
-                      if (avg >= 1.5) return '综合财务质量较好，建议关注估值水平和行业前景，在合理估值区间内可考虑配置。重点跟踪：季度盈利趋势、管理层指引、行业竞争格局变化。';
-                      if (avg >= 1) return '财务表现中等，存在改善空间。建议等待更多积极信号（如连续两个季度盈利改善、管理层释放积极信号）后再做配置决策。';
-                      return '当前财务指标偏弱，建议谨慎观望。重点关注：(1)管理层是否有明确的改善计划；(2)行业是否处于周期底部；(3)是否存在被低估的资产价值。';
-                    })()}
+                    评级 {enterpriseRating.grade}（{enterpriseRating.total_score}/100）：{enterpriseRating.recommendation}
+                    {enterpriseRating.strengths.length > 0 && (
+                      <span className="text-emerald-400 ml-2">优势：{enterpriseRating.strengths.join('、')}</span>
+                    )}
+                    {enterpriseRating.risks.length > 0 && (
+                      <span className="text-red-400 ml-2">风险：{enterpriseRating.risks.join('、')}</span>
+                    )}
                   </div>
                 </div>
               </div>
