@@ -27,14 +27,14 @@ export default function RootLayout({
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
       </head>
       <body className="antialiased bg-[var(--bg-page)] text-[var(--text-primary)]">
-        <div className="flex min-h-[100dvh]">
+        <div className="md:flex md:min-h-[100dvh]">
           {/* Sidebar - Desktop only */}
           <div className="hidden md:block">
             <Sidebar />
           </div>
           
           {/* Main Content */}
-          <main className="flex-1 pb-[calc(env(safe-area-inset-bottom,0px)+80px)] md:pb-0">
+          <main className="md:flex-1" style={{ paddingBottom: '5rem' }}>
             {children}
           </main>
         </div>
