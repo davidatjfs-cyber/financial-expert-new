@@ -425,6 +425,9 @@ def _extract_text_from_html(raw_html: str) -> str:
     if not raw_html:
         return ""
     text = raw_html
+    if text.startswith("\ufeff"):
+        text = text[1:]
+    text = text.lstrip("\ufeff")
     text = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", text)
     text = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", text)
     text = re.sub(r"(?is)<noscript[^>]*>.*?</noscript>", " ", text)
@@ -601,6 +604,7 @@ def _fetch_company_history_from_website(website: str) -> tuple[str, Optional[str
     if not homepage.ok:
         return "", None
 
+    homepage.encoding = homepage.apparent_encoding or "utf-8"
     raw = homepage.text or ""
     links = _extract_links(website, raw)
     history_keywords = ["发展历程", "发展历史", "里程碑", "关于我们", "公司简介", "history", "about", "milestone"]
@@ -622,6 +626,7 @@ def _fetch_company_history_from_website(website: str) -> tuple[str, Optional[str
             r = requests.get(u, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
             if not r.ok:
                 continue
+            r.encoding = r.apparent_encoding or "utf-8"
             t = _extract_text_from_html(r.text or "")
             s = _score_history_text(t)
             if s > best_score:
