@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { Search, Plus, Trash2, TrendingUp, TrendingDown, X, Brain, Timer, XCircle } from 'lucide-react';
+import { Search, Plus, Trash2, TrendingUp, TrendingDown, X, Brain, Timer, XCircle, ChevronRight, Wallet, PiggyBank, BarChart3 } from 'lucide-react';
 import {
   searchStocks,
   getPortfolioPositions,
@@ -84,7 +84,7 @@ export default function PortfolioPage() {
 
   useEffect(() => {
     loadData();
-    const timer = setInterval(loadData, 15_000);
+    const timer = setInterval(loadData, 30_000);
     return () => clearInterval(timer);
   }, []);
 
@@ -354,40 +354,44 @@ export default function PortfolioPage() {
         </div>
       )}
 
-      {/* Portfolio Summary */}
-      <div className="card-surface p-5">
-        <div className="text-[var(--text-secondary)] text-sm font-medium mb-3">账户总览</div>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <div className="bg-[var(--bg-page)] rounded-[var(--radius-md)] p-3.5">
-            <div className="text-[var(--text-secondary)] text-xs">持仓数</div>
-            <div className="text-[var(--text-primary)] text-xl font-bold mt-1">{positions.length}</div>
+      {/* Portfolio Summary — compact horizontal strip */}
+      <div className="card-surface px-4 py-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Wallet size={16} className="text-[var(--text-muted)]" />
+            <span className="text-[var(--text-secondary)] text-xs font-medium">总资产</span>
           </div>
-          <div className="bg-[var(--bg-page)] rounded-[var(--radius-md)] p-3.5">
-            <div className="text-[var(--text-secondary)] text-xs">总成本</div>
-            <div className="text-[var(--text-primary)] text-xl font-bold mt-1">{totalCost > 0 ? totalCost.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '-'}</div>
+          <span className="text-[var(--text-primary)] text-base font-bold">{totalMarketValue > 0 ? totalMarketValue.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '-'}</span>
+        </div>
+        <div className="mt-2 h-px bg-[var(--border-color)]" />
+        <div className="grid grid-cols-3 gap-2 mt-2">
+          <div>
+            <div className="text-[var(--text-muted)] text-[10px]">持仓数</div>
+            <div className="text-[var(--text-primary)] text-sm font-bold">{positions.length}</div>
           </div>
-          <div className="bg-[var(--bg-page)] rounded-[var(--radius-md)] p-3.5">
-            <div className="text-[var(--text-secondary)] text-xs">总市值</div>
-            <div className="text-[var(--text-primary)] text-xl font-bold mt-1">{totalMarketValue > 0 ? totalMarketValue.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '-'}</div>
+          <div>
+            <div className="text-[var(--text-muted)] text-[10px]">总成本</div>
+            <div className="text-[var(--text-primary)] text-sm font-bold">{totalCost > 0 ? totalCost.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '-'}</div>
           </div>
-          <div className="bg-[var(--bg-page)] rounded-[var(--radius-md)] p-3.5">
-            <div className="text-[var(--text-secondary)] text-xs">总盈亏</div>
-            <div className={`text-xl font-bold mt-1 ${totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-              {totalCost > 0 ? `${fmtSigned(totalPnl, 0)} (${fmtSigned(totalPnlPct, 1)}%)` : '-'}
+          <div>
+            <div className="text-[var(--text-muted)] text-[10px]">总盈亏</div>
+            <div className={`text-sm font-bold ${totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+              {totalCost > 0 ? `${fmtSigned(totalPnl, 0)}` : '-'}
+              {totalCost > 0 && <span className="text-[10px] ml-0.5">({fmtSigned(totalPnlPct, 1)}%)</span>}
             </div>
           </div>
         </div>
       </div>
 
-      {/* Alerts */}
+      {/* Alerts — compact strip */}
       {alerts.length > 0 && (
-        <div className="bg-amber-500/10 border border-amber-500/25 rounded-[var(--radius-md)] p-4">
-          <div className="text-amber-400 text-sm font-semibold mb-2">交易提醒 ({alerts.length})</div>
-          {alerts.slice(0, 3).map((a) => (
-            <div key={a.key} className="text-[var(--text-primary)] text-sm mt-1">
-              {a.name || a.symbol}：{a.message}
-            </div>
-          ))}
+        <div className="bg-amber-500/10 border border-amber-500/20 rounded-[var(--radius-md)] px-3 py-2">
+          <div className="flex items-center gap-2 overflow-x-auto">
+            <span className="text-amber-400 text-xs font-semibold shrink-0">提醒 {alerts.length}</span>
+            {alerts.slice(0, 3).map((a) => (
+              <span key={a.key} className="text-[var(--text-secondary)] text-xs whitespace-nowrap">{a.symbol}：{a.message}</span>
+            ))}
+          </div>
         </div>
       )}
 
@@ -402,90 +406,57 @@ export default function PortfolioPage() {
           <p className="text-[var(--text-muted)] text-sm">在上方搜索框中搜索并添加股票</p>
         </div>
       ) : (
-        <div className="flex flex-col gap-3">
+        <div className="flex flex-col gap-2">
           {positions.map((p) => (
-            <div key={p.id} className="card-surface p-4 md:p-5">
-              {/* Stock header */}
-              <div className="flex items-start justify-between gap-3">
+            <div key={p.id} className="card-surface px-4 py-3">
+              {/* Top row: name + price + PnL */}
+              <div className="flex items-center justify-between">
                 <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <span className="text-[var(--text-primary)] text-lg font-bold tracking-tight truncate">{p.name || p.symbol}</span>
-                    <span className="text-[var(--text-muted)] text-xs bg-[var(--bg-elevated)] px-2 py-0.5 rounded">{p.market}</span>
-                  </div>
-                  <div className="text-[var(--text-secondary)] text-sm mt-0.5">{p.symbol}</div>
-                </div>
-                <div className="text-right">
-                  <div className="text-[var(--text-primary)] text-xl font-bold">{fmt(p.current_price)}</div>
-                  <div className={`text-sm font-semibold ${(p.unrealized_pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                    {fmtSigned(p.unrealized_pnl_pct)}%
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[var(--text-primary)] text-base font-bold truncate">{p.name || p.symbol}</span>
+                    <span className="text-[var(--text-muted)] text-[10px] bg-[var(--bg-page)] px-1.5 py-0.5 rounded shrink-0">{p.market}</span>
                   </div>
                 </div>
-              </div>
-
-              {/* Key metrics grid */}
-              <div className="mt-3 grid grid-cols-4 gap-2">
-                <div className="bg-[var(--bg-page)] rounded-[var(--radius-sm)] p-2.5 text-center">
-                  <div className="text-[var(--text-muted)] text-[10px]">持仓</div>
-                  <div className="text-[var(--text-primary)] text-sm font-bold mt-0.5">{p.quantity || 0}</div>
-                </div>
-                <div className="bg-[var(--bg-page)] rounded-[var(--radius-sm)] p-2.5 text-center">
-                  <div className="text-[var(--text-muted)] text-[10px]">成本价</div>
-                  <div className="text-[var(--text-primary)] text-sm font-bold mt-0.5">{fmt(p.avg_cost)}</div>
-                </div>
-                <div className="bg-[var(--bg-page)] rounded-[var(--radius-sm)] p-2.5 text-center">
-                  <div className="text-[var(--text-muted)] text-[10px]">市值</div>
-                  <div className="text-[var(--text-primary)] text-sm font-bold mt-0.5">{p.market_value != null ? p.market_value.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '-'}</div>
-                </div>
-                <div className="bg-[var(--bg-page)] rounded-[var(--radius-sm)] p-2.5 text-center">
-                  <div className="text-[var(--text-muted)] text-[10px]">盈亏</div>
-                  <div className={`text-sm font-bold mt-0.5 ${(p.unrealized_pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                    {fmtSigned(p.unrealized_pnl, 0)}
+                <div className="text-right shrink-0 ml-3">
+                  <div className="text-[var(--text-primary)] text-lg font-bold leading-tight">{fmt(p.current_price)}</div>
+                  <div className={`text-xs font-bold leading-tight ${(p.unrealized_pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {fmtSigned(p.unrealized_pnl)} · {fmtSigned(p.unrealized_pnl_pct)}%
                   </div>
                 </div>
               </div>
-
-              {/* Action buttons */}
-              <div className="mt-3 grid grid-cols-5 gap-1.5">
+              {/* Metrics row */}
+              <div className="flex items-center gap-3 mt-2 text-[10px] text-[var(--text-muted)]">
+                <span>持仓 <b className="text-[var(--text-secondary)]">{p.quantity || 0}</b></span>
+                <span>成本 <b className="text-[var(--text-secondary)]">{fmt(p.avg_cost)}</b></span>
+                <span>市值 <b className="text-[var(--text-secondary)]">{p.market_value != null ? p.market_value.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '-'}</b></span>
+              </div>
+              {/* Action row — compact pills */}
+              <div className="flex items-center gap-1.5 mt-2.5">
                 <button
                   onClick={() => { setTradeTarget(p); setTradeSide('BUY'); setTradeQty(''); }}
-                  className="bg-emerald-500/15 text-emerald-400 rounded-[var(--radius-md)] py-2 font-bold text-xs active:scale-[0.98] transition-transform flex items-center justify-center gap-0.5"
-                >
-                  <TrendingUp size={13} />
-                  买入
-                </button>
+                  className="px-3 py-1.5 rounded-full bg-emerald-500/15 text-emerald-400 text-xs font-bold active:scale-[0.97] transition-transform"
+                >买入</button>
                 <button
                   onClick={() => { setTradeTarget(p); setTradeSide('SELL'); setTradeQty(''); }}
-                  className="bg-red-500/15 text-red-400 rounded-[var(--radius-md)] py-2 font-bold text-xs active:scale-[0.98] transition-transform flex items-center justify-center gap-0.5"
-                >
-                  <TrendingDown size={13} />
-                  卖出
-                </button>
+                  className="px-3 py-1.5 rounded-full bg-red-500/15 text-red-400 text-xs font-bold active:scale-[0.97] transition-transform"
+                >卖出</button>
                 <button
                   onClick={() => { setAutoTradeTarget(p); setAutoTradeSide('BUY'); setAutoTradePrice(''); setAutoTradeQty(''); }}
-                  className="bg-blue-500/15 text-blue-400 rounded-[var(--radius-md)] py-2 font-bold text-xs active:scale-[0.98] transition-transform flex items-center justify-center gap-0.5 relative"
-                >
-                  <Timer size={13} />
-                  委托
+                  className="px-3 py-1.5 rounded-full bg-blue-500/12 text-blue-400 text-xs font-bold active:scale-[0.97] transition-transform relative"
+                >委托
                   {pendingAutoTrades.filter(at => at.position_id === p.id).length > 0 && (
-                    <span className="absolute -top-1 -right-1 bg-blue-500 text-white text-[9px] w-4 h-4 rounded-full flex items-center justify-center font-bold">
-                      {pendingAutoTrades.filter(at => at.position_id === p.id).length}
-                    </span>
+                    <span className="absolute -top-1 -right-1 bg-blue-500 text-white text-[8px] w-3.5 h-3.5 rounded-full flex items-center justify-center font-bold">{pendingAutoTrades.filter(at => at.position_id === p.id).length}</span>
                   )}
                 </button>
                 <button
                   onClick={() => fetchAdvice(p)}
-                  className="bg-[#FFB547]/15 text-[#FFB547] rounded-[var(--radius-md)] py-2 font-bold text-xs active:scale-[0.98] transition-transform flex items-center justify-center gap-0.5"
-                >
-                  <Brain size={13} />
-                  AI
-                </button>
+                  className="px-3 py-1.5 rounded-full bg-[#FFB547]/12 text-[#FFB547] text-xs font-bold active:scale-[0.97] transition-transform"
+                >AI</button>
+                <div className="flex-1" />
                 <button
                   onClick={() => handleDelete(p.id, p.name || p.symbol)}
-                  className="bg-[var(--bg-elevated)] text-[var(--text-secondary)] rounded-[var(--radius-md)] py-2 font-medium text-xs active:scale-[0.98] transition-transform flex items-center justify-center gap-0.5"
-                >
-                  <Trash2 size={13} />
-                  删除
-                </button>
+                  className="px-2 py-1.5 rounded-full text-[var(--text-muted)] text-xs active:scale-[0.97] transition-transform hover:text-red-400"
+                ><Trash2 size={13} /></button>
               </div>
             </div>
           ))}

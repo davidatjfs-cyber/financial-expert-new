@@ -1732,9 +1732,9 @@ def update_portfolio_position(position_id: str, req: PortfolioUpdatePositionRequ
             raise HTTPException(status_code=404, detail="position not found")
         if req.name is not None:
             p.name = (req.name or "").strip() or None
-        if req.target_buy_price is not None or req.target_buy_price is None:
+        if req.target_buy_price is not None:
             p.target_buy_price = req.target_buy_price
-        if req.target_sell_price is not None or req.target_sell_price is None:
+        if req.target_sell_price is not None:
             p.target_sell_price = req.target_sell_price
         p.updated_at = now
         market = (p.market or "CN").strip().upper()
@@ -1814,11 +1814,9 @@ def create_portfolio_trade(req: PortfolioTradeRequest):
         s.flush()
 
         pos_id = p.id
-        # Auto-delete position when fully sold (quantity reaches 0)
+        # Mark position as closed instead of deleting — preserves trade history
         if side == "SELL" and new_qty <= 0:
-            s.query(PortfolioTrade).filter(PortfolioTrade.position_id == pos_id, PortfolioTrade.id != t.id).delete()
-            s.delete(t)
-            s.delete(p)
+            s.query(PortfolioAutoTrade).filter(PortfolioAutoTrade.position_id == pos_id).update({"status": "CANCELLED"})
 
         return PortfolioTradeResponse(
             id=t.id,
@@ -1977,7 +1975,9 @@ def _execute_auto_trade(at_id: str):
 
             trade = PortfolioTrade(
                 position_id=p.id, side=at.side, price=exec_price,
-                quantity=qty, amount=exec_price * qty, created_at=now,
+                quantity=actual_qty if at.side == "SELL" else qty,
+                amount=exec_price * (actual_qty if at.side == "SELL" else qty),
+                created_at=now,
             )
             s.add(trade)
 
@@ -1985,15 +1985,12 @@ def _execute_auto_trade(at_id: str):
             at.executed_at = now
             at.executed_price = exec_price
 
-            # Auto-delete position when fully sold
+            # Mark position as closed (quantity=0) instead of deleting — preserves trade history
             if at.side == "SELL" and new_qty <= 0:
-                s.query(PortfolioTrade).filter(PortfolioTrade.position_id == p.id).delete()
                 s.query(PortfolioAutoTrade).filter(
                     PortfolioAutoTrade.position_id == p.id,
                     PortfolioAutoTrade.id != at.id,
-                ).delete()
-                s.delete(at)
-                s.delete(p)
+                ).update({"status": "CANCELLED"})
 
             log.info(f"Auto-trade executed: {at.side} {qty} of {symbol} @ {exec_price} (day H/L: {day_high}/{day_low})")
     except Exception as e:
@@ -2165,69 +2162,63 @@ def get_portfolio_alerts():
     with session_scope() as s:
         positions = s.execute(select(PortfolioPosition)).scalars().all()
 
-    for p in positions:
+    def _fetch_for_position(p):
         market = (p.market or "CN").strip().upper()
         symbol = (p.symbol or "").strip().upper()
         name = (p.name or "").strip() or None
-
+        current_price = None
         sp = None
         try:
             sp = get_stock_price(symbol=symbol, market=market)
+            cp = getattr(sp, "price", None) if sp is not None else None
+            current_price = None if cp is None else float(cp)
         except Exception:
-            sp = None
-        current_price = getattr(sp, "price", None) if sp is not None else None
+            pass
+        si = None
         try:
-            current_price = None if current_price is None else float(current_price)
+            si = get_stock_indicators(symbol=symbol, market=market)
         except Exception:
-            current_price = None
+            pass
+        return p, market, symbol, name, current_price, si
 
-        # User targets
+    fetched: list[tuple] = []
+    if positions:
+        try:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            with ThreadPoolExecutor(max_workers=min(10, len(positions))) as ex:
+                futs = {ex.submit(_fetch_for_position, p): p for p in positions}
+                for fut in as_completed(futs, timeout=30):
+                    try:
+                        fetched.append(fut.result())
+                    except Exception:
+                        pass
+        except Exception:
+            for p in positions:
+                fetched.append(_fetch_for_position(p))
+
+    for p, market, symbol, name, current_price, si in fetched:
         if current_price is not None and p.target_buy_price is not None:
             try:
                 tb = float(p.target_buy_price)
                 if current_price <= tb:
-                    alerts.append(
-                        PortfolioAlertResponse(
-                            key=f"{p.id}:target_buy:{int(tb * 10000)}",
-                            position_id=p.id,
-                            market=market,
-                            symbol=symbol,
-                            name=name,
-                            alert_type="target_buy",
-                            message=f"已到达目标买入价 {tb:.2f}",
-                            current_price=current_price,
-                            trigger_price=tb,
-                        )
-                    )
+                    alerts.append(PortfolioAlertResponse(
+                        key=f"{p.id}:target_buy:{int(tb * 10000)}", position_id=p.id,
+                        market=market, symbol=symbol, name=name, alert_type="target_buy",
+                        message=f"已到达目标买入价 {tb:.2f}", current_price=current_price, trigger_price=tb,
+                    ))
             except Exception:
                 pass
-
         if current_price is not None and p.target_sell_price is not None:
             try:
                 ts = float(p.target_sell_price)
                 if current_price >= ts:
-                    alerts.append(
-                        PortfolioAlertResponse(
-                            key=f"{p.id}:target_sell:{int(ts * 10000)}",
-                            position_id=p.id,
-                            market=market,
-                            symbol=symbol,
-                            name=name,
-                            alert_type="target_sell",
-                            message=f"已到达目标卖出价 {ts:.2f}",
-                            current_price=current_price,
-                            trigger_price=ts,
-                        )
-                    )
+                    alerts.append(PortfolioAlertResponse(
+                        key=f"{p.id}:target_sell:{int(ts * 10000)}", position_id=p.id,
+                        market=market, symbol=symbol, name=name, alert_type="target_sell",
+                        message=f"已到达目标卖出价 {ts:.2f}", current_price=current_price, trigger_price=ts,
+                    ))
             except Exception:
                 pass
-
-        # Strategy signals
-        try:
-            si = get_stock_indicators(symbol=symbol, market=market)
-        except Exception:
-            si = None
-
         if si is not None:
             if getattr(si, "buy_price_aggressive_ok", None) is True and getattr(si, "buy_price_aggressive", None) is not None:
                 bp = getattr(si, "buy_price_aggressive", None)
@@ -2235,39 +2226,24 @@ def get_portfolio_alerts():
                     bp = float(bp)
                 except Exception:
                     bp = None
-                alerts.append(
-                    PortfolioAlertResponse(
-                        key=f"{p.id}:signal_buy",
-                        position_id=p.id,
-                        market=market,
-                        symbol=symbol,
-                        name=name,
-                        alert_type="signal_buy",
-                        message=f"出现买入信号（参考价 {('-' if bp is None else f'{bp:.2f}')}）",
-                        current_price=current_price,
-                        trigger_price=bp,
-                    )
-                )
-
+                alerts.append(PortfolioAlertResponse(
+                    key=f"{p.id}:signal_buy", position_id=p.id,
+                    market=market, symbol=symbol, name=name, alert_type="signal_buy",
+                    message=f"出现买入信号（参考价 {('-' if bp is None else f'{bp:.2f}')}）",
+                    current_price=current_price, trigger_price=bp,
+                ))
             if getattr(si, "sell_price_ok", None) is True and getattr(si, "sell_price", None) is not None:
                 spx = getattr(si, "sell_price", None)
                 try:
                     spx = float(spx)
                 except Exception:
                     spx = None
-                alerts.append(
-                    PortfolioAlertResponse(
-                        key=f"{p.id}:signal_sell",
-                        position_id=p.id,
-                        market=market,
-                        symbol=symbol,
-                        name=name,
-                        alert_type="signal_sell",
-                        message=f"出现卖出信号（参考价 {('-' if spx is None else f'{spx:.2f}')}）",
-                        current_price=current_price,
-                        trigger_price=spx,
-                    )
-                )
+                alerts.append(PortfolioAlertResponse(
+                    key=f"{p.id}:signal_sell", position_id=p.id,
+                    market=market, symbol=symbol, name=name, alert_type="signal_sell",
+                    message=f"出现卖出信号（参考价 {('-' if spx is None else f'{spx:.2f}')}）",
+                    current_price=current_price, trigger_price=spx,
+                ))
 
     return alerts
 
@@ -2575,64 +2551,139 @@ def _build_report_pdf_bytes(report: Report, metrics: list[ComputedMetric], alert
     try:
         from reportlab.lib.pagesizes import A4
         from reportlab.lib.styles import getSampleStyleSheet
-        from reportlab.lib.enums import TA_LEFT
-        from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+        from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable, KeepTogether
         from reportlab.lib import colors
+        from reportlab.lib.units import mm
     except Exception as e:
         raise RuntimeError(f"reportlab_import_failed:{e}")
 
     cjk_font = _register_cjk_font_for_pdf()
+    FONT = cjk_font
 
     buf = BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=36, rightMargin=36, topMargin=36, bottomMargin=36)
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=28, rightMargin=28, topMargin=28, bottomMargin=28)
     styles = getSampleStyleSheet()
-    try:
-        styles["Title"].fontName = cjk_font
-        styles["Normal"].fontName = cjk_font
-        styles["Heading2"].fontName = cjk_font
-        styles["Heading3"].fontName = cjk_font
-        styles["Normal"].alignment = TA_LEFT
-    except Exception:
-        pass
+    for sn in ("Title", "Normal", "Heading2", "Heading3", "Heading4"):
+        try:
+            styles[sn].fontName = FONT
+        except Exception:
+            pass
+    styles["Normal"].alignment = TA_LEFT
+    styles["Normal"].fontSize = 9
+    styles["Normal"].leading = 14
+    styles["Title"].fontSize = 16
+    styles["Title"].leading = 22
+    styles["Title"].alignment = TA_CENTER
+    styles["Heading2"].fontSize = 13
+    styles["Heading2"].leading = 18
+    styles["Heading2"].spaceBefore = 12
+    styles["Heading2"].spaceAfter = 6
+    styles["Heading3"].fontSize = 10.5
+    styles["Heading3"].leading = 15
+    styles["Heading3"].spaceBefore = 8
+    styles["Heading3"].spaceAfter = 4
 
-    story = []
-    title = getattr(report, "report_name", None) or "分析报告"
-    story.append(Paragraph(str(title), styles["Title"]))
+    BG_HEADER = colors.HexColor("#1a1a2e")
+    BG_ROW_EVEN = colors.HexColor("#f8f9fa")
+    BG_ROW_ODD = colors.HexColor("#ffffff")
+    CLR_GOOD = colors.HexColor("#16a34a")
+    CLR_WARN = colors.HexColor("#d97706")
+    CLR_BAD = colors.HexColor("#dc2626")
+    CLR_TEXT = colors.HexColor("#1f2937")
+    CLR_MUTED = colors.HexColor("#6b7280")
+    CLR_ACCENT = colors.HexColor("#4f46e5")
+    BORDER = colors.HexColor("#e5e7eb")
 
-    meta_lines: list[str] = []
-    if getattr(report, "source_type", None):
-        meta_lines.append(f"来源：{report.source_type}")
-    if getattr(report, "status", None):
-        meta_lines.append(f"状态：{report.status}")
-    if getattr(report, "period_end", None):
-        meta_lines.append(f"报告期：{report.period_end}")
-    if getattr(report, "market", None):
-        meta_lines.append(f"市场：{report.market}")
-    if meta_lines:
+    story: list = []
+
+    def _p(text: str, style_name: str = "Normal", **kw) -> Paragraph:
+        return Paragraph(str(text), styles[style_name], **kw)
+
+    def _hr():
+        story.append(Spacer(1, 4))
+        story.append(HRFlowable(width="100%", thickness=0.5, color=BORDER))
+        story.append(Spacer(1, 4))
+
+    def _section_header(title: str):
         story.append(Spacer(1, 8))
-        story.append(Paragraph("<br/>".join(meta_lines), styles["Normal"]))
+        tbl = Table([[title]], colWidths=[doc.width], rowHeights=[22])
+        tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), BG_HEADER),
+            ("TEXTCOLOR", (0, 0), (-1, -1), colors.white),
+            ("FONTNAME", (0, 0), (-1, -1), FONT),
+            ("FONTSIZE", (0, 0), (-1, -1), 11),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 10),
+            ("ROUNDEDCORNERS", [4, 4, 4, 4]),
+        ]))
+        story.append(tbl)
+        story.append(Spacer(1, 6))
 
-    story.append(Spacer(1, 12))
+    def _metric_table(rows: list[list[str]], col_widths: list[float] | None = None):
+        if not rows:
+            return
+        ncols = len(rows[0])
+        if col_widths is None:
+            col_widths = [doc.width / ncols] * ncols
+        tbl = Table(rows, colWidths=col_widths, repeatRows=1)
+        style_cmds = [
+            ("FONTNAME", (0, 0), (-1, -1), FONT),
+            ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("GRID", (0, 0), (-1, -1), 0.3, BORDER),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eef2ff")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), CLR_TEXT),
+        ]
+        for i in range(1, len(rows)):
+            bg = BG_ROW_EVEN if i % 2 == 0 else BG_ROW_ODD
+            style_cmds.append(("BACKGROUND", (0, i), (-1, i), bg))
+        tbl.setStyle(TableStyle(style_cmds))
+        story.append(tbl)
 
-    # ====== Helpers ======
-    def _fmt(v: float | None, digits: int = 2) -> str:
+    def _fmt(v: float | None, d: int = 2) -> str:
         if v is None:
             return "-"
         try:
-            return f"{float(v):.{digits}f}"
+            return f"{float(v):.{d}f}"
         except Exception:
             return "-"
 
+    def _fmt_amount(v: float | None) -> str:
+        if v is None:
+            return "-"
+        abs_v = abs(float(v))
+        if abs_v >= 1e8:
+            return f"{float(v)/1e8:.2f}亿"
+        if abs_v >= 1e4:
+            return f"{float(v)/1e4:.2f}万"
+        return f"{float(v):.2f}"
+
     def _value(code: str) -> float | None:
         m = latest_map.get(code)
-        if not m:
+        if not m or m.value is None:
             return None
         try:
-            return None if m.value is None else float(m.value)
+            return float(m.value)
         except Exception:
             return None
 
-    # Latest period selection
+    def _risk_label(val: float, warn: list[float], better: str) -> str:
+        if better == "lower":
+            return "高风险" if val >= warn[1] else ("关注" if val >= warn[0] else "安全")
+        return "高风险" if val <= warn[1] else ("关注" if val <= warn[0] else "安全")
+
+    def _risk_color(label: str) -> colors.Color:
+        if "高" in label:
+            return CLR_BAD
+        if "关注" in label:
+            return CLR_WARN
+        return CLR_GOOD
+
+    # ====== Data preparation ======
     metrics_sorted = sorted(metrics or [], key=lambda m: str(getattr(m, "period_end", "") or ""), reverse=True)
     latest_period = (getattr(report, "period_end", None) or "").strip() or (metrics_sorted[0].period_end if metrics_sorted else None)
     latest_metrics = [m for m in (metrics or []) if latest_period and m.period_end == latest_period]
@@ -2648,361 +2699,375 @@ def _build_report_pdf_bytes(report: Report, metrics: list[ComputedMetric], alert
     asset_turnover = _value("ASSET_TURNOVER")
     inv_turnover = _value("INVENTORY_TURNOVER")
     recv_turnover = _value("RECEIVABLE_TURNOVER")
-    revenue_growth = _value("REVENUE_GROWTH")
-    profit_growth = _value("PROFIT_GROWTH")
     operating_cash_flow = _value("OPERATING_CASH_FLOW")
+    total_revenue = _value("TOTAL_REVENUE")
 
     try:
         from rating_engine import compute_enterprise_rating
         _rating = compute_enterprise_rating(
-            net_margin=net_margin,
-            gross_margin=gross_margin,
-            roe=roe,
-            roa=roa,
-            debt_ratio=debt_ratio,
-            current_ratio=current_ratio,
-            asset_turnover=asset_turnover,
-            inv_turnover=inv_turnover,
-            recv_turnover=recv_turnover,
-            revenue_growth=revenue_growth,
-            profit_growth=profit_growth,
+            net_margin=net_margin, gross_margin=gross_margin, roe=roe, roa=roa,
+            debt_ratio=debt_ratio, current_ratio=current_ratio, asset_turnover=asset_turnover,
+            inv_turnover=inv_turnover, recv_turnover=recv_turnover,
             operating_cash_flow=operating_cash_flow,
-            net_profit=_value("NET_PROFIT") if _value("NET_PROFIT") else None,
-            gross_margin_3y=None,
         )
     except Exception:
         _rating = None
 
-    # Same heuristic constants as frontend
-    industry_avg = {
-        "grossMargin": 35.0,
-        "netMargin": 10.0,
-        "roe": 15.0,
-        "roa": 8.0,
-        "currentRatio": 1.5,
-        "debtRatio": 50.0,
-        "assetTurnover": 0.8,
-    }
+    industry_avg = {"grossMargin": 35, "netMargin": 10, "roe": 15, "roa": 8, "currentRatio": 1.5, "debtRatio": 50, "assetTurnover": 0.8}
 
-    # ====== Overview ======
-    story.append(Paragraph("概览", styles["Heading2"]))
-    overview_rows = [
-        ["关键指标", "数值"],
-        ["毛利率", ("-" if gross_margin is None else f"{_fmt(gross_margin)}%")],
-        ["净利率", ("-" if net_margin is None else f"{_fmt(net_margin)}%")],
-        ["ROE", ("-" if roe is None else f"{_fmt(roe)}%")],
-        ["ROA", ("-" if roa is None else f"{_fmt(roa)}%")],
-        ["流动比率", _fmt(current_ratio)],
-        ["速动比率", _fmt(quick_ratio)],
-        ["资产负债率", ("-" if debt_ratio is None else f"{_fmt(debt_ratio)}%")],
+    # ====== COVER ======
+    title = getattr(report, "report_name", None) or "分析报告"
+    story.append(Spacer(1, 30))
+    story.append(_p(title, "Title"))
+    story.append(Spacer(1, 12))
+
+    cover_rows = []
+    if getattr(report, "period_end", None):
+        cover_rows.append(["报告期", str(report.period_end)])
+    if getattr(report, "market", None):
+        cover_rows.append(["市场", str(report.market)])
+    if getattr(report, "period_type", None):
+        cover_rows.append(["报告类型", "年度报告" if report.period_type == "annual" else "季度报告"])
+    if getattr(report, "source_type", None):
+        cover_rows.append(["数据来源", "市场数据" if report.source_type == "market_fetch" else "文件上传"])
+    if _rating:
+        cover_rows.append(["综合评级", f"{_rating['grade']} {_rating['total_score']}/100"])
+
+    if cover_rows:
+        ct = Table(cover_rows, colWidths=[100, doc.width - 100])
+        ct.setStyle(TableStyle([
+            ("FONTNAME", (0, 0), (-1, -1), FONT),
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#f3f4f6")),
+            ("TEXTCOLOR", (0, 0), (0, -1), CLR_MUTED),
+            ("TEXTCOLOR", (1, 0), (1, -1), CLR_TEXT),
+            ("GRID", (0, 0), (-1, -1), 0.3, BORDER),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ]))
+        story.append(ct)
+
+    # ====== COMPANY RATING (prominent, right after cover) ======
+    _section_header("企业综合评级")
+    if _rating:
+        r = _rating
+        grade_color = CLR_GOOD if r['total_score'] >= 60 else (CLR_WARN if r['total_score'] >= 40 else CLR_BAD)
+        story.append(_p(f"<b><font size='14' color='{grade_color.hexval()}'>{r['grade']}</font></b>  "
+                        f"<font size='11'>{r['total_score']}/100</font>  —  {r.get('recommendation', '')}"))
+        story.append(Spacer(1, 6))
+
+        dim_rows = [["维度", "评分", "强度", "权重"]]
+        for label, d in r["dim_summary"].items():
+            dim_rows.append([label, f"{d['pct']}%", d["flag"], f"{d['weight']*100:.0f}%"])
+        _metric_table(dim_rows, [doc.width * w for w in [0.30, 0.20, 0.20, 0.30]])
+        story.append(Spacer(1, 4))
+
+        if r.get("strengths"):
+            story.append(_p(f"<b><font color='{CLR_GOOD.hexval()}'>核心优势：</font></b>" + "、".join(r["strengths"])))
+        if r.get("risks"):
+            story.append(_p(f"<b><font color='{CLR_BAD.hexval()}'>主要风险：</font></b>" + "、".join(r["risks"])))
+    else:
+        story.append(_p("评级数据不足"))
+
+    # ====== 1. FINANCIAL METRICS ======
+    _section_header("一、核心财务指标")
+
+    cat_defs: list[tuple[str, list[tuple[list[str], str, str, str, list[float] | None]]]] = [
+        ("盈利能力", [
+            (["GROSS_MARGIN"], "毛利率", "%", "higher", [40, 20, 0]),
+            (["NET_MARGIN"], "净利率", "%", "higher", [20, 10, 0]),
+            (["ROE"], "ROE", "%", "higher", [20, 10, 0]),
+            (["ROA"], "ROA", "%", "higher", [10, 5, 0]),
+        ]),
+        ("偿债能力", [
+            (["CURRENT_RATIO"], "流动比率", "倍", "higher", [2, 1, 0]),
+            (["QUICK_RATIO"], "速动比率", "倍", "higher", [1.5, 1, 0]),
+            (["DEBT_ASSET"], "资产负债率", "%", "lower", [30, 60, 80]),
+        ]),
+        ("营运效率", [
+            (["ASSET_TURNOVER"], "总资产周转率", "次", "higher", [1, 0.5, 0]),
+            (["INVENTORY_TURNOVER"], "存货周转率", "次", "higher", [8, 4, 0]),
+            (["RECEIVABLE_TURNOVER"], "应收周转率", "次", "higher", [10, 6, 0]),
+        ]),
+        ("规模指标", [
+            (["TOTAL_REVENUE"], "营业总收入", "", None, None),
+            (["OPERATING_CASH_FLOW"], "经营现金流净额", "", None, None),
+        ]),
     ]
-    tbl0 = Table(overview_rows, repeatRows=1, hAlign="LEFT", colWidths=[160, 190])
-    tbl0.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f0f2f6")),
-                ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#d0d7de")),
-                ("FONTNAME", (0, 0), (-1, -1), cjk_font),
-                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ]
-        )
-    )
-    story.append(tbl0)
 
-    story.append(Spacer(1, 10))
-    lvl_counts = {"high": 0, "medium": 0, "low": 0}
-    for a in alerts or []:
-        lvl = str(getattr(a, "level", "") or "").lower()
-        if lvl in lvl_counts:
-            lvl_counts[lvl] += 1
-    story.append(Paragraph(f"风险预警：高风险 {lvl_counts['high']} 条，中风险 {lvl_counts['medium']} 条，低风险 {lvl_counts['low']} 条", styles["Normal"]))
-
-    story.append(Spacer(1, 12))
-
-    # ====== Financial metrics (all periods) ======
-    story.append(Paragraph("财务指标", styles["Heading2"]))
-    if not metrics:
-        story.append(Paragraph("暂无财务指标数据", styles["Normal"]))
-    else:
-        rows = [["指标", "数值", "单位", "报告期"]]
-        for m in metrics_sorted:
-            try:
-                v = None if m.value is None else float(m.value)
-            except Exception:
-                v = None
-            vstr = "-" if v is None else f"{v:.4g}"
-            rows.append([str(m.metric_name or m.metric_code), vstr, str(m.unit or ""), str(m.period_end or "")])
-        rows = rows[:1 + min(80, max(0, len(rows) - 1))]
-        tbl = Table(rows, repeatRows=1, hAlign="LEFT", colWidths=[150, 80, 40, 70])
-        tbl.setStyle(
-            TableStyle(
-                [
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f0f2f6")),
-                    ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#d0d7de")),
-                    ("FONTNAME", (0, 0), (-1, -1), cjk_font),
-                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ]
-            )
-        )
-        story.append(tbl)
-
-    story.append(Spacer(1, 12))
-
-    # ====== Risk analysis (professional framework) ======
-    story.append(Paragraph("专业风险评估框架", styles["Heading2"]))
-    story.append(Paragraph("参考穆迪/标普评级方法论，从多维度系统评估企业风险", styles["Normal"]))
-    story.append(Spacer(1, 6))
-
-    # 1. DuPont
-    story.append(Paragraph("1. 杜邦分解分析 (DuPont Analysis)", styles["Heading3"]))
-    if net_margin is not None:
-        txt = f"净利率 {_fmt(net_margin)}%" + ("，高于行业均值，但需警惕是否依赖非经常性损益（资产处置、政府补贴、投资收益）支撑。" if net_margin > industry_avg["netMargin"] else "，低于行业均值，表明费用控制或定价能力存在压力，需关注销售费用率、管理费用率的变动趋势。")
-        story.append(Paragraph(f"• 净利率驱动：{txt}", styles["Normal"]))
-    if asset_turnover is not None:
-        txt = f"总资产周转率 {_fmt(asset_turnover)}" + ("，低于行业水平，可能存在产能过剩、固定资产利用率不足或应收/存货占比过高的问题。" if asset_turnover < industry_avg["assetTurnover"] else "，处于行业正常水平，资产利用效率尚可。")
-        story.append(Paragraph(f"• 资产周转驱动：{txt}", styles["Normal"]))
-    if debt_ratio is not None:
-        eq_mult = 100 / max(1, 100 - debt_ratio)
-        txt = f"资产负债率 {_fmt(debt_ratio)}%，权益乘数约 {eq_mult:.2f}x。" + ("高杠杆虽可放大ROE，但在利率上行周期或营收下滑时，利息覆盖倍数可能快速恶化。" if debt_ratio > 60 else "杠杆水平适中，财务弹性较好。")
-        story.append(Paragraph(f"• 财务杠杆驱动：{txt}", styles["Normal"]))
-    story.append(Spacer(1, 6))
-
-    # 2. Liquidity
-    story.append(Paragraph("2. 流动性与偿债能力", styles["Heading3"]))
-    if current_ratio is not None:
-        if current_ratio < 1:
-            txt = f"流动比率 {_fmt(current_ratio)}，流动资产不足以覆盖流动负债，存在短期偿债缺口。建议关注银行授信额度和短期融资渠道。"
-        elif current_ratio > 3:
-            txt = f"流动比率 {_fmt(current_ratio)}，偏高，虽然偿债无忧，但大量资金闲置可能拉低资本回报率。"
-        else:
-            txt = f"流动比率 {_fmt(current_ratio)}，短期偿债能力处于合理区间，需持续监控应收账款账龄和存货跌价风险。"
-        story.append(Paragraph(f"• 短期偿债：{txt}", styles["Normal"]))
-    if debt_ratio is not None:
-        if debt_ratio > 70:
-            txt = f"资产负债率 {_fmt(debt_ratio)}%，高负债率意味着在经济下行期可能面临银行抽贷、再融资成本上升等连锁风险。"
-        elif debt_ratio < 30:
-            txt = f"资产负债率 {_fmt(debt_ratio)}%，极低的负债率表明财务极为保守，几乎无债务违约风险。"
-        else:
-            txt = f"资产负债率 {_fmt(debt_ratio)}%，处于可控区间，建议关注有息负债占比和债务期限结构。"
-        story.append(Paragraph(f"• 资本结构：{txt}", styles["Normal"]))
-    story.append(Spacer(1, 6))
-
-    # 3. Operating Quality
-    story.append(Paragraph("3. 营运质量与周转风险", styles["Heading3"]))
-    if inv_turnover is not None:
-        txt = f"存货周转率 {_fmt(inv_turnover)} 次。" + ("周转偏慢，可能面临存货跌价、产品过时或滞销风险。" if inv_turnover < 4 else "存货周转效率尚可，建议对比同行业竞争对手的周转水平。")
-        story.append(Paragraph(f"• 存货管理：{txt}", styles["Normal"]))
-    if recv_turnover is not None:
-        days = 365 / recv_turnover if recv_turnover > 0 else 999
-        txt = f"应收账款周转率 {_fmt(recv_turnover)} 次（约 {days:.0f} 天回款周期）。" + ("回款周期超过60天，需警惕客户信用风险和坏账计提不足。" if recv_turnover < 6 else "回款效率尚可。")
-        story.append(Paragraph(f"• 应收账款：{txt}", styles["Normal"]))
-    story.append(Spacer(1, 6))
-
-    # 4. Growth Sustainability
-    story.append(Paragraph("4. 增长可持续性风险", styles["Heading3"]))
-    if roe is not None and net_margin is not None:
-        sgr = roe * 0.7
-        txt = f"ROE {_fmt(roe)}%，可持续增长率(SGR)约 {_fmt(sgr)}%（假设70%留存率）。"
-        if gross_margin is not None and gross_margin > 50 and net_margin > 20:
-            txt += " 作为高利润率企业，未来增长面临基数效应挑战，需不断开拓新市场或推出新产品线。"
-        elif net_margin < 5:
-            txt += " 低利润率限制了内生增长能力，企业可能需要依赖外部融资支撑扩张。"
-        else:
-            txt += " 盈利水平支撑一定的内生增长能力，但需关注行业竞争格局变化对利润率的侵蚀。"
-        story.append(Paragraph(f"• {txt}", styles["Normal"]))
-    else:
-        story.append(Paragraph("• 关键盈利指标缺失，无法评估增长可持续性。", styles["Normal"]))
-
-    # Alert details
-    if alerts:
-        story.append(Spacer(1, 8))
-        story.append(Paragraph("系统风险预警明细", styles["Heading3"]))
-        for a in alerts:
-            lvl = getattr(a, "level", "") or ""
-            ttl = getattr(a, "title", "") or ""
-            msg = getattr(a, "message", "") or ""
-            story.append(Paragraph(f"[{lvl}] {ttl}", styles["Normal"]))
-            story.append(Paragraph(str(msg).replace("\n", "<br/>") or "-", styles["Normal"]))
-            story.append(Spacer(1, 4))
-
-    story.append(Spacer(1, 12))
-
-    # ====== Opportunities (professional framework) ======
-    story.append(Paragraph("投资机会识别框架", styles["Heading2"]))
-    story.append(Paragraph("参考高盛/摩根士丹利研究方法论，从竞争壁垒、价值创造、资本优化三大维度识别机会", styles["Normal"]))
-    story.append(Spacer(1, 6))
-
-    # 1. Competitive Moat
-    story.append(Paragraph("1. 竞争壁垒与护城河", styles["Heading3"]))
-    if gross_margin is not None:
-        if gross_margin >= 40:
-            txt = f"毛利率 {_fmt(gross_margin)}%，高毛利率（>40%）通常意味着企业拥有较强的品牌溢价、技术壁垒或网络效应。参考晨星'宽护城河'标准，持续高毛利率是竞争优势的核心体现。"
-        elif gross_margin >= industry_avg["grossMargin"]:
-            txt = f"毛利率 {_fmt(gross_margin)}%，高于行业均值，表明具备一定的产品差异化或成本优势。"
-        else:
-            txt = f"毛利率 {_fmt(gross_margin)}%，低于行业均值，但若企业正处于市场扩张期，未来随着规模效应释放，毛利率存在改善空间。"
-        story.append(Paragraph(f"• 定价权：{txt}", styles["Normal"]))
-    if net_margin is not None and gross_margin is not None:
-        expense_rate = gross_margin - net_margin
-        txt = f"费用率约 {_fmt(expense_rate)}%。" + ("费用率控制良好，表明企业运营效率较高。" if expense_rate < 20 else "费用率偏高，但若处于研发投入期或渠道扩张期，可能是为未来增长播种。")
-        story.append(Paragraph(f"• 成本效率：{txt}", styles["Normal"]))
-    story.append(Spacer(1, 6))
-
-    # 2. Value Creation
-    story.append(Paragraph("2. 价值创造能力", styles["Heading3"]))
-    if roe is not None:
-        if roe > 20:
-            txt = f"ROE {_fmt(roe)}%，优秀的ROE（>20%）表明企业正在为股东创造显著超额回报。参考巴菲特选股标准，持续ROE>20%的企业通常具备经济特许权。"
-        elif roe > industry_avg["roe"]:
-            txt = f"ROE {_fmt(roe)}%，高于行业均值{industry_avg['roe']}%，资本回报效率较好，具备长期复利潜力。"
-        else:
-            txt = f"ROE {_fmt(roe)}%，低于行业均值{industry_avg['roe']}%，但若企业正处于转型期，未来ROE存在较大提升空间。"
-        story.append(Paragraph(f"• 股东价值：{txt}", styles["Normal"]))
-    if roa is not None:
-        txt = f"ROA {_fmt(roa)}%。" + ("资产回报率高于行业水平，表明企业资产质量较好、运营效率较高。" if roa > industry_avg["roa"] else "ROA低于行业水平，可能存在资产利用效率不足的问题。")
-        story.append(Paragraph(f"• 资产创利：{txt}", styles["Normal"]))
-    story.append(Spacer(1, 6))
-
-    # 3. Capital Optimization
-    story.append(Paragraph("3. 资本结构优化空间", styles["Heading3"]))
-    if debt_ratio is not None:
-        if debt_ratio < 40:
-            txt = f"资产负债率 {_fmt(debt_ratio)}%，较低的负债率意味着企业拥有充足的融资弹药。适度增加杠杆可以利用税盾效应降低加权资本成本(WACC)。"
-        elif debt_ratio < industry_avg["debtRatio"]:
-            txt = f"资产负债率 {_fmt(debt_ratio)}%，低于行业均值，财务结构稳健，在行业整合期具备更强的抗风险能力和并购扩张能力。"
-        else:
-            txt = f"资产负债率 {_fmt(debt_ratio)}%，高于行业均值，但若企业现金流稳定且利息覆盖充足，适度杠杆可以放大股东回报。"
-        story.append(Paragraph(f"• 杠杆优化：{txt}", styles["Normal"]))
-
-    story.append(Spacer(1, 12))
-
-    # ====== AI Insights (professional, consistent with frontend) ======
-    story.append(Paragraph("AI 综合研判", styles["Heading2"]))
-    story.append(Paragraph("参考CFA研究框架，融合定量分析与定性判断", styles["Normal"]))
-    story.append(Spacer(1, 6))
-
-    if metrics_sorted:
-        # Scorecard
-        def _grade(val: float | None, thresholds: list[tuple[float, str]], reverse: bool = False) -> str:
+    for cat_name, items in cat_defs:
+        story.append(_p(f"▸ {cat_name}", "Heading3"))
+        rows = [["指标", "数值", "评级", "行业参考", "判定"]]
+        for codes, label, unit, better, thresholds in items:
+            val = _value(codes[0])
             if val is None:
-                return "-"
-            for t, g in thresholds:
-                if (not reverse and val > t) or (reverse and val < t):
-                    return g
-            return thresholds[-1][1] if thresholds else "C"
-
-        if _rating is not None:
-            r = _rating
-            story.append(Paragraph(f"企业综合评级：{r['grade']} {r['total_score']}/100", styles["Normal"]))
-            story.append(Paragraph(f"评级建议：{r['recommendation']}", styles["Normal"]))
-            story.append(Spacer(1, 4))
-            dim_rows = [["维度", "评分", "强度", "权重"]]
-            for label, d in r["dim_summary"].items():
-                dim_rows.append([label, f"{d['score']}/25", d["flag"], f"{d['weight']*100:.0f}%"])
-            dim_tbl = Table(dim_rows, repeatRows=1, hAlign="LEFT", colWidths=[100, 60, 40, 50])
-            dim_tbl.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f0f2f6")),
-                ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#d0d7de")),
-                ("FONTNAME", (0, 0), (-1, -1), cjk_font),
-                ("FONTSIZE", (0, 0), (-1, -1), 9),
-            ]))
-            story.append(dim_tbl)
-            story.append(Spacer(1, 4))
-            if r["strengths"]:
-                story.append(Paragraph("优势：" + "、".join(r["strengths"]), styles["Normal"]))
-            if r["risks"]:
-                story.append(Paragraph("风险：" + "、".join(r["risks"]), styles["Normal"]))
-        story.append(Spacer(1, 6))
-
-        # Profitability
-        if gross_margin is not None and net_margin is not None:
-            expense = gross_margin - net_margin
-            detail = f"毛利率 {_fmt(gross_margin, 1)}%，净利率 {_fmt(net_margin, 1)}%，费用消耗率 {_fmt(expense, 1)}%。"
-            if net_margin > 20:
-                detail += " 净利率超过20%属于优质盈利水平，需重点验证高利润是否来自核心业务而非一次性收益。"
-            elif net_margin > 10:
-                detail += " 净利率处于中等偏上水平，建议关注费用率是否有优化空间。"
+                rows.append([label, "-", "-", "-", "-"])
+                continue
+            disp = _fmt_amount(val) if codes[0] in ("TOTAL_REVENUE", "OPERATING_CASH_FLOW") else f"{_fmt(val)}{unit}"
+            if thresholds and better:
+                lbl = _risk_label(val, thresholds, better)
+                if better == "lower":
+                    level = "优秀" if val <= thresholds[0] else ("正常" if val <= thresholds[1] else "偏高")
+                else:
+                    level = "优秀" if val >= thresholds[0] else ("正常" if val >= thresholds[1] else "偏低")
             else:
-                detail += " 净利率偏低，需分析是行业特性还是竞争力不足。"
-            story.append(Paragraph(f"• 盈利质量：{detail}", styles["Normal"]))
+                lbl = "-"
+                level = "-"
+            ind_key_map = {"GROSS_MARGIN": "grossMargin", "NET_MARGIN": "netMargin", "ROE": "roe", "ROA": "roa", "DEBT_ASSET": "debtRatio", "CURRENT_RATIO": "currentRatio", "ASSET_TURNOVER": "assetTurnover"}
+            ind_ref = f"{industry_avg.get(ind_key_map.get(codes[0], ''), '-')}{'%' if unit == '%' else ''}" if codes[0] in ind_key_map else "-"
+            rows.append([label, disp, level, ind_ref, lbl])
+        _metric_table(rows, [doc.width * w for w in [0.22, 0.22, 0.14, 0.22, 0.20]])
+        story.append(Spacer(1, 4))
 
-        # DuPont
-        if roe is not None and roa is not None:
-            detail = f"ROE {_fmt(roe, 1)}%，ROA {_fmt(roa, 1)}%。"
-            if roe > 15 and roa > 8:
-                detail += " 高ROE且高ROA表明企业通过经营能力而非财务杠杆创造回报，这是最健康的盈利模式。"
-            elif roe > 15:
-                detail += " ROE较高但ROA偏低，说明高ROE主要依赖财务杠杆放大，下行期风险会被同步放大。"
-            else:
-                detail += " ROE和ROA均处于一般水平，建议从杜邦三因素中寻找最大改善空间。"
-            story.append(Paragraph(f"• 杜邦分解：{detail}", styles["Normal"]))
-
-        # Financial Health
-        if debt_ratio is not None and current_ratio is not None:
-            detail = f"资产负债率 {_fmt(debt_ratio, 1)}%，流动比率 {_fmt(current_ratio, 2)}。"
-            if debt_ratio < 50 and current_ratio > 1.5:
-                detail += " 财务结构稳健，短期偿债能力充足，企业拥有充足的财务弹性。"
-            elif debt_ratio > 65:
-                detail += " 负债率偏高，需密切关注有息负债占比、短期债务占比和经营性现金流覆盖能力。"
-            else:
-                detail += " 财务结构处于中等水平，建议关注债务期限结构和利率敏感性。"
-            story.append(Paragraph(f"• 财务稳健性：{detail}", styles["Normal"]))
-
-        # Operating Efficiency
-        if asset_turnover is not None:
-            detail = f"总资产周转率 {_fmt(asset_turnover)}。"
-            if inv_turnover is not None:
-                detail += f" 存货周转 {_fmt(inv_turnover)} 次（{365/inv_turnover:.0f}天）。"
-            if recv_turnover is not None:
-                detail += f" 应收周转 {_fmt(recv_turnover)} 次（{365/recv_turnover:.0f}天）。"
-            detail += " 运营效率直接影响现金转化周期——周转越快，企业对外部融资的依赖越低。"
-            story.append(Paragraph(f"• 运营效率：{detail}", styles["Normal"]))
-
-        story.append(Spacer(1, 6))
-
-        # Investment Thesis
-        story.append(Paragraph("投资论点与建议", styles["Heading3"]))
-        if roe is not None and roe > 20:
-            story.append(Paragraph(f"• [看多] ROE {_fmt(roe)}% 显著高于资本成本，企业正在为股东创造超额价值。", styles["Normal"]))
-        if gross_margin is not None and gross_margin > 40:
-            story.append(Paragraph(f"• [看多] 高毛利率 {_fmt(gross_margin)}% 体现强定价权，在通胀环境下具备成本转嫁能力。", styles["Normal"]))
-        if debt_ratio is not None and debt_ratio > 65:
-            story.append(Paragraph(f"• [风险] 高负债率 {_fmt(debt_ratio)}% 在利率上行周期可能侵蚀利润。", styles["Normal"]))
-        if current_ratio is not None and current_ratio < 1.2:
-            story.append(Paragraph(f"• [风险] 流动比率 {_fmt(current_ratio)} 接近警戒线，短期偿债安全边际不足。", styles["Normal"]))
-        if net_margin is not None and net_margin > 15:
-            story.append(Paragraph(f"• [看多] 净利率 {_fmt(net_margin)}% 处于优秀水平。", styles["Normal"]))
-
-        # Composite recommendation from rating engine
-        if _rating is not None:
-            story.append(Paragraph(f"• 综合建议：{_rating['recommendation']}（评级{_rating['grade']} {_rating['total_score']}分）", styles["Normal"]))
-        else:
-            story.append(Paragraph("• 暂无足够数据生成综合评级建议。", styles["Normal"]))
+    # ====== ALL METRICS BY PERIOD ======
+    _section_header("全部指标明细（按报告期）")
+    if not metrics:
+        story.append(_p("暂无财务指标数据"))
     else:
-        story.append(Paragraph("暂无足够数据生成AI洞察，请确保报告已完成分析。", styles["Normal"]))
+        all_periods = sorted(set(m.period_end for m in metrics if m.period_end), reverse=True)
+        for pe in all_periods[:4]:
+            pm = [m for m in metrics if m.period_end == pe]
+            if not pm:
+                continue
+            story.append(_p(f"▸ {pe}", "Heading4"))
+            rows = [["指标", "数值", "单位"]]
+            for m in sorted(pm, key=lambda x: str(x.metric_name or "")):
+                vstr = _fmt_amount(m.value) if m.metric_code in ("TOTAL_REVENUE", "OPERATING_CASH_FLOW", "NET_PROFIT") else _fmt(m.value, 4)
+                rows.append([str(m.metric_name or m.metric_code), vstr, str(m.unit or "")])
+            _metric_table(rows, [doc.width * 0.45, doc.width * 0.30, doc.width * 0.25])
+            story.append(Spacer(1, 4))
 
-    story.append(Spacer(1, 12))
+    # ====== 2. RISK ANALYSIS ======
+    _section_header("二、风险评估")
 
-    # ====== Summary ======
-    story.append(Paragraph("分析总结", styles["Heading2"]))
-    summary_lines: list[str] = []
+    risk_signals: list[tuple[str, list[tuple[list[str], str, str, str, list[float]]]]] = [
+        ("杜邦风险分解", [
+            (["NET_MARGIN"], "净利率", "%", "higher", [5, 2]),
+            (["ASSET_TURNOVER"], "资产周转率", "次", "higher", [0.5, 0.3]),
+            (["DEBT_ASSET"], "权益乘数驱动", "倍", "lower", [3, 5]),
+        ]),
+        ("流动性风险", [
+            (["CURRENT_RATIO"], "流动比率", "倍", "higher", [1.5, 1]),
+            (["QUICK_RATIO"], "速动比率", "倍", "higher", [1, 0.5]),
+            (["DEBT_ASSET"], "资产负债率", "%", "lower", [60, 75]),
+        ]),
+        ("营运风险", [
+            (["INVENTORY_TURNOVER"], "存货周转率", "次", "higher", [4, 2]),
+            (["RECEIVABLE_TURNOVER"], "应收周转率", "次", "higher", [6, 3]),
+        ]),
+        ("增长可持续性", [
+            (["ROE"], "ROE", "%", "higher", [10, 5]),
+        ]),
+    ]
+
+    for sig_name, checks in risk_signals:
+        story.append(_p(f"▸ {sig_name}", "Heading3"))
+        rows = [["指标", "数值", "风险等级", "警戒线", "诊断"]]
+        for codes, label, unit, better, warn in checks:
+            val = _value(codes[0])
+            if val is None:
+                rows.append([label, "-", "-", "-", "数据不足"])
+                continue
+            lbl = _risk_label(val, warn, better)
+            disp = f"{_fmt(val)}{unit}"
+            eq_mult = ""
+            if codes[0] == "DEBT_ASSET" and "杜邦" in sig_name:
+                eq_mult = f"（权益乘数{100/max(1,100-val):.1f}x）"
+            diag = ""
+            if "高" in lbl:
+                diag = "触及警戒线，需重点关注"
+            elif "关注" in lbl:
+                diag = "接近警戒，持续监控"
+            else:
+                diag = "处于安全区间"
+            rows.append([label, disp + eq_mult, lbl, f"{'<' if better=='higher' else '>'}{warn[1]}", diag])
+        _metric_table(rows, [doc.width * w for w in [0.18, 0.22, 0.14, 0.18, 0.28]])
+        story.append(Spacer(1, 3))
+
+    # Alert summary
+    if alerts:
+        story.append(_p("▸ 系统风险预警", "Heading3"))
+        for a in alerts:
+            lvl = str(getattr(a, "level", "") or "").upper()
+            ttl = str(getattr(a, "title", "") or "")
+            msg = str(getattr(a, "message", "") or "")
+            clr = CLR_BAD if "HIGH" in lvl else (CLR_WARN if "MEDIUM" in lvl else CLR_MUTED)
+            tag = f"[{lvl}]" if lvl else ""
+            story.append(_p(f"{tag} {ttl}"))
+            story.append(_p(f"  {msg}"))
+            story.append(Spacer(1, 2))
+
+    # ====== 3. OPPORTUNITY ======
+    _section_header("三、机会识别")
+
+    opp_signals: list[tuple[str, list[tuple[list[str], str, str, list[float], str, list[str]]]]] = [
+        ("护城河识别", [
+            (["GROSS_MARGIN"], "定价权", "%", [40, 25, 10], "higher", ["强护城河：品牌溢价/技术壁垒", "中等定价权", "定价权弱，价格竞争敏感"]),
+            (["GROSS_MARGIN"], "费用效率", "%", [20, 35, 50], "lower", ["精益运营，成本管控强", "费用效率中等", "费用率偏高"]),
+        ]),
+        ("价值创造", [
+            (["ROE"], "股东回报", "%", [20, 12, 5], "higher", ["卓越：持续创造超额价值", "达标：资本回报合理", "不足：低于资本成本"]),
+            (["ROA"], "资产效率", "%", [8, 4, 1], "higher", ["轻资产高效率", "资产利用正常", "资产产出效率低"]),
+        ]),
+        ("资本优化", [
+            (["DEBT_ASSET"], "杠杆空间", "%", [40, 60, 75], "lower", ["杠杆空间充足", "杠杆适中", "杠杆偏高，融资弹性受限"]),
+            (["CURRENT_RATIO"], "流动性储备", "倍", [3, 2, 1.2], "higher", ["流动性充裕", "流动性适中", "流动性紧张"]),
+        ]),
+    ]
+
+    for opp_name, checks in opp_signals:
+        story.append(_p(f"▸ {opp_name}", "Heading3"))
+        rows = [["指标", "数值", "判定", "诊断"]]
+        for codes, label, unit, thresholds, better, verdicts in checks:
+            val = _value(codes[0])
+            if val is None:
+                rows.append([label, "-", "数据不足", "-"])
+                continue
+            if codes[0] == "GROSS_MARGIN" and label == "费用效率":
+                gm = _value("GROSS_MARGIN")
+                nm = _value("NET_MARGIN")
+                if gm is not None and nm is not None:
+                    val = gm - nm
+                else:
+                    rows.append([label, "-", "数据不足", "-"])
+                    continue
+            disp = f"{_fmt(val)}{unit}"
+            tier = 0
+            if better == "higher":
+                tier = 0 if val >= thresholds[0] else (1 if val >= thresholds[1] else 2)
+            else:
+                tier = 0 if val <= thresholds[0] else (1 if val <= thresholds[1] else 2)
+            rows.append([label, disp, verdicts[tier][:6], verdicts[tier]])
+        _metric_table(rows, [doc.width * w for w in [0.16, 0.16, 0.22, 0.46]])
+        story.append(Spacer(1, 3))
+
+    # ====== 4. AI INSIGHTS ======
+    _section_header("四、AI 综合研判")
+
+    insight_data: list[tuple[str, str, str, str, str]] = []
+
+    if gross_margin is not None and net_margin is not None:
+        exp = gross_margin - net_margin
+        if net_margin > 20:
+            v, detail = "优质盈利", f"费用消耗{exp:.1f}%，利润留存率{net_margin/gross_margin*100:.0f}%，核心业务产出能力强"
+        elif net_margin > 8:
+            v, detail = "盈利中等", f"费用率{exp:.1f}%，{'费用端有优化空间' if exp > 40 else '费用结构可控'}，关注利润率趋势"
+        else:
+            v, detail = "盈利薄弱", f"费用消耗{exp:.1f}%，净利率仅{net_margin:.1f}%，{'接近亏损边缘' if net_margin < 3 else '盈利韧性不足'}"
+        insight_data.append(("盈利质量", f"毛利率{gross_margin:.1f}% | 净利率{net_margin:.1f}%", v, detail))
+
+    if roe is not None and roa is not None:
+        leverage = roe / max(0.1, roa)
+        is_lev = leverage > 3
+        if roe > 15 and not is_lev:
+            v, detail = "健康回报", f"ROE由经营能力驱动(权益乘数{leverage:.1f}x)，盈利模式可持续"
+        elif roe > 8:
+            v, detail = "回报一般", f"权益乘数{leverage:.1f}x，{'高ROE依赖杠杆放大' if is_lev else '经营回报率可接受'}"
+        else:
+            v, detail = "回报不足", f"ROE/ROA均偏低，资本效率待提升"
+        insight_data.append(("资本效率", f"ROE{roe:.1f}% | ROA{roa:.1f}%", v, detail))
+
+    if debt_ratio is not None and current_ratio is not None:
+        if debt_ratio < 40 and current_ratio > 1.5:
+            v, detail = "财务稳健", f"负债率{debt_ratio:.1f}%+流动比率{current_ratio:.2f}，抗风险+扩张能力兼备"
+        elif debt_ratio > 70 or current_ratio < 1:
+            v, detail = "财务承压", f"{'负债率'+str(round(debt_ratio,1))+'%偏高' if debt_ratio>70 else ''}{'流动比率'+str(round(current_ratio,2))+'<1' if current_ratio<1 else ''}"
+        else:
+            v, detail = "中等安全", f"负债率{debt_ratio:.1f}%，流动比率{current_ratio:.2f}，{'关注利息覆盖' if debt_ratio>55 else '结构尚可'}"
+        insight_data.append(("财务安全", f"负债率{debt_ratio:.1f}% | 流动比率{current_ratio:.2f}", v, detail))
+
+    if asset_turnover is not None or inv_turnover is not None or recv_turnover is not None:
+        parts: list[str] = []
+        if asset_turnover is not None:
+            parts.append(f"资产周转{asset_turnover:.2f}次")
+        if inv_turnover is not None:
+            parts.append(f"存货{365/inv_turnover:.0f}天")
+        if recv_turnover is not None:
+            parts.append(f"应收{365/recv_turnover:.0f}天")
+        at_ok = asset_turnover is not None and asset_turnover >= 0.8
+        v = "运营高效" if at_ok else ("运营一般" if asset_turnover and asset_turnover >= 0.4 else "运营低效")
+        detail = "、".join(parts) + ("，周转快资金效率高" if at_ok else "，有改善空间")
+        insight_data.append(("运营效率", " | ".join(parts), v, detail))
+
+    if insight_data:
+        rows = [["维度", "数据", "判定", "诊断"]]
+        for dim, data_str, verdict, detail in insight_data:
+            rows.append([dim, data_str, verdict, detail])
+        _metric_table(rows, [doc.width * w for w in [0.12, 0.28, 0.12, 0.48]])
+        story.append(Spacer(1, 6))
+
+    # Investment signals
+    story.append(_p("▸ 投资信号", "Heading3"))
+    signals: list[tuple[str, str, str]] = []
+    if roe is not None and roe > 15:
+        signals.append(("看多", "ROE优异", f"ROE {roe:.1f}% > 15%，资本回报能力强"))
+    if gross_margin is not None and gross_margin > 40:
+        signals.append(("看多", "定价权强", f"毛利率 {gross_margin:.1f}% > 40%，品牌/技术壁垒明显"))
+    if net_margin is not None and net_margin > 15:
+        signals.append(("看多", "利润率高", f"净利率 {net_margin:.1f}% > 15%，盈利质量优"))
+    if debt_ratio is not None and debt_ratio < 30:
+        signals.append(("看多", "财务弹性", f"负债率 {debt_ratio:.1f}% < 30%，融资空间充足"))
+    if debt_ratio is not None and debt_ratio > 65:
+        signals.append(("风险", "杠杆风险", f"负债率 {debt_ratio:.1f}% > 65%，再融资/利率敏感"))
+    if current_ratio is not None and current_ratio < 1:
+        signals.append(("风险", "流动性风险", f"流动比率 {current_ratio:.2f} < 1，短期偿债缺口"))
+    if net_margin is not None and net_margin < 3:
+        signals.append(("风险", "盈利脆弱", f"净利率 {net_margin:.1f}% < 3%，接近亏损"))
+    if roe is not None and roe < 5:
+        signals.append(("风险", "资本回报不足", f"ROE {roe:.1f}% < 5%，低于资本成本"))
+
+    if signals:
+        rows = [["方向", "信号", "依据"]]
+        for direction, label, text in signals:
+            rows.append([direction, label, text])
+        _metric_table(rows, [doc.width * w for w in [0.10, 0.18, 0.72]])
+    else:
+        story.append(_p("指标数据不足以生成投资信号"))
+
+    # ====== 5. SUMMARY ======
+    _section_header("五、分析总结")
+
+    summary: list[str] = []
     if net_margin is not None:
-        summary_lines.append(f"盈利质量：净利率 {_fmt(net_margin)}%（行业均值 {industry_avg['netMargin']}%）")
+        summary.append(f"净利率 {_fmt(net_margin)}%（行业{industry_avg['netMargin']}%）")
     if roe is not None:
-        summary_lines.append(f"资本回报：ROE {_fmt(roe)}%（行业均值 {industry_avg['roe']}%）")
+        summary.append(f"ROE {_fmt(roe)}%（行业{industry_avg['roe']}%）")
     if debt_ratio is not None:
-        summary_lines.append(f"杠杆水平：资产负债率 {_fmt(debt_ratio)}%（关注 >70% 的再融资压力）")
+        summary.append(f"资产负债率 {_fmt(debt_ratio)}%")
     if current_ratio is not None:
-        summary_lines.append(f"流动性：流动比率 {_fmt(current_ratio)}（关注 <1 的短期偿债风险）")
+        summary.append(f"流动比率 {_fmt(current_ratio)}")
     if asset_turnover is not None:
-        summary_lines.append(f"运营效率：总资产周转率 {_fmt(asset_turnover)}（行业均值 {industry_avg['assetTurnover']}）")
-    if not summary_lines:
-        summary_lines.append("关键指标不足，建议补齐财务数据后再进行结论性判断。")
-    for s in summary_lines:
-        story.append(Paragraph(f"• {s}", styles["Normal"]))
+        summary.append(f"资产周转率 {_fmt(asset_turnover)}")
+    if total_revenue is not None:
+        summary.append(f"营业总收入 {_fmt_amount(total_revenue)}")
+    if operating_cash_flow is not None:
+        summary.append(f"经营现金流 {_fmt_amount(operating_cash_flow)}")
+
+    if summary:
+        for s in summary:
+            story.append(_p(f"  • {s}"))
+    else:
+        story.append(_p("关键指标不足，建议补齐财务数据后再进行结论性判断。"))
+
+    if _rating:
+        story.append(Spacer(1, 6))
+        story.append(_p(f"<b>综合评级：{_rating['grade']}（{_rating['total_score']}/100）— {_rating.get('recommendation', '')}</b>"))
+
+    # ====== DISCLAIMER ======
+    story.append(Spacer(1, 20))
+    _hr()
+    story.append(_p("本报告由 AI 系统自动生成，仅供参考，不构成投资建议。数据来源于公开市场信息，可能存在延迟或偏差。", "Normal"))
+    story.append(_p(f"生成时间：{_fmt_timestamp()}", "Normal"))
 
     doc.build(story)
     return buf.getvalue()
+
+
+def _fmt_timestamp() -> str:
+    import datetime
+    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+
 
 
 @app.get("/api/reports/{report_id}/export/pdf")
@@ -5994,15 +6059,27 @@ def _query_latest_period(market: str, symbol_norm: str) -> tuple[str | None, str
                     pass
 
             ds = None
-            # Take whichever is newer
             candidates = [d for d in [annual_latest_ds, interim_latest_ds] if d]
             if candidates:
                 ds = max(candidates)
 
-            # Note: we do NOT use indicator table to upgrade period_end here.
-            # Even if indicator shows current-year data, statement rows lag behind.
-            # Using a period_end that has no statement data produces incorrect metrics.
-            # The pipeline will still use indicator data for key ratio overrides.
+            # If indicator table has revenue but annual statement lags behind,
+            # the company has published a newer annual report that AkShare hasn't ingested.
+            # Use the expected year as period_end; pipeline will use indicator data for metrics.
+            try:
+                ind_df = ak.stock_hk_financial_indicator_em(symbol=code)
+                if ind_df is not None and not ind_df.empty:
+                    row = ind_df.iloc[0]
+                    rev = row.get("营业总收入")
+                    if rev is not None and float(rev) > 0:
+                        import datetime as _dt
+                        annual_year = int(annual_latest_ds[:4]) if annual_latest_ds else 0
+                        expected = _dt.date.today().year - 1
+                        if expected > annual_year:
+                            ds = f"{expected}-12-31"
+            except Exception:
+                pass
+
             if ds:
                 pt = 'interim' if '-06-30' in ds else 'annual'
                 return ds, pt
