@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { ArrowLeft, FileText, TrendingUp, AlertTriangle, Lightbulb, Brain, Download } from 'lucide-react';
+import { ArrowLeft, FileText, TrendingUp, AlertTriangle, Lightbulb, Brain, Download, ChevronDown, ChevronRight, ArrowUpRight, ArrowDownRight, Minus, ShieldCheck, Zap, Target, Gauge, BarChart3, Activity, Wallet, Castle } from 'lucide-react';
 import { getReportDetail, getReportMetrics, getReportAlerts, getReportCompanyHistory, getReports, reanalyzeReport, type ReportDetail, type Metric, type Alert } from '@/services/api';
 import { computeEnterpriseRating } from '@/services/ratingEngine';
 
@@ -29,6 +29,8 @@ export default function ReportDetailPage() {
   const [companyHistory, setCompanyHistory] = useState<string>('');
   const [companyHistorySource, setCompanyHistorySource] = useState<string>('');
   const [companyWebsite, setCompanyWebsite] = useState<string>('');
+  const [metricsPeriod, setMetricsPeriod] = useState<string>('');
+  const [showAllMetrics, setShowAllMetrics] = useState(false);
 
   async function fetchData() {
       try {
@@ -388,7 +390,7 @@ export default function ReportDetailPage() {
   const prevReceivableTurnover = prevValueByCodes(['RECEIVABLE_TURNOVER']);
 
   return (
-    <div className="p-4 md:p-6 flex flex-col gap-4 max-w-2xl mx-auto pb-[calc(env(safe-area-inset-bottom,0px)+140px)] animate-fade-in">
+    <div className="p-4 md:p-6 flex flex-col gap-4 max-w-2xl mx-auto pb-4 animate-fade-in">
       {/* Header with Back Button */}
       <div className="flex items-center gap-3">
         <button
@@ -744,287 +746,332 @@ export default function ReportDetailPage() {
 
       {activeTab === 'metrics' && (
         <div className="flex flex-col gap-4">
-          <div className="card-surface p-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <div className="text-[#FAFAF9] text-sm font-semibold">核心指标（同比上一年）</div>
-                <div className="text-[var(--text-secondary)] text-xs mt-1">左右滑动查看更多列</div>
+          {/* Period selector for multi-period data */}
+          {(() => {
+            const allPeriods = Array.from(new Set(metrics.map(m => m.period_end).filter(Boolean))).sort().reverse();
+            if (allPeriods.length <= 1) return null;
+            return (
+              <div className="card-surface p-3">
+                <div className="flex items-center gap-2 overflow-x-auto -mx-1 px-1">
+                  <span className="text-[var(--text-muted)] text-xs shrink-0">报告期</span>
+                  {allPeriods.map(p => (
+                    <button
+                      key={p}
+                      onClick={() => { setMetricsPeriod(p); }}
+                      className={`px-3 py-1.5 rounded-full text-xs font-medium whitespace-nowrap transition-all ${
+                        metricsPeriod === p
+                          ? 'bg-[var(--text-primary)] text-[var(--bg-page)]'
+                          : 'bg-[var(--bg-page)] text-[var(--text-secondary)] border border-[var(--border-color)]'
+                      }`}
+                    >
+                      {p.slice(0, 7)}
+                    </button>
+                  ))}
+                </div>
               </div>
-              <div className="text-[var(--text-secondary)] text-xs">期末：{report.period_end}</div>
-            </div>
+            );
+          })()}
 
-            <div className="overflow-x-auto -mx-4 px-4 mt-3">
-              <table className="min-w-[720px] w-full border-separate border-spacing-y-2">
-                <thead>
-                  <tr className="text-left text-[var(--text-secondary)] text-xs">
-                    <th className="px-3">指标</th>
-                    <th className="px-3">本期</th>
-                    <th className="px-3">单位</th>
-                    <th className="px-3">上年同期</th>
-                    <th className="px-3">同比</th>
-                    <th className="px-3">解读</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr className="bg-[#0B0B0E]">
-                    <td className="px-3 py-3 rounded-l-xl text-[#FAFAF9] text-sm">毛利率</td>
-                    <td className="px-3 py-3 text-[#FAFAF9] text-sm">{fmtMetric(metricValue(grossMargin))}%</td>
-                    <td className="px-3 py-3 text-[#6B6B70] text-sm">%</td>
-                    <td className="px-3 py-3 text-[#6B6B70] text-sm">{fmtMetric(prevGrossMargin)}%</td>
-                    <td className="px-3 py-3">{(() => { const cmp = compareYoY(metricValue(grossMargin), prevGrossMargin); return cmp.hasValue ? diffBadge(cmp, 'higher') : '-'; })()}</td>
-                    <td className="px-3 py-3 rounded-r-xl text-[#6B6B70] text-sm">产品/服务定价与成本控制能力</td>
-                  </tr>
-                  <tr className="bg-[#0B0B0E]">
-                    <td className="px-3 py-3 rounded-l-xl text-[#FAFAF9] text-sm">净利率</td>
-                    <td className="px-3 py-3 text-[#FAFAF9] text-sm">{fmtMetric(metricValue(netMargin))}%</td>
-                    <td className="px-3 py-3 text-[#6B6B70] text-sm">%</td>
-                    <td className="px-3 py-3 text-[#6B6B70] text-sm">{fmtMetric(prevNetMargin)}%</td>
-                    <td className="px-3 py-3">{(() => { const cmp = compareYoY(metricValue(netMargin), prevNetMargin); return cmp.hasValue ? diffBadge(cmp, 'higher') : '-'; })()}</td>
-                    <td className="px-3 py-3 rounded-r-xl text-[#6B6B70] text-sm">费用结构与经营效率综合体现</td>
-                  </tr>
-                  <tr className="bg-[#0B0B0E]">
-                    <td className="px-3 py-3 rounded-l-xl text-[#FAFAF9] text-sm">ROE</td>
-                    <td className="px-3 py-3 text-[#FAFAF9] text-sm">{fmtMetric(metricValue(roe))}%</td>
-                    <td className="px-3 py-3 text-[#6B6B70] text-sm">%</td>
-                    <td className="px-3 py-3 text-[#6B6B70] text-sm">{fmtMetric(prevRoe)}%</td>
-                    <td className="px-3 py-3">{(() => { const cmp = compareYoY(metricValue(roe), prevRoe); return cmp.hasValue ? diffBadge(cmp, 'higher') : '-'; })()}</td>
-                    <td className="px-3 py-3 rounded-r-xl text-[#6B6B70] text-sm">股东资本回报能力（杜邦核心）</td>
-                  </tr>
-                  <tr className="bg-[#0B0B0E]">
-                    <td className="px-3 py-3 rounded-l-xl text-[#FAFAF9] text-sm">ROA</td>
-                    <td className="px-3 py-3 text-[#FAFAF9] text-sm">{fmtMetric(metricValue(roa))}%</td>
-                    <td className="px-3 py-3 text-[#6B6B70] text-sm">%</td>
-                    <td className="px-3 py-3 text-[#6B6B70] text-sm">{fmtMetric(prevRoa)}%</td>
-                    <td className="px-3 py-3">{(() => { const cmp = compareYoY(metricValue(roa), prevRoa); return cmp.hasValue ? diffBadge(cmp, 'higher') : '-'; })()}</td>
-                    <td className="px-3 py-3 rounded-r-xl text-[#6B6B70] text-sm">资产创造利润的效率</td>
-                  </tr>
-                  <tr className="bg-[#0B0B0E]">
-                    <td className="px-3 py-3 rounded-l-xl text-[#FAFAF9] text-sm">流动比率</td>
-                    <td className="px-3 py-3 text-[#FAFAF9] text-sm">{fmtMetric(metricValue(currentRatio))}</td>
-                    <td className="px-3 py-3 text-[#6B6B70] text-sm">倍</td>
-                    <td className="px-3 py-3 text-[#6B6B70] text-sm">{fmtMetric(prevCurrentRatio)}</td>
-                    <td className="px-3 py-3">{(() => { const cmp = compareYoY(metricValue(currentRatio), prevCurrentRatio); return cmp.hasValue ? diffBadge(cmp, 'higher') : '-'; })()}</td>
-                    <td className="px-3 py-3 rounded-r-xl text-[#6B6B70] text-sm">短期偿债安全边际</td>
-                  </tr>
-                  <tr className="bg-[#0B0B0E]">
-                    <td className="px-3 py-3 rounded-l-xl text-[#FAFAF9] text-sm">速动比率</td>
-                    <td className="px-3 py-3 text-[#FAFAF9] text-sm">{fmtMetric(metricValue(quickRatio))}</td>
-                    <td className="px-3 py-3 text-[#6B6B70] text-sm">倍</td>
-                    <td className="px-3 py-3 text-[#6B6B70] text-sm">{fmtMetric(prevQuickRatio)}</td>
-                    <td className="px-3 py-3">{(() => { const cmp = compareYoY(metricValue(quickRatio), prevQuickRatio); return cmp.hasValue ? diffBadge(cmp, 'higher') : '-'; })()}</td>
-                    <td className="px-3 py-3 rounded-r-xl text-[#6B6B70] text-sm">剔除存货后的短债覆盖</td>
-                  </tr>
-                  <tr className="bg-[#0B0B0E]">
-                    <td className="px-3 py-3 rounded-l-xl text-[#FAFAF9] text-sm">资产负债率</td>
-                    <td className="px-3 py-3 text-[#FAFAF9] text-sm">{fmtMetric(metricValue(debtRatio))}%</td>
-                    <td className="px-3 py-3 text-[#6B6B70] text-sm">%</td>
-                    <td className="px-3 py-3 text-[#6B6B70] text-sm">{fmtMetric(prevDebtRatio)}%</td>
-                    <td className="px-3 py-3">{(() => { const cmp = compareYoY(metricValue(debtRatio), prevDebtRatio); return cmp.hasValue ? diffBadge(cmp, 'lower') : '-'; })()}</td>
-                    <td className="px-3 py-3 rounded-r-xl text-[#6B6B70] text-sm">杠杆水平与财务弹性</td>
-                  </tr>
-                  <tr className="bg-[#0B0B0E]">
-                    <td className="px-3 py-3 rounded-l-xl text-[#FAFAF9] text-sm">总资产周转率</td>
-                    <td className="px-3 py-3 text-[#FAFAF9] text-sm">{fmtMetric(metricValue(assetTurnover))}</td>
-                    <td className="px-3 py-3 text-[#6B6B70] text-sm">次</td>
-                    <td className="px-3 py-3 text-[#6B6B70] text-sm">{fmtMetric(prevAssetTurnover)}</td>
-                    <td className="px-3 py-3">{(() => { const cmp = compareYoY(metricValue(assetTurnover), prevAssetTurnover); return cmp.hasValue ? diffBadge(cmp, 'higher') : '-'; })()}</td>
-                    <td className="px-3 py-3 rounded-r-xl text-[#6B6B70] text-sm">资产利用效率与周转速度</td>
-                  </tr>
-                  <tr className="bg-[#0B0B0E]">
-                    <td className="px-3 py-3 rounded-l-xl text-[#FAFAF9] text-sm">存货周转率</td>
-                    <td className="px-3 py-3 text-[#FAFAF9] text-sm">{fmtMetric(metricValue(inventoryTurnover))}</td>
-                    <td className="px-3 py-3 text-[#6B6B70] text-sm">次</td>
-                    <td className="px-3 py-3 text-[#6B6B70] text-sm">{fmtMetric(prevInventoryTurnover)}</td>
-                    <td className="px-3 py-3">{(() => { const cmp = compareYoY(metricValue(inventoryTurnover), prevInventoryTurnover); return cmp.hasValue ? diffBadge(cmp, 'higher') : '-'; })()}</td>
-                    <td className="px-3 py-3 rounded-r-xl text-[#6B6B70] text-sm">库存管理效率（缺行业数据）</td>
-                  </tr>
-                  <tr className="bg-[#0B0B0E]">
-                    <td className="px-3 py-3 rounded-l-xl text-[#FAFAF9] text-sm">应收周转率</td>
-                    <td className="px-3 py-3 text-[#FAFAF9] text-sm">{fmtMetric(metricValue(receivableTurnover))}</td>
-                    <td className="px-3 py-3 text-[#6B6B70] text-sm">次</td>
-                    <td className="px-3 py-3 text-[#6B6B70] text-sm">{fmtMetric(prevReceivableTurnover)}</td>
-                    <td className="px-3 py-3">{(() => { const cmp = compareYoY(metricValue(receivableTurnover), prevReceivableTurnover); return cmp.hasValue ? diffBadge(cmp, 'higher') : '-'; })()}</td>
-                    <td className="px-3 py-3 rounded-r-xl text-[#6B6B70] text-sm">回款与信用政策效果（缺行业数据）</td>
-                  </tr>
-                  <tr className="bg-[#0B0B0E]">
-                    <td className="px-3 py-3 rounded-l-xl text-[#FAFAF9] text-sm">营业总收入</td>
-                    <td className="px-3 py-3 text-[#FAFAF9] text-sm">{fmtAmount(metricValue(totalRevenue))}</td>
-                    <td className="px-3 py-3 text-[#6B6B70] text-sm">元</td>
-                    <td className="px-3 py-3 text-[#6B6B70] text-sm">{fmtAmount(prevRevenue)}</td>
-                    <td className="px-3 py-3">{(() => { const cmp = compareYoY(metricValue(totalRevenue), prevRevenue); return cmp.hasValue ? diffBadge(cmp, 'higher') : '-'; })()}</td>
-                    <td className="px-3 py-3 rounded-r-xl text-[#6B6B70] text-sm">规模增长与市场扩张能力</td>
-                  </tr>
-                  <tr className="bg-[#0B0B0E]">
-                    <td className="px-3 py-3 rounded-l-xl text-[#FAFAF9] text-sm">经营现金流量净额</td>
-                    <td className="px-3 py-3 text-[#FAFAF9] text-sm">{fmtAmount(metricValue(operatingCashFlow))}</td>
-                    <td className="px-3 py-3 text-[#6B6B70] text-sm">元</td>
-                    <td className="px-3 py-3 text-[#6B6B70] text-sm">{fmtAmount(prevOperatingCashFlow)}</td>
-                    <td className="px-3 py-3">{(() => { const cmp = compareYoY(metricValue(operatingCashFlow), prevOperatingCashFlow); return cmp.hasValue ? diffBadge(cmp, 'higher') : '-'; })()}</td>
-                    <td className="px-3 py-3 rounded-r-xl text-[#6B6B70] text-sm">盈利含金量与回款质量</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
+          {/* Core Metrics - card-style mobile layout */}
+          {(() => {
+            const periodMetrics = metricsPeriod
+              ? metrics.filter(m => m.period_end === metricsPeriod)
+              : latestMetrics;
+            const mv = (codes: string[]) => { const hit = periodMetrics.find(m => codes.includes(m.metric_code)); return hit?.value == null ? null : Number(hit.value); };
+            const allPeriods = Array.from(new Set(metrics.map(m => m.period_end).filter(Boolean))).sort().reverse();
+            const currentPeriod = metricsPeriod || report.period_end;
 
+            type MetricDef = { codes: string[]; label: string; unit: string; betterWhen: 'higher'|'lower'; category: string; industryKey?: string; thresholds?: [number, number, number] };
+            const defs: MetricDef[] = [
+              { codes: ['GROSS_MARGIN'], label: '毛利率', unit: '%', betterWhen: 'higher', category: '盈利', industryKey: 'grossMargin', thresholds: [40, 20, 0] },
+              { codes: ['NET_MARGIN'], label: '净利率', unit: '%', betterWhen: 'higher', category: '盈利', industryKey: 'netMargin', thresholds: [20, 10, 0] },
+              { codes: ['ROE'], label: 'ROE', unit: '%', betterWhen: 'higher', category: '盈利', industryKey: 'roe', thresholds: [20, 10, 0] },
+              { codes: ['ROA'], label: 'ROA', unit: '%', betterWhen: 'higher', category: '盈利', industryKey: 'roa', thresholds: [10, 5, 0] },
+              { codes: ['CURRENT_RATIO'], label: '流动比率', unit: '倍', betterWhen: 'higher', category: '偿债', industryKey: 'currentRatio', thresholds: [2, 1, 0] },
+              { codes: ['QUICK_RATIO'], label: '速动比率', unit: '倍', betterWhen: 'higher', category: '偿债', thresholds: [1.5, 1, 0] },
+              { codes: ['DEBT_ASSET'], label: '资产负债率', unit: '%', betterWhen: 'lower', category: '偿债', industryKey: 'debtRatio', thresholds: [30, 60, 80] },
+              { codes: ['ASSET_TURNOVER'], label: '总资产周转率', unit: '次', betterWhen: 'higher', category: '营运', industryKey: 'assetTurnover', thresholds: [1, 0.5, 0] },
+              { codes: ['INVENTORY_TURNOVER'], label: '存货周转率', unit: '次', betterWhen: 'higher', category: '营运', thresholds: [8, 4, 0] },
+              { codes: ['RECEIVABLE_TURNOVER'], label: '应收周转率', unit: '次', betterWhen: 'higher', category: '营运', thresholds: [10, 6, 0] },
+              { codes: ['TOTAL_REVENUE', 'IS.REVENUE'], label: '营业总收入', unit: '', betterWhen: 'higher', category: '规模', thresholds: undefined },
+              { codes: ['OPERATING_CASH_FLOW', 'CF.CFO'], label: '经营现金流净额', unit: '', betterWhen: 'higher', category: '规模', thresholds: undefined },
+            ];
+
+            const catOrder = ['盈利', '偿债', '营运', '规模'];
+            const catIcon: Record<string, React.ReactNode> = { '盈利': <Zap size={14} />, '偿债': <ShieldCheck size={14} />, '营运': <Gauge size={14} />, '规模': <BarChart3 size={14} /> };
+            const catColor: Record<string, string> = { '盈利': 'text-emerald-400', '偿债': 'text-amber-400', '营运': 'text-indigo-400', '规模': 'text-sky-400' };
+
+            const yoyVal = (codes: string[]) => {
+              for (const c of codes) { const v = prevMetricMap[c]; if (v != null && !Number.isNaN(v)) return Number(v); }
+              return null;
+            };
+
+            const scoreBar = (val: number, thresholds: [number, number, number], betterWhen: 'higher'|'lower') => {
+              if (betterWhen === 'lower') {
+                const pct = val <= thresholds[0] ? 90 : val <= thresholds[1] ? 60 : val <= thresholds[2] ? 35 : 10;
+                const color = pct >= 70 ? 'bg-emerald-500' : pct >= 40 ? 'bg-amber-500' : 'bg-red-500';
+                return { pct, color };
+              }
+              const pct = val >= thresholds[0] ? 90 : val >= thresholds[1] ? 60 : val >= thresholds[2] ? 35 : 10;
+              const color = pct >= 70 ? 'bg-emerald-500' : pct >= 40 ? 'bg-amber-500' : 'bg-red-500';
+              return { pct, color };
+            };
+
+            const industryDiff = (val: number, key?: string) => {
+              if (!key) return null;
+              const avg = (industryAvg as Record<string, number>)[key];
+              if (avg == null) return null;
+              return val - avg;
+            };
+
+            const prevPeriodForMetrics = prevPeriod || allPeriods.find(p => p < currentPeriod);
+
+            return catOrder.map(cat => {
+              const items = defs.filter(d => d.category === cat);
+              if (items.length === 0) return null;
+              return (
+                <div key={cat} className="card-surface p-4">
+                  <div className="flex items-center gap-2 mb-3">
+                    <span className={catColor[cat]}>{catIcon[cat]}</span>
+                    <span className="text-[#FAFAF9] text-sm font-semibold">{cat}指标</span>
+                    {prevPeriodForMetrics && <span className="text-[var(--text-muted)] text-[10px] ml-auto">同比 {prevPeriodForMetrics?.slice(0,7)}</span>}
+                  </div>
+                  <div className="space-y-2">
+                    {items.map(def => {
+                      const val = mv(def.codes);
+                      const prev = yoyVal(def.codes);
+                      const hasVal = val != null;
+                      const hasPrev = prev != null;
+                      const cmp = hasVal && hasPrev && Number(prev) !== 0 ? ((val! - prev) / Math.abs(prev)) * 100 : null;
+                      const indDiff = hasVal ? industryDiff(val!, def.industryKey) : null;
+                      const bar = hasVal && def.thresholds ? scoreBar(val!, def.thresholds, def.betterWhen) : null;
+                      const fmtVal = def.codes[0] === 'TOTAL_REVENUE' || def.codes[0] === 'OPERATING_CASH_FLOW'
+                        ? fmtAmount(val) : fmtMetric(val);
+                      const fmtPrev = def.codes[0] === 'TOTAL_REVENUE' || def.codes[0] === 'OPERATING_CASH_FLOW'
+                        ? fmtAmount(prev) : fmtMetric(prev);
+                      return (
+                        <div key={def.codes[0]} className="bg-[var(--bg-page)] rounded-xl p-3">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[var(--text-secondary)] text-xs">{def.label}</span>
+                            <span className="text-[#FAFAF9] text-lg font-bold tracking-tight">{hasVal ? fmtVal : '-'}</span>
+                          </div>
+                          {hasVal && (
+                            <div className="mt-2">
+                              {bar && (
+                                <div className="h-1.5 bg-black/30 rounded-full overflow-hidden mb-1.5">
+                                  <div className={`h-full rounded-full ${bar.color}`} style={{ width: `${bar.pct}%`, transition: 'width 0.5s ease' }} />
+                                </div>
+                              )}
+                              <div className="flex items-center justify-between text-[10px]">
+                                <div className="flex items-center gap-2">
+                                  {hasPrev && (
+                                    <span className="text-[var(--text-muted)]">上年 {fmtPrev}{def.unit ? ` ${def.unit}` : ''}</span>
+                                  )}
+                                  {cmp != null && (
+                                    <span className={`flex items-center gap-0.5 font-medium ${
+                                      (def.betterWhen === 'higher' ? cmp > 0 : cmp < 0) ? 'text-emerald-400' :
+                                      (def.betterWhen === 'higher' ? cmp < 0 : cmp > 0) ? 'text-red-400' : 'text-zinc-500'
+                                    }`}>
+                                      {cmp > 0 ? <ArrowUpRight size={10} /> : cmp < 0 ? <ArrowDownRight size={10} /> : <Minus size={10} />}
+                                      {cmp > 0 ? '+' : ''}{cmp.toFixed(1)}%
+                                    </span>
+                                  )}
+                                </div>
+                                {indDiff != null && (
+                                  <span className={`font-medium ${
+                                    (def.betterWhen === 'higher' ? indDiff > 0 : indDiff < 0) ? 'text-emerald-400' :
+                                    (def.betterWhen === 'higher' ? indDiff < 0 : indDiff > 0) ? 'text-red-400' : 'text-zinc-500'
+                                  }`}>
+                                    {def.betterWhen === 'lower' ? '低于' : indDiff > 0 ? '高于' : indDiff < 0 ? '低于' : '持平'}行业 {Math.abs(indDiff).toFixed(1)}{def.unit}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            });
+          })()}
+
+          {/* All metrics by period - grouped list */}
           <div className="card-surface p-4">
-            <div className="text-[#FAFAF9] text-sm font-semibold">全部指标（按报告期）</div>
-            <div className="text-[var(--text-secondary)] text-xs mt-1">支持横向滚动查看较长字段</div>
-            <div className="overflow-x-auto -mx-4 px-4 mt-3">
-              <table className="min-w-[680px] w-full border-separate border-spacing-y-2">
-                <thead>
-                  <tr className="text-left text-[var(--text-secondary)] text-xs">
-                    <th className="px-3">指标</th>
-                    <th className="px-3">值</th>
-                    <th className="px-3">单位</th>
-                    <th className="px-3">报告期</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {metrics.length > 0 ? metrics
-                    .slice()
-                    .sort((a, b) => (b.period_end || '').localeCompare(a.period_end || ''))
-                    .map((m, idx) => (
-                      <tr key={idx} className="bg-[#0B0B0E]">
-                        <td className="px-3 py-3 rounded-l-xl text-[#FAFAF9] text-sm">{m.metric_name}</td>
-                        <td className="px-3 py-3 text-[#FAFAF9] text-sm">{m.value == null ? '-' : m.value.toFixed(2)}</td>
-                        <td className="px-3 py-3 text-[#6B6B70] text-sm">{m.unit || ''}</td>
-                        <td className="px-3 py-3 rounded-r-xl text-[#6B6B70] text-sm">{m.period_end}</td>
-                      </tr>
-                    ))
-                    : (
-                      <tr className="bg-[#0B0B0E]">
-                        <td className="px-3 py-3 rounded-xl text-[#6B6B70] text-sm" colSpan={4}>暂无财务指标数据</td>
-                      </tr>
-                    )}
-                </tbody>
-              </table>
-            </div>
+            <button onClick={() => setShowAllMetrics(!showAllMetrics)} className="flex items-center justify-between w-full">
+              <div className="text-[#FAFAF9] text-sm font-semibold">全部指标明细</div>
+              {showAllMetrics ? <ChevronDown size={16} className="text-[var(--text-muted)]" /> : <ChevronRight size={16} className="text-[var(--text-muted)]" />}
+            </button>
+            {showAllMetrics && (
+              <div className="mt-3 space-y-4">
+                {(() => {
+                  const periods = Array.from(new Set(metrics.map(m => m.period_end).filter(Boolean))).sort().reverse();
+                  if (periods.length === 0) return <div className="text-[#6B6B70] text-sm">暂无财务指标数据</div>;
+                  return periods.map(pe => {
+                    const pMetrics = metrics.filter(m => m.period_end === pe);
+                    return (
+                      <div key={pe}>
+                        <div className="text-[var(--text-primary)] text-xs font-semibold mb-2 pb-1 border-b border-[var(--border-color)]">{pe}</div>
+                        <div className="space-y-1">
+                          {pMetrics.map((m, i) => (
+                            <div key={i} className="flex items-center justify-between py-1.5 px-2 rounded-lg hover:bg-[var(--bg-page)]">
+                              <span className="text-[var(--text-secondary)] text-xs">{m.metric_name}</span>
+                              <div className="flex items-center gap-2">
+                                <span className="text-[#FAFAF9] text-xs font-medium">{m.value == null ? '-' : (m.metric_code === 'TOTAL_REVENUE' || m.metric_code === 'OPERATING_CASH_FLOW' || m.metric_code === 'NET_PROFIT' ? fmtAmount(m.value) : m.value.toFixed(4))}</span>
+                                {m.unit && <span className="text-[var(--text-muted)] text-[10px]">{m.unit}</span>}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  });
+                })()}
+              </div>
+            )}
           </div>
         </div>
       )}
 
       {activeTab === 'risks' && (
         <div className="flex flex-col gap-3">
-          {/* Professional Risk Framework */}
-          <div className="card-surface p-4">
-            <div className="text-[#FAFAF9] text-sm font-semibold">专业风险评估框架</div>
-            <div className="text-[var(--text-secondary)] text-xs mt-1">参考穆迪/标普评级方法论，从六大维度系统评估企业风险</div>
-          </div>
+          {(() => {
+            type SignalDef = {
+              id: string; label: string; icon: React.ReactNode; color: string;
+              metrics: { codes: string[]; label: string; unit: string; betterWhen: 'higher'|'lower'; warn: [number, number]; info: string }[];
+            };
+            const signals: SignalDef[] = [
+              {
+                id: 'dupont', label: '杜邦风险分解', icon: <Activity size={14} />, color: 'text-indigo-400',
+                metrics: [
+                  { codes: ['NET_MARGIN'], label: '净利率', unit: '%', betterWhen: 'higher', warn: [5, 2], info: '净利率<{w2}%→盈利不可持续；<{w1}%→依赖非经常性损益风险高' },
+                  { codes: ['ASSET_TURNOVER'], label: '资产周转率', unit: '次', betterWhen: 'higher', warn: [0.5, 0.3], info: '周转率<{w2}→产能过剩或资产虚增' },
+                  { codes: ['DEBT_ASSET'], label: '权益乘数驱动', unit: '倍', betterWhen: 'lower', warn: [3, 5], info: '权益乘数>{w2}x→高杠杆放大下行风险' },
+                ],
+              },
+              {
+                id: 'liquidity', label: '流动性风险', icon: <ShieldCheck size={14} />, color: 'text-amber-400',
+                metrics: [
+                  { codes: ['CURRENT_RATIO'], label: '流动比率', unit: '倍', betterWhen: 'higher', warn: [1.5, 1], info: '低于1→短期偿债缺口；1-1.5→安全边际不足' },
+                  { codes: ['QUICK_RATIO'], label: '速动比率', unit: '倍', betterWhen: 'higher', warn: [1, 0.5], info: '低于0.5→依赖存货偿债，流动性紧张' },
+                  { codes: ['DEBT_ASSET'], label: '资产负债率', unit: '%', betterWhen: 'lower', warn: [60, 75], info: '>{w2}%→再融资风险/评级承压' },
+                ],
+              },
+              {
+                id: 'operating', label: '营运风险', icon: <Gauge size={14} />, color: 'text-emerald-400',
+                metrics: [
+                  { codes: ['INVENTORY_TURNOVER'], label: '存货周转率', unit: '次', betterWhen: 'higher', warn: [4, 2], info: '低于{w2}次→存货跌价/滞销风险' },
+                  { codes: ['RECEIVABLE_TURNOVER'], label: '应收周转率', unit: '次', betterWhen: 'higher', warn: [6, 3], info: '低于{w2}次→回款超120天，坏账风险升' },
+                ],
+              },
+              {
+                id: 'growth', label: '增长可持续性', icon: <Target size={14} />, color: 'text-red-400',
+                metrics: [
+                  { codes: ['ROE'], label: 'ROE', unit: '%', betterWhen: 'higher', warn: [10, 5], info: 'ROE<{w2}%→资本回报不足以支撑内生增长' },
+                  { codes: ['GROSS_MARGIN','NET_MARGIN'], label: '利润率趋势', unit: '%', betterWhen: 'higher', warn: [15, 5], info: '净利率<{w2}%→内生增长受限，依赖外部融资' },
+                ],
+              },
+            ];
 
-          {/* 1. DuPont Decomposition Risk */}
-          <div className="card-surface p-4">
-            <div className="flex items-center gap-2 mb-2">
-              <div className="w-6 h-6 rounded bg-indigo-500/20 flex items-center justify-center text-xs font-bold text-indigo-400">1</div>
-              <div className="text-[#FAFAF9] text-sm font-semibold">杜邦分解分析 (DuPont Analysis)</div>
-            </div>
-            <div className="text-[var(--text-muted)] text-xs mb-3">拆解ROE驱动因素：利润率 × 周转率 × 权益乘数，识别盈利质量风险</div>
-            <div className="space-y-2">
-              <div className="bg-[var(--bg-page)] rounded-[var(--radius-sm)] p-3">
-                <div className="text-[var(--text-secondary)] text-xs font-medium">净利率驱动</div>
-                <div className="text-[var(--text-secondary)] text-xs mt-1">
-                  {metricValue(netMargin) != null
-                    ? `净利率 ${fmtMetric(metricValue(netMargin))}%${metricValue(netMargin)! > industryAvg.netMargin ? '，高于行业均值，但需警惕是否依赖非经常性损益（资产处置、政府补贴、投资收益）支撑，这类利润不可持续。' : '，低于行业均值，表明费用控制或定价能力存在压力，需关注销售费用率、管理费用率的变动趋势。'}`
-                    : '净利率数据缺失，无法进行杜邦分解。'}
-                </div>
-              </div>
-              <div className="bg-[var(--bg-page)] rounded-[var(--radius-sm)] p-3">
-                <div className="text-[var(--text-secondary)] text-xs font-medium">资产周转驱动</div>
-                <div className="text-[var(--text-secondary)] text-xs mt-1">
-                  {metricValue(assetTurnover) != null
-                    ? `总资产周转率 ${fmtMetric(metricValue(assetTurnover))}${metricValue(assetTurnover)! < industryAvg.assetTurnover ? '，低于行业水平，可能存在产能过剩、固定资产利用率不足或应收/存货占比过高的问题，需结合资本开支计划评估。' : '，处于行业正常水平，资产利用效率尚可，但仍需关注是否存在商誉等无形资产虚增总资产的情况。'}`
-                    : '周转率数据缺失。'}
-                </div>
-              </div>
-              <div className="bg-[var(--bg-page)] rounded-[var(--radius-sm)] p-3">
-                <div className="text-[var(--text-secondary)] text-xs font-medium">财务杠杆驱动</div>
-                <div className="text-[var(--text-secondary)] text-xs mt-1">
-                  {metricValue(debtRatio) != null
-                    ? `资产负债率 ${fmtMetric(metricValue(debtRatio))}%，权益乘数约 ${(100 / Math.max(1, 100 - metricValue(debtRatio)!)).toFixed(2)}x。${metricValue(debtRatio)! > 60 ? '高杠杆虽可放大ROE，但在利率上行周期或营收下滑时，利息覆盖倍数可能快速恶化，形成"杠杆陷阱"。' : '杠杆水平适中，财务弹性较好，但需评估是否存在未充分利用低成本债务融资的机会成本。'}`
-                    : '负债率数据缺失。'}
-                </div>
-              </div>
-            </div>
-          </div>
+            const mv = (codes: string[]) => { const hit = latestMetrics.find(m => codes.includes(m.metric_code)); return hit?.value == null ? null : Number(hit.value); };
+            const prevV = (codes: string[]) => { for (const c of codes) { const v = prevMetricMap[c]; if (v != null && !Number.isNaN(v)) return Number(v); } return null; };
 
-          {/* 2. Liquidity & Solvency */}
-          <div className="card-surface p-4">
-            <div className="flex items-center gap-2 mb-2">
-              <div className="w-6 h-6 rounded bg-amber-500/20 flex items-center justify-center text-xs font-bold text-amber-400">2</div>
-              <div className="text-[#FAFAF9] text-sm font-semibold">流动性与偿债能力 (Liquidity & Solvency)</div>
-            </div>
-            <div className="text-[var(--text-muted)] text-xs mb-3">参考Altman Z-Score模型思路，评估短期偿债安全边际与破产风险</div>
-            <div className="space-y-2">
-              <div className="bg-[var(--bg-page)] rounded-[var(--radius-sm)] p-3">
-                <div className="text-[var(--text-secondary)] text-xs font-medium">短期偿债压力</div>
-                <div className="text-[var(--text-secondary)] text-xs mt-1">
-                  {metricValue(currentRatio) != null && metricValue(quickRatio) != null
-                    ? `流动比率 ${fmtMetric(metricValue(currentRatio))}，速动比率 ${fmtMetric(metricValue(quickRatio))}。${metricValue(currentRatio)! < 1 ? '流动资产不足以覆盖流动负债，存在短期偿债缺口。若叠加应收账款回收周期延长，可能触发流动性危机。建议关注银行授信额度和短期融资渠道。' : metricValue(currentRatio)! > 3 ? '流动比率偏高，虽然偿债无忧，但大量资金闲置可能拉低资本回报率，存在资金使用效率问题。' : '短期偿债能力处于合理区间，但需持续监控应收账款账龄和存货跌价风险。'}`
-                    : metricValue(currentRatio) != null
-                      ? `流动比率 ${fmtMetric(metricValue(currentRatio))}。${metricValue(currentRatio)! < 1 ? '低于警戒线，短期偿债压力较大。' : '短期偿债能力尚可。'}`
-                      : '流动性数据缺失，无法评估偿债能力。'}
-                </div>
-              </div>
-              <div className="bg-[var(--bg-page)] rounded-[var(--radius-sm)] p-3">
-                <div className="text-[var(--text-secondary)] text-xs font-medium">资本结构稳定性</div>
-                <div className="text-[var(--text-secondary)] text-xs mt-1">
-                  {metricValue(debtRatio) != null
-                    ? `资产负债率 ${fmtMetric(metricValue(debtRatio))}%。${metricValue(debtRatio)! > 70 ? '高负债率意味着在经济下行期，企业可能面临银行抽贷、债券评级下调、再融资成本上升等连锁风险。参考标普评级方法论，负债率持续高于70%的企业通常面临投机级评级压力。' : metricValue(debtRatio)! < 30 ? '极低的负债率表明财务极为保守，几乎无债务违约风险，但可能未充分利用税盾效应和低成本融资优化资本结构。' : '负债率处于可控区间，建议关注有息负债占比、债务期限结构以及利息保障倍数的变化趋势。'}`
-                    : '资本结构数据缺失。'}
-                </div>
-              </div>
-            </div>
-          </div>
+            const riskLevel = (val: number, warn: [number, number], betterWhen: 'higher'|'lower') => {
+              if (betterWhen === 'lower') {
+                return val >= warn[1] ? 'high' : val >= warn[0] ? 'medium' : 'low';
+              }
+              return val <= warn[1] ? 'high' : val <= warn[0] ? 'medium' : 'low';
+            };
+            const riskStyle = (level: string) => ({
+              high: { bg: 'bg-red-500/10 border-red-500/30', dot: 'bg-red-500', text: 'text-red-400', label: '高风险' },
+              medium: { bg: 'bg-amber-500/8 border-amber-500/25', dot: 'bg-amber-500', text: 'text-amber-400', label: '关注' },
+              low: { bg: 'bg-emerald-500/5 border-emerald-500/15', dot: 'bg-emerald-500', text: 'text-emerald-400', label: '安全' },
+            }[level] || { bg: 'bg-zinc-500/5', dot: 'bg-zinc-500', text: 'text-zinc-400', label: '-' });
 
-          {/* 3. Operating Efficiency Risk */}
-          <div className="card-surface p-4">
-            <div className="flex items-center gap-2 mb-2">
-              <div className="w-6 h-6 rounded bg-emerald-500/20 flex items-center justify-center text-xs font-bold text-emerald-400">3</div>
-              <div className="text-[#FAFAF9] text-sm font-semibold">营运质量与周转风险 (Operating Quality)</div>
-            </div>
-            <div className="text-[var(--text-muted)] text-xs mb-3">参考麦肯锡价值驱动树模型，评估营运资本管理效率</div>
-            <div className="space-y-2">
-              <div className="bg-[var(--bg-page)] rounded-[var(--radius-sm)] p-3">
-                <div className="text-[var(--text-secondary)] text-xs font-medium">存货管理风险</div>
-                <div className="text-[var(--text-secondary)] text-xs mt-1">
-                  {metricValue(inventoryTurnover) != null
-                    ? `存货周转率 ${fmtMetric(metricValue(inventoryTurnover))} 次。${metricValue(inventoryTurnover)! < 4 ? '周转偏慢，可能面临存货跌价、产品过时或滞销风险。对于科技/消费品行业，存货周转率低于4次需重点关注库龄分布和跌价准备计提是否充分。' : '存货周转效率尚可，但仍需关注季节性波动和渠道库存压力。建议对比同行业竞争对手的周转水平。'}`
-                    : '存货周转率数据缺失，无法评估库存管理效率。'}
-                </div>
-              </div>
-              <div className="bg-[var(--bg-page)] rounded-[var(--radius-sm)] p-3">
-                <div className="text-[var(--text-secondary)] text-xs font-medium">应收账款风险</div>
-                <div className="text-[var(--text-secondary)] text-xs mt-1">
-                  {metricValue(receivableTurnover) != null
-                    ? `应收账款周转率 ${fmtMetric(metricValue(receivableTurnover))} 次（约 ${(365 / metricValue(receivableTurnover)!).toFixed(0)} 天回款周期）。${metricValue(receivableTurnover)! < 6 ? '回款周期超过60天，需警惕客户信用风险和坏账计提不足。建议关注前五大客户集中度和账龄超过1年的应收占比。' : '回款效率尚可，但仍需关注是否存在关联方交易虚增收入的情况。'}`
-                    : '应收周转率数据缺失，无法评估回款风险。'}
-                </div>
-              </div>
-            </div>
-          </div>
+            return signals.map(sig => {
+              const riskItems = sig.metrics.map(m => {
+                const val = mv(m.codes);
+                const prev = prevV(m.codes);
+                const hasVal = val != null;
+                const level = hasVal ? riskLevel(val!, m.warn, m.betterWhen) : 'low';
+                const style = riskStyle(level);
+                const cmp = hasVal && prev != null && prev !== 0 ? ((val! - prev) / Math.abs(prev)) * 100 : null;
+                const isWorsening = cmp != null && ((m.betterWhen === 'higher' && cmp < 0) || (m.betterWhen === 'lower' && cmp > 0));
+                const eqMult = m.codes[0] === 'DEBT_ASSET' && sig.id === 'dupont' ? (100 / Math.max(1, 100 - (val || 0))) : null;
+                return { ...m, val, level, style, cmp, isWorsening, eqMult };
+              }).filter(m => m.val != null);
 
-          {/* 4. Growth Sustainability Risk */}
-          <div className="card-surface p-4">
-            <div className="flex items-center gap-2 mb-2">
-              <div className="w-6 h-6 rounded bg-red-500/20 flex items-center justify-center text-xs font-bold text-red-400">4</div>
-              <div className="text-[#FAFAF9] text-sm font-semibold">增长可持续性风险 (Growth Sustainability)</div>
-            </div>
-            <div className="text-[var(--text-muted)] text-xs mb-3">参考波士顿矩阵与可持续增长率(SGR)框架</div>
-            <div className="bg-[var(--bg-page)] rounded-[var(--radius-sm)] p-3">
-              <div className="text-[var(--text-secondary)] text-xs mt-1">
-                {metricValue(roe) != null && metricValue(netMargin) != null && metricValue(grossMargin) != null
-                  ? `ROE ${fmtMetric(metricValue(roe))}%，可持续增长率(SGR)约 ${fmtMetric(metricValue(roe)! * 0.7)}%（假设70%留存率）。${metricValue(grossMargin)! > 50 && metricValue(netMargin)! > 20 ? '作为高利润率企业，未来增长面临基数效应挑战——维持高增速需要不断开拓新市场或推出新产品线，否则增速将自然回落。参考BCG经验，毛利率超过50%的企业通常处于成熟期，需关注市场份额天花板。' : metricValue(netMargin)! < 5 ? '低利润率限制了内生增长能力，企业可能需要依赖外部融资支撑扩张，这将进一步推高杠杆水平。' : '盈利水平支撑一定的内生增长能力，但需关注行业竞争格局变化对利润率的侵蚀。'}`
-                  : '关键盈利指标缺失，无法评估增长可持续性。建议补齐ROE、净利率等核心数据。'}
-              </div>
-            </div>
-          </div>
+              if (riskItems.length === 0) {
+                return (
+                  <div key={sig.id} className="card-surface p-4">
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className={sig.color}>{sig.icon}</span>
+                      <span className="text-[#FAFAF9] text-sm font-semibold">{sig.label}</span>
+                    </div>
+                    <div className="text-[var(--text-muted)] text-xs">数据不足，无法评估</div>
+                  </div>
+                );
+              }
 
-          {/* Alert Details */}
+              const highCount = riskItems.filter(m => m.level === 'high').length;
+              const medCount = riskItems.filter(m => m.level === 'medium').length;
+
+              return (
+                <div key={sig.id} className="card-surface p-4">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-2">
+                      <span className={sig.color}>{sig.icon}</span>
+                      <span className="text-[#FAFAF9] text-sm font-semibold">{sig.label}</span>
+                    </div>
+                    {highCount > 0 ? (
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-red-500/15 text-red-400 font-medium">{highCount}项高风险</span>
+                    ) : medCount > 0 ? (
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-400 font-medium">{medCount}项需关注</span>
+                    ) : (
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 font-medium">风险可控</span>
+                    )}
+                  </div>
+                  <div className="space-y-2">
+                    {riskItems.map(ri => (
+                      <div key={ri.codes[0]} className={`${ri.style.bg} border rounded-xl p-3`}>
+                        <div className="flex items-center justify-between mb-1">
+                          <div className="flex items-center gap-2">
+                            <div className={`w-1.5 h-1.5 rounded-full ${ri.style.dot}`} />
+                            <span className="text-[var(--text-secondary)] text-xs font-medium">{ri.label}</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-[#FAFAF9] text-sm font-bold">{ri.val!.toFixed(2)}{ri.unit}</span>
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded ${ri.style.bg} ${ri.style.text}`}>{ri.style.label}</span>
+                          </div>
+                        </div>
+                        {ri.cmp != null && (
+                          <div className={`text-[10px] ${ri.isWorsening ? 'text-red-400' : 'text-emerald-400'}`}>
+                            同比 {ri.cmp > 0 ? '+' : ''}{ri.cmp.toFixed(1)}% {ri.isWorsening ? '⚠ 趋势恶化' : '趋稳'}
+                          </div>
+                        )}
+                        {ri.eqMult != null && (
+                          <div className="text-[10px] text-[var(--text-muted)] mt-0.5">权益乘数 {ri.eqMult.toFixed(2)}x</div>
+                        )}
+                        <div className="text-[10px] text-[var(--text-muted)] mt-1 leading-relaxed">
+                          {ri.info.replace('{w2}', String(ri.warn[1])).replace('{w1}', String(ri.warn[0]))}
+                          {ri.val! <= ri.warn[1] && ri.betterWhen === 'higher' ? ` → 当前${ri.val!.toFixed(1)}${ri.unit}已触及警戒线` : ''}
+                          {ri.val! >= ri.warn[1] && ri.betterWhen === 'lower' ? ` → 当前${ri.val!.toFixed(1)}${ri.unit}已触及警戒线` : ''}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            });
+          })()}
+
+          {/* System Alerts */}
           {alerts.length > 0 && (
             <div className="card-surface p-4">
-              <div className="text-[#FAFAF9] text-sm font-semibold mb-3">系统风险预警明细</div>
+              <div className="text-[#FAFAF9] text-sm font-semibold mb-3">系统风险预警</div>
               <div className="space-y-2">
-                {alerts.map((alert) => {
+                {alerts.map(alert => {
                   const alertColors: Record<string, { bg: string; text: string; label: string }> = {
                     high: { bg: 'bg-[#E85A4F]/20', text: 'text-[#E85A4F]', label: '高风险' },
                     medium: { bg: 'bg-[#FFB547]/20', text: 'text-[#FFB547]', label: '中风险' },
@@ -1050,249 +1097,276 @@ export default function ReportDetailPage() {
 
       {activeTab === 'opportunities' && (
         <div className="flex flex-col gap-3">
-          <div className="card-surface p-4">
-            <div className="text-[#FAFAF9] text-sm font-semibold">投资机会识别框架</div>
-            <div className="text-[var(--text-secondary)] text-xs mt-1">参考高盛/摩根士丹利研究方法论，从竞争壁垒、价值创造、资本优化三大维度识别机会</div>
-          </div>
+          {(() => {
+            const mv = (codes: string[]) => { const hit = latestMetrics.find(m => codes.includes(m.metric_code)); return hit?.value == null ? null : Number(hit.value); };
+            const prevV = (codes: string[]) => { for (const c of codes) { const v = prevMetricMap[c]; if (v != null && !Number.isNaN(v)) return Number(v); } return null; };
 
-          {/* 1. Competitive Moat */}
-          <div className="card-surface p-4">
-            <div className="flex items-center gap-2 mb-2">
-              <div className="w-6 h-6 rounded bg-emerald-500/20 flex items-center justify-center text-xs font-bold text-emerald-400">1</div>
-              <div className="text-[#FAFAF9] text-sm font-semibold">竞争壁垒与护城河 (Competitive Moat)</div>
-            </div>
-            <div className="text-[var(--text-muted)] text-xs mb-3">参考晨星护城河评级体系，从定价权和成本优势评估竞争壁垒</div>
-            <div className="space-y-2">
-              <div className="bg-[var(--bg-page)] rounded-[var(--radius-sm)] p-3">
-                <div className="text-[var(--text-secondary)] text-xs font-medium">定价权与品牌溢价</div>
-                <div className="text-[var(--text-secondary)] text-xs mt-1">
-                  {metricValue(grossMargin) != null
-                    ? `毛利率 ${fmtMetric(metricValue(grossMargin))}%。${metricValue(grossMargin)! >= 40 ? '高毛利率（>40%）通常意味着企业拥有较强的品牌溢价、技术壁垒或网络效应。参考晨星"宽护城河"标准，持续高毛利率是竞争优势的核心体现，这类企业在经济下行期往往能更好地维持盈利。' : metricValue(grossMargin)! >= industryAvg.grossMargin ? '毛利率高于行业均值，表明具备一定的产品差异化或成本优势。若能持续维持，说明竞争壁垒有效。建议关注毛利率的年度变化趋势，稳定或上升趋势更有价值。' : '毛利率低于行业均值，但若企业正处于市场扩张期（以价换量），未来随着规模效应释放和产品结构升级，毛利率存在改善空间，这可能成为重要的利润弹性来源。'}`
-                    : '毛利率数据缺失，无法评估定价权。'}
-                </div>
-              </div>
-              <div className="bg-[var(--bg-page)] rounded-[var(--radius-sm)] p-3">
-                <div className="text-[var(--text-secondary)] text-xs font-medium">成本效率优势</div>
-                <div className="text-[var(--text-secondary)] text-xs mt-1">
-                  {metricValue(netMargin) != null && metricValue(grossMargin) != null
-                    ? `费用率（毛利率-净利率）约 ${fmtMetric(metricValue(grossMargin)! - metricValue(netMargin)!)}%。${(metricValue(grossMargin)! - metricValue(netMargin)!) < 20 ? '费用率控制良好（<20%），表明企业运营效率较高，管理层具备较强的成本管控能力。这种"精益运营"特质在行业整合期将成为重要竞争优势。' : '费用率偏高，但若企业正处于研发投入期或渠道扩张期，高费用率可能是为未来增长"播种"。建议区分资本化研发支出和费用化支出，评估投入产出效率。'}`
-                    : '数据不足，无法评估费用效率。'}
-                </div>
-              </div>
-            </div>
-          </div>
+            type OppSignal = {
+              id: string; label: string; icon: React.ReactNode; color: string; gradientFrom: string;
+              checks: { codes: string[]; label: string; unit: string; thresholds: number[]; betterWhen: 'higher'|'lower'; verdict: string[]; industryKey?: string }[];
+            };
+            const opps: OppSignal[] = [
+              {
+                id: 'moat', label: '护城河识别', icon: <Castle size={14} />, color: 'text-indigo-400', gradientFrom: 'from-indigo-950/40',
+                checks: [
+                  { codes: ['GROSS_MARGIN'], label: '定价权', unit: '%', thresholds: [40, 25, 10], betterWhen: 'higher', verdict: ['强护城河：品牌溢价/技术壁垒', '中等定价权，有差异化空间', '定价权弱，价格竞争敏感'], industryKey: 'grossMargin' },
+                  { codes: ['GROSS_MARGIN','NET_MARGIN'], label: '费用效率', unit: '%', thresholds: [20, 35, 50], betterWhen: 'lower', verdict: ['精益运营，成本管控强', '费用效率中等', '费用率偏高，运营效率待提升'] },
+                ],
+              },
+              {
+                id: 'value', label: '价值创造', icon: <Wallet size={14} />, color: 'text-emerald-400', gradientFrom: 'from-emerald-950/40',
+                checks: [
+                  { codes: ['ROE'], label: '股东回报', unit: '%', thresholds: [20, 12, 5], betterWhen: 'higher', verdict: ['卓越：持续创造超额价值', '达标：资本回报合理', '不足：低于资本成本'], industryKey: 'roe' },
+                  { codes: ['ROA'], label: '资产效率', unit: '%', thresholds: [8, 4, 1], betterWhen: 'higher', verdict: ['轻资产高效率', '资产利用正常', '资产产出效率低'], industryKey: 'roa' },
+                ],
+              },
+              {
+                id: 'capital', label: '资本优化', icon: <Target size={14} />, color: 'text-amber-400', gradientFrom: 'from-amber-950/40',
+                checks: [
+                  { codes: ['DEBT_ASSET'], label: '杠杆空间', unit: '%', thresholds: [40, 60, 75], betterWhen: 'lower', verdict: ['杠杆空间充足，可低成本扩张', '杠杆适中', '杠杆偏高，融资弹性受限'], industryKey: 'debtRatio' },
+                  { codes: ['CURRENT_RATIO'], label: '流动性储备', unit: '倍', thresholds: [3, 2, 1.2], betterWhen: 'higher', verdict: ['流动性充裕，抗风险能力强', '流动性适中', '流动性紧张'] },
+                ],
+              },
+            ];
 
-          {/* 2. Value Creation */}
-          <div className="card-surface p-4">
-            <div className="flex items-center gap-2 mb-2">
-              <div className="w-6 h-6 rounded bg-indigo-500/20 flex items-center justify-center text-xs font-bold text-indigo-400">2</div>
-              <div className="text-[#FAFAF9] text-sm font-semibold">价值创造能力 (Value Creation)</div>
-            </div>
-            <div className="text-[var(--text-muted)] text-xs mb-3">参考EVA(经济增加值)和ROIC框架，评估企业是否在创造超额回报</div>
-            <div className="space-y-2">
-              <div className="bg-[var(--bg-page)] rounded-[var(--radius-sm)] p-3">
-                <div className="text-[var(--text-secondary)] text-xs font-medium">股东价值创造</div>
-                <div className="text-[var(--text-secondary)] text-xs mt-1">
-                  {metricValue(roe) != null
-                    ? `ROE ${fmtMetric(metricValue(roe))}%。${metricValue(roe)! > 20 ? '优秀的ROE（>20%）表明企业正在为股东创造显著超额回报。参考巴菲特选股标准，持续ROE>20%的企业通常具备"经济特许权"，是长期价值投资的理想标的。关键是判断高ROE的来源——利润率驱动优于杠杆驱动。' : metricValue(roe)! > industryAvg.roe ? `ROE高于行业均值${industryAvg.roe}%，资本回报效率较好。若ROE主要由利润率和周转率驱动（而非高杠杆），则盈利质量更高，具备长期复利潜力。` : `ROE低于行业均值${industryAvg.roe}%，但若企业正处于转型期或重资产投入期，未来随着产能释放和利润率改善，ROE存在较大提升空间——这正是"困境反转"型投资机会。`}`
-                    : 'ROE数据缺失，无法评估价值创造能力。'}
-                </div>
-              </div>
-              <div className="bg-[var(--bg-page)] rounded-[var(--radius-sm)] p-3">
-                <div className="text-[var(--text-secondary)] text-xs font-medium">资产创利效率</div>
-                <div className="text-[var(--text-secondary)] text-xs mt-1">
-                  {metricValue(roa) != null
-                    ? `ROA ${fmtMetric(metricValue(roa))}%。${metricValue(roa)! > industryAvg.roa ? '资产回报率高于行业水平，表明企业资产质量较好、运营效率较高。高ROA企业通常具备轻资产运营特征或强大的品牌变现能力。' : 'ROA低于行业水平，可能存在资产利用效率不足的问题。但若企业正在进行大规模资本开支（新建产能、并购整合），短期ROA下降可能是为长期增长蓄力。'}`
-                    : 'ROA数据缺失。'}
-                </div>
-              </div>
-            </div>
-          </div>
+            return opps.map(opp => {
+              const results = opp.checks.map(ck => {
+                const val = mv(ck.codes);
+                const prev = prevV(ck.codes);
+                if (val == null) return { ...ck, val, tier: -1, tierLabel: '数据不足' };
+                const diff = ck.codes.length > 1 ? mv(['GROSS_MARGIN'])! - mv(['NET_MARGIN'])! : val;
+                const comparedVal = ck.codes.length > 1 ? diff : val;
+                let tier = 0;
+                if (ck.betterWhen === 'higher') {
+                  tier = comparedVal >= ck.thresholds[0] ? 0 : comparedVal >= ck.thresholds[1] ? 1 : comparedVal >= ck.thresholds[2] ? 2 : 2;
+                } else {
+                  tier = comparedVal <= ck.thresholds[0] ? 0 : comparedVal <= ck.thresholds[1] ? 1 : 2;
+                }
+                const indAvg = ck.industryKey ? (industryAvg as Record<string, number>)[ck.industryKey] : null;
+                const indDiff = indAvg != null ? (ck.codes.length > 1 ? diff : val!) - indAvg : null;
+                const cmp = prev != null && prev !== 0 && ck.codes.length <= 1 ? ((val! - prev) / Math.abs(prev)) * 100 : null;
+                const isImproving = cmp != null && ((ck.betterWhen === 'higher' && cmp > 0) || (ck.betterWhen === 'lower' && cmp < 0));
+                return { ...ck, val, tier, tierLabel: ck.verdict[tier] || '数据不足', indDiff, cmp, isImproving };
+              });
 
-          {/* 3. Capital Structure Optimization */}
-          <div className="card-surface p-4">
-            <div className="flex items-center gap-2 mb-2">
-              <div className="w-6 h-6 rounded bg-amber-500/20 flex items-center justify-center text-xs font-bold text-amber-400">3</div>
-              <div className="text-[#FAFAF9] text-sm font-semibold">资本结构优化空间 (Capital Optimization)</div>
-            </div>
-            <div className="text-[var(--text-muted)] text-xs mb-3">参考Modigliani-Miller理论和实务中的最优资本结构分析</div>
-            <div className="space-y-2">
-              <div className="bg-[var(--bg-page)] rounded-[var(--radius-sm)] p-3">
-                <div className="text-[var(--text-secondary)] text-xs font-medium">杠杆优化机会</div>
-                <div className="text-[var(--text-secondary)] text-xs mt-1">
-                  {metricValue(debtRatio) != null
-                    ? `资产负债率 ${fmtMetric(metricValue(debtRatio))}%。${metricValue(debtRatio)! < 40 ? '较低的负债率意味着企业拥有充足的"融资弹药"。在利率较低的环境下，适度增加杠杆可以利用税盾效应降低加权资本成本(WACC)，从而提升企业价值和股东回报。这是一个被市场低估的价值释放机会。' : metricValue(debtRatio)! < industryAvg.debtRatio ? '负债率低于行业均值，财务结构稳健，在行业整合或经济波动期具备更强的抗风险能力和并购扩张能力。' : '负债率高于行业均值，但若企业现金流稳定且利息覆盖充足，适度杠杆可以放大股东回报。关键是确保债务成本低于资产回报率(ROIC>WACC)。'}`
-                    : '负债率数据缺失。'}
-                </div>
-              </div>
-              <div className="bg-[var(--bg-page)] rounded-[var(--radius-sm)] p-3">
-                <div className="text-[var(--text-secondary)] text-xs font-medium">营运资本释放</div>
-                <div className="text-[var(--text-secondary)] text-xs mt-1">
-                  {metricValue(inventoryTurnover) != null || metricValue(receivableTurnover) != null
-                    ? `${metricValue(inventoryTurnover) != null ? `存货周转 ${fmtMetric(metricValue(inventoryTurnover))} 次` : ''}${metricValue(inventoryTurnover) != null && metricValue(receivableTurnover) != null ? '，' : ''}${metricValue(receivableTurnover) != null ? `应收周转 ${fmtMetric(metricValue(receivableTurnover))} 次` : ''}。通过供应链优化（JIT库存管理、供应商融资）和应收管理（缩短账期、应收保理）释放营运资本，可以在不增加外部融资的情况下改善现金流和资本效率。每提升1次周转率，相当于释放数月的营运资金。`
-                    : '周转率数据缺失，无法评估营运资本优化空间。'}
-                </div>
-              </div>
-            </div>
-          </div>
+              const strongCount = results.filter(r => r.tier === 0).length;
 
-          {/* Highlight Cards */}
-          {metricValue(roe) != null && metricValue(roe)! > 15 && (
-            <div className="bg-gradient-to-r from-emerald-950/40 to-[var(--bg-surface)] rounded-xl p-4 border border-emerald-500/30">
-              <div className="flex items-start gap-3">
-                <Lightbulb size={18} className="text-emerald-400 mt-0.5 flex-shrink-0" />
-                <div>
-                  <div className="text-emerald-400 text-sm font-semibold mb-1">核心亮点：优质资本回报</div>
-                  <div className="text-[var(--text-secondary)] text-xs">ROE {metricValue(roe)!.toFixed(1)}% 显著高于行业水平，表明企业具备持续的价值创造能力。建议深入分析其竞争壁垒的可持续性。</div>
+              return (
+                <div key={opp.id} className={`bg-gradient-to-r ${opp.gradientFrom} to-[var(--bg-surface)] rounded-xl p-4 border border-[var(--border-color)]`}>
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-2">
+                      <span className={opp.color}>{opp.icon}</span>
+                      <span className="text-[#FAFAF9] text-sm font-semibold">{opp.label}</span>
+                    </div>
+                    {strongCount > 0 && (
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 font-medium">{strongCount}项突出</span>
+                    )}
+                  </div>
+                  <div className="space-y-2">
+                    {results.map(r => (
+                      <div key={r.codes.join('-')} className="bg-black/20 rounded-xl p-3">
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-[var(--text-secondary)] text-xs font-medium">{r.label}</span>
+                          {r.val != null && (
+                            <span className="text-[#FAFAF9] text-sm font-bold">
+                              {r.codes.length > 1 ? `${fmtMetric(mv(['GROSS_MARGIN']))} - ${fmtMetric(mv(['NET_MARGIN']))} = ${fmtMetric(mv(['GROSS_MARGIN'])! - mv(['NET_MARGIN'])!)}%` : `${fmtMetric(r.val)}${r.unit}`}
+                            </span>
+                          )}
+                        </div>
+                        {r.val != null && (
+                          <>
+                            <div className={`text-xs font-medium ${r.tier === 0 ? 'text-emerald-400' : r.tier === 1 ? 'text-amber-400' : 'text-red-400'}`}>
+                              {r.tierLabel}
+                            </div>
+                            <div className="flex items-center gap-3 mt-1 text-[10px]">
+                              {r.indDiff != null && (
+                                <span className={r.indDiff > 0 ? 'text-emerald-400' : r.indDiff < 0 ? 'text-red-400' : 'text-zinc-500'}>
+                                  {r.indDiff > 0 ? '高于' : r.indDiff < 0 ? '低于' : '持平'}行业 {Math.abs(r.indDiff).toFixed(1)}
+                                </span>
+                              )}
+                              {r.cmp != null && (
+                                <span className={r.isImproving ? 'text-emerald-400' : 'text-red-400'}>
+                                  同比{r.cmp > 0 ? '+' : ''}{r.cmp.toFixed(1)}% {r.isImproving ? '↗改善' : '↘恶化'}
+                                </span>
+                              )}
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    ))}
+                  </div>
                 </div>
-              </div>
-            </div>
-          )}
-          {metricValue(grossMargin) != null && metricValue(grossMargin)! > 40 && (
-            <div className="bg-gradient-to-r from-indigo-950/40 to-[var(--bg-surface)] rounded-xl p-4 border border-indigo-500/30">
-              <div className="flex items-start gap-3">
-                <TrendingUp size={18} className="text-indigo-400 mt-0.5 flex-shrink-0" />
-                <div>
-                  <div className="text-indigo-400 text-sm font-semibold mb-1">核心亮点：强定价权</div>
-                  <div className="text-[var(--text-secondary)] text-xs">毛利率 {metricValue(grossMargin)!.toFixed(1)}% 体现较强的品牌溢价或技术壁垒，这是长期竞争优势的重要信号。</div>
-                </div>
-              </div>
-            </div>
-          )}
+              );
+            });
+          })()}
         </div>
       )}
 
       {activeTab === 'insights' && (
         <div className="flex flex-col gap-3">
-          {/* AI Header */}
-          <div className="bg-gradient-to-br from-[#6366F1]/20 to-[#16161A] rounded-2xl p-5 border border-[#6366F1]/30">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="w-10 h-10 rounded-xl bg-[#6366F1]/20 flex items-center justify-center">
-                <Brain size={20} className="text-[#6366F1]" />
-              </div>
-              <div>
-                <div className="text-[#FAFAF9] text-base font-semibold">AI 综合研判</div>
-                <div className="text-[var(--text-secondary)] text-xs">参考CFA研究框架，融合定量分析与定性判断</div>
-              </div>
-            </div>
+          {(() => {
+            const mv = (codes: string[]) => { const hit = latestMetrics.find(m => codes.includes(m.metric_code)); return hit?.value == null ? null : Number(hit.value); };
+            const prevV = (codes: string[]) => { for (const c of codes) { const v = prevMetricMap[c]; if (v != null && !Number.isNaN(v)) return Number(v); } return null; };
+            const r = enterpriseRating;
 
-            {metrics.length > 0 ? (
-              <div className="space-y-4">
-                {/* Financial Health Scorecard - 8-dimension */}
-                <div>
-                  <div className="text-[#FAFAF9] text-sm font-semibold mb-2">财务健康评分卡（8维评级）</div>
-                  <div className="grid grid-cols-4 gap-2">
-                    {Object.entries(enterpriseRating.dim_summary).map(([label, d]) => (
-                      <div key={label} className="bg-black/30 rounded-lg p-2.5 text-center">
-                        <div className="text-[var(--text-muted)] text-[10px]">{label}</div>
-                        <div className={`text-base font-bold mt-1 ${d.pct >= 60 ? 'text-emerald-400' : d.pct >= 40 ? 'text-amber-400' : 'text-red-400'}`}>
-                          {d.pct}%
-                        </div>
+            const gm = mv(['GROSS_MARGIN']);
+            const nm = mv(['NET_MARGIN']);
+            const roeV = mv(['ROE']);
+            const roaV = mv(['ROA']);
+            const dr = mv(['DEBT_ASSET']);
+            const cr = mv(['CURRENT_RATIO']);
+            const at = mv(['ASSET_TURNOVER']);
+            const it = mv(['INVENTORY_TURNOVER']);
+            const rt = mv(['RECEIVABLE_TURNOVER']);
+
+            type InsightCard = { title: string; tier: 'strong'|'normal'|'weak'; data: string; verdict: string; detail: string };
+            const cards: InsightCard[] = [];
+
+            if (gm != null && nm != null) {
+              const exp = gm - nm;
+              const tier: InsightCard['tier'] = nm > 20 ? 'strong' : nm > 8 ? 'normal' : 'weak';
+              const verdict = tier === 'strong' ? '优质盈利' : tier === 'normal' ? '盈利中等' : '盈利薄弱';
+              const detail = tier === 'strong'
+                ? `费用消耗${exp.toFixed(1)}%，利润留存率${(nm/gm*100).toFixed(0)}%，核心业务产出能力强`
+                : tier === 'normal'
+                  ? `费用率${exp.toFixed(1)}%，${exp > 40 ? '费用端有优化空间' : '费用结构可控'}，关注利润率趋势`
+                  : `费用消耗${exp.toFixed(1)}%，净利率仅${nm.toFixed(1)}%，${nm < 3 ? '接近亏损边缘' : '盈利韧性不足'}`;
+              cards.push({ title: '盈利质量', tier, data: `毛利率 ${gm.toFixed(1)}% | 净利率 ${nm.toFixed(1)}%`, verdict, detail });
+            }
+
+            if (roeV != null && roaV != null) {
+              const leverage = roeV / Math.max(0.1, roaV);
+              const isLeverageDriven = leverage > 3;
+              const tier: InsightCard['tier'] = roeV > 15 && !isLeverageDriven ? 'strong' : roeV > 8 ? 'normal' : 'weak';
+              const verdict = tier === 'strong' ? '健康回报' : tier === 'normal' ? '回报一般' : '回报不足';
+              const detail = isLeverageDriven
+                ? `ROE/ROA=${leverage.toFixed(1)}x，高ROE依赖杠杆放大(${leverage.toFixed(1)}x权益乘数)，经营回报率${roaV.toFixed(1)}%偏低`
+                : `ROE由经营能力驱动(权益乘数${leverage.toFixed(1)}x)，盈利模式更可持续`;
+              cards.push({ title: '资本效率', tier, data: `ROE ${roeV.toFixed(1)}% | ROA ${roaV.toFixed(1)}%`, verdict, detail });
+            }
+
+            if (dr != null && cr != null) {
+              const tier: InsightCard['tier'] = dr < 40 && cr > 1.5 ? 'strong' : dr > 70 || cr < 1 ? 'weak' : 'normal';
+              const verdict = tier === 'strong' ? '财务稳健' : tier === 'normal' ? '中等安全' : '财务承压';
+              const detail = tier === 'strong'
+                ? `负债率${dr.toFixed(1)}%+流动比率${cr.toFixed(2)}，抗风险+扩张能力兼备`
+                : tier === 'normal'
+                  ? `负债率${dr.toFixed(1)}%，流动比率${cr.toFixed(2)}，${dr > 55 ? '关注利息覆盖' : '结构尚可'}`
+                  : `${dr > 70 ? `负债率${dr.toFixed(1)}%偏高，再融资风险` : ''}${cr < 1 ? `流动比率${cr.toFixed(2)}<1，短期偿债缺口` : ''}`;
+              cards.push({ title: '财务安全', tier, data: `负债率 ${dr.toFixed(1)}% | 流动比率 ${cr.toFixed(2)}`, verdict, detail });
+            }
+
+            if (at != null || it != null || rt != null) {
+              const cccDays = (it != null ? 365 / it : 0) + (rt != null ? 365 / rt : 0) - 0;
+              const tier: InsightCard['tier'] = at != null && at >= 0.8 && (it != null ? it >= 6 : true) ? 'strong' : at != null && at >= 0.4 ? 'normal' : 'weak';
+              const verdict = tier === 'strong' ? '运营高效' : tier === 'normal' ? '运营一般' : '运营低效';
+              const parts: string[] = [];
+              if (at != null) parts.push(`资产周转${at.toFixed(2)}次`);
+              if (it != null) parts.push(`存货${(365/it).toFixed(0)}天`);
+              if (rt != null) parts.push(`应收${(365/rt).toFixed(0)}天`);
+              const detail = parts.join('、') + (tier === 'strong' ? '，周转快，资金效率高' : tier === 'normal' ? '，有改善空间' : '，周转慢影响现金流');
+              cards.push({ title: '运营效率', tier, data: parts.join(' | '), verdict, detail });
+            }
+
+            const strongCount = cards.filter(c => c.tier === 'strong').length;
+            const weakCount = cards.filter(c => c.tier === 'weak').length;
+            const tierStyle = (t: InsightCard['tier']) => ({
+              strong: { border: 'border-emerald-500/30', bg: 'bg-emerald-500/5', badge: 'bg-emerald-500/15 text-emerald-400', bar: 'bg-emerald-500' },
+              normal: { border: 'border-amber-500/25', bg: 'bg-amber-500/5', badge: 'bg-amber-500/15 text-amber-400', bar: 'bg-amber-500' },
+              weak: { border: 'border-red-500/25', bg: 'bg-red-500/5', badge: 'bg-red-500/15 text-red-400', bar: 'bg-red-500' },
+            }[t]);
+
+            return (
+              <>
+                {/* AI Rating Header */}
+                <div className="bg-gradient-to-br from-[#6366F1]/20 to-[#16161A] rounded-2xl p-5 border border-[#6366F1]/30">
+                  <div className="flex items-center gap-3 mb-4">
+                    <div className="w-10 h-10 rounded-xl bg-[#6366F1]/20 flex items-center justify-center">
+                      <Brain size={20} className="text-[#6366F1]" />
+                    </div>
+                    <div className="flex-1">
+                      <div className="text-[#FAFAF9] text-base font-semibold">AI 综合研判</div>
+                      <div className="text-[var(--text-secondary)] text-xs">评级 {r.grade}（{r.total_score}/100）· {r.recommendation}</div>
+                    </div>
+                    <div className="text-right">
+                      <div className={`text-3xl font-black ${r.total_score >= 60 ? 'text-emerald-400' : r.total_score >= 40 ? 'text-amber-400' : 'text-red-400'}`} style={{ textShadow: '0 0 20px rgba(99,102,241,0.3)' }}>
+                        {r.grade}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-4 gap-1.5">
+                    {Object.entries(r.dim_summary).map(([label, d]) => (
+                      <div key={label} className="bg-black/30 rounded-lg p-2 text-center">
+                        <div className="text-[var(--text-muted)] text-[9px]">{label}</div>
+                        <div className={`text-sm font-bold mt-0.5 ${d.pct >= 60 ? 'text-emerald-400' : d.pct >= 40 ? 'text-amber-400' : 'text-red-400'}`}>{d.pct}%</div>
                         <div className="mt-1 h-1 bg-black/30 rounded-full overflow-hidden">
-                          <div
-                            className={`h-full rounded-full ${d.pct >= 60 ? 'bg-emerald-500' : d.pct >= 40 ? 'bg-amber-500' : 'bg-red-500'}`}
-                            style={{ width: `${d.pct}%` }}
-                          />
+                          <div className={`h-full rounded-full ${d.pct >= 60 ? 'bg-emerald-500' : d.pct >= 40 ? 'bg-amber-500' : 'bg-red-500'}`} style={{ width: `${d.pct}%` }} />
                         </div>
                       </div>
                     ))}
                   </div>
                 </div>
 
-                {/* Core Analysis */}
-                <div className="space-y-3 text-sm text-[#FAFAF9]">
-                  <div>
-                    <div className="font-semibold mb-1">📊 盈利质量深度分析</div>
-                    <div className="text-[var(--text-secondary)] text-xs leading-relaxed">
-                      {grossMargin?.value != null && netMargin?.value != null
-                        ? `毛利率 ${grossMargin.value.toFixed(1)}%，净利率 ${netMargin.value.toFixed(1)}%，费用消耗率 ${(grossMargin.value - netMargin.value).toFixed(1)}%。${netMargin.value > 20 ? '净利率超过20%属于优质盈利水平，参考标普500成分股数据，仅约15%的企业能持续达到此水平。需重点验证：(1)高利润是否来自核心业务而非一次性收益；(2)研发投入是否充足以维持技术壁垒；(3)毛利率趋势是否稳定或上升。' : netMargin.value > 10 ? '净利率处于中等偏上水平，盈利能力尚可。建议关注：(1)费用率是否有优化空间；(2)产品/服务结构是否向高附加值方向演进；(3)规模效应是否正在释放。' : '净利率偏低，盈利压力较大。需分析：(1)是行业特性（薄利多销）还是竞争力不足；(2)是否处于战略性亏损期（市场扩张/研发投入）；(3)成本端是否存在刚性约束。'}`
-                        : '盈利数据不足，无法进行深度分析。'}
-                    </div>
-                  </div>
+                {/* 4-dimension insight cards */}
+                <div className="space-y-2">
+                  {cards.map(card => {
+                    const s = tierStyle(card.tier);
+                    return (
+                      <div key={card.title} className={`${s.bg} border ${s.border} rounded-xl p-4`}>
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-[#FAFAF9] text-sm font-semibold">{card.title}</span>
+                          <span className={`text-[10px] px-2 py-0.5 rounded-full ${s.badge} font-medium`}>{card.verdict}</span>
+                        </div>
+                        <div className="text-[var(--text-secondary)] text-xs font-mono mb-1">{card.data}</div>
+                        <div className="text-[var(--text-muted)] text-[11px] leading-relaxed">{card.detail}</div>
+                      </div>
+                    );
+                  })}
+                </div>
 
-                  <div>
-                    <div className="font-semibold mb-1">💰 杜邦分解与资本效率</div>
-                    <div className="text-[var(--text-secondary)] text-xs leading-relaxed">
-                      {roe?.value != null && roa?.value != null
-                        ? `ROE ${roe.value.toFixed(1)}%（= 净利率 × 周转率 × 权益乘数），ROA ${roa.value.toFixed(1)}%。${roe.value > 15 && roa.value > 8 ? '高ROE且高ROA的组合表明企业通过经营能力而非财务杠杆创造回报，这是最健康的盈利模式。参考沃伦·巴菲特的投资哲学，这类企业通常具备"经济护城河"。' : roe.value > 15 && roa.value < 8 ? 'ROE较高但ROA偏低，说明高ROE主要依赖财务杠杆放大。这种模式在经济上行期表现亮眼，但在下行期风险会被同步放大。建议关注利息保障倍数和债务到期结构。' : 'ROE和ROA均处于一般水平，企业可能处于行业成熟期或转型期。建议从杜邦三因素中寻找最大改善空间——通常提升周转率的难度最低、见效最快。'}`
-                        : '资本效率数据不足。'}
-                    </div>
-                  </div>
+                {/* Investment Thesis - data-driven */}
+                <div className="card-surface p-4">
+                  <div className="text-[#FAFAF9] text-sm font-semibold mb-3">投资信号</div>
+                  <div className="space-y-2">
+                    {(() => {
+                      const signals: { label: string; type: 'bull'|'bear'; text: string }[] = [];
+                      if (roeV != null && roeV > 15) signals.push({ label: 'ROE优异', type: 'bull', text: `ROE ${roeV.toFixed(1)}% > 15%，资本回报能力强${roeV/roaV! > 3 ? '（注意杠杆驱动）' : ''}` });
+                      if (gm != null && gm > 40) signals.push({ label: '定价权强', type: 'bull', text: `毛利率 ${gm.toFixed(1)}% > 40%，品牌/技术壁垒明显` });
+                      if (nm != null && nm > 15) signals.push({ label: '利润率高', type: 'bull', text: `净利率 ${nm.toFixed(1)}% > 15%，盈利质量优` });
+                      if (dr != null && dr < 30) signals.push({ label: '财务弹性', type: 'bull', text: `负债率 ${dr.toFixed(1)}% < 30%，融资空间充足` });
+                      if (dr != null && dr > 65) signals.push({ label: '杠杆风险', type: 'bear', text: `负债率 ${dr.toFixed(1)}% > 65%，再融资/利率敏感` });
+                      if (cr != null && cr < 1) signals.push({ label: '流动性风险', type: 'bear', text: `流动比率 ${cr.toFixed(2)} < 1，短期偿债缺口` });
+                      if (nm != null && nm < 3) signals.push({ label: '盈利脆弱', type: 'bear', text: `净利率 ${nm.toFixed(1)}% < 3%，接近亏损` });
+                      if (roeV != null && roeV < 5) signals.push({ label: '资本回报不足', type: 'bear', text: `ROE ${roeV.toFixed(1)}% < 5%，低于资本成本` });
 
-                  <div>
-                    <div className="font-semibold mb-1">🏦 财务稳健性评估</div>
-                    <div className="text-[var(--text-secondary)] text-xs leading-relaxed">
-                      {debtRatio?.value != null && currentRatio?.value != null
-                        ? `资产负债率 ${debtRatio.value.toFixed(1)}%，流动比率 ${currentRatio.value.toFixed(2)}。${debtRatio.value < 50 && currentRatio.value > 1.5 ? '财务结构稳健，短期偿债能力充足。这种"保守型"财务策略在经济不确定性增加时尤为珍贵——企业拥有充足的财务弹性应对突发风险或把握并购机会。' : debtRatio.value > 65 ? '负债率偏高，需密切关注：(1)有息负债占比和加权融资成本；(2)短期债务占比和再融资安排；(3)经营性现金流对利息支出的覆盖能力。参考穆迪评级方法论，持续高杠杆可能导致信用评级承压。' : '财务结构处于中等水平，建议关注债务期限结构和利率敏感性。在当前利率环境下，固定利率债务占比越高，利率风险越可控。'}`
-                        : '财务健康数据不足。'}
-                    </div>
-                  </div>
+                      if (signals.length === 0) {
+                        return <div className="text-[var(--text-muted)] text-xs">指标数据不足以生成投资信号</div>;
+                      }
+                      return signals.map((sig, i) => (
+                        <div key={i} className={`${sig.type === 'bull' ? 'bg-emerald-500/8' : 'bg-red-500/8'} rounded-xl p-3`}>
+                          <div className="flex items-center gap-2 mb-0.5">
+                            <span className={`text-xs font-semibold ${sig.type === 'bull' ? 'text-emerald-400' : 'text-red-400'}`}>{sig.type === 'bull' ? '看多' : '风险'}</span>
+                            <span className="text-[#FAFAF9] text-xs font-medium">{sig.label}</span>
+                          </div>
+                          <div className="text-[var(--text-secondary)] text-[11px]">{sig.text}</div>
+                        </div>
+                      ));
+                    })()}
 
-                  <div>
-                    <div className="font-semibold mb-1">⚙️ 运营效率与现金转化</div>
-                    <div className="text-[var(--text-secondary)] text-xs leading-relaxed">
-                      {metricValue(assetTurnover) != null
-                        ? `总资产周转率 ${fmtMetric(metricValue(assetTurnover))}。${metricValue(inventoryTurnover) != null ? `存货周转 ${fmtMetric(metricValue(inventoryTurnover))} 次（${(365 / metricValue(inventoryTurnover)!).toFixed(0)}天）` : ''}${metricValue(receivableTurnover) != null ? `，应收周转 ${fmtMetric(metricValue(receivableTurnover))} 次（${(365 / metricValue(receivableTurnover)!).toFixed(0)}天）` : ''}。运营效率直接影响现金转化周期(CCC)——周转越快，企业对外部融资的依赖越低，自由现金流越充裕。建议对比同行业领先企业的周转水平，识别改善空间。`
-                        : '运营效率数据不足，建议补齐周转率相关指标。'}
+                    {/* Final recommendation */}
+                    <div className="bg-[var(--bg-page)] rounded-xl p-3 mt-2">
+                      <div className="text-[var(--text-muted)] text-xs font-semibold mb-1">综合建议</div>
+                      <div className="text-[#FAFAF9] text-sm font-medium">{r.grade}（{r.total_score}/100）— {r.recommendation}</div>
+                      <div className="flex flex-wrap gap-1.5 mt-2">
+                        {r.strengths.map((s, i) => <span key={`s${i}`} className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400">{s}</span>)}
+                        {r.risks.map((s, i) => <span key={`r${i}`} className="text-[10px] px-2 py-0.5 rounded-full bg-red-500/15 text-red-400">{s}</span>)}
+                      </div>
                     </div>
                   </div>
                 </div>
-              </div>
-            ) : (
-              <p className="text-[#6B6B70] text-sm">暂无足够数据生成AI洞察，请确保报告已完成分析。</p>
-            )}
-          </div>
-
-          {/* Investment Thesis */}
-          {metrics.length > 0 && (
-            <div className="card-surface p-4">
-              <h4 className="text-[#FAFAF9] text-sm font-semibold mb-3">💡 投资论点与建议</h4>
-              <div className="space-y-2">
-                {metricValue(roe) != null && metricValue(roe)! > 20 && (
-                  <div className="bg-emerald-500/10 rounded-[var(--radius-sm)] p-3">
-                    <div className="text-emerald-400 text-xs font-semibold">看多因素</div>
-                    <div className="text-[var(--text-secondary)] text-xs mt-1">ROE {fmtMetric(metricValue(roe))}% 显著高于资本成本，企业正在为股东创造超额价值。若此水平可持续3年以上，通常意味着存在结构性竞争优势。</div>
-                  </div>
-                )}
-                {metricValue(grossMargin) != null && metricValue(grossMargin)! > 40 && (
-                  <div className="bg-emerald-500/10 rounded-[var(--radius-sm)] p-3">
-                    <div className="text-emerald-400 text-xs font-semibold">看多因素</div>
-                    <div className="text-[var(--text-secondary)] text-xs mt-1">高毛利率 {fmtMetric(metricValue(grossMargin))}% 体现强定价权，在通胀环境下具备成本转嫁能力，盈利韧性较强。</div>
-                  </div>
-                )}
-                {metricValue(debtRatio) != null && metricValue(debtRatio)! > 65 && (
-                  <div className="bg-red-500/10 rounded-[var(--radius-sm)] p-3">
-                    <div className="text-red-400 text-xs font-semibold">风险因素</div>
-                    <div className="text-[var(--text-secondary)] text-xs mt-1">高负债率 {fmtMetric(metricValue(debtRatio))}% 在利率上行周期可能侵蚀利润，需关注再融资风险和利息覆盖倍数变化。</div>
-                  </div>
-                )}
-                {metricValue(currentRatio) != null && metricValue(currentRatio)! < 1.2 && (
-                  <div className="bg-red-500/10 rounded-[var(--radius-sm)] p-3">
-                    <div className="text-red-400 text-xs font-semibold">风险因素</div>
-                    <div className="text-[var(--text-secondary)] text-xs mt-1">流动比率 {fmtMetric(metricValue(currentRatio))} 接近或低于警戒线，短期偿债安全边际不足，需关注现金流状况。</div>
-                  </div>
-                )}
-                {metricValue(netMargin) != null && metricValue(netMargin)! > 15 && (
-                  <div className="bg-emerald-500/10 rounded-[var(--radius-sm)] p-3">
-                    <div className="text-emerald-400 text-xs font-semibold">看多因素</div>
-                    <div className="text-[var(--text-secondary)] text-xs mt-1">净利率 {fmtMetric(metricValue(netMargin))}% 处于优秀水平，需验证是否来自核心业务的持续性盈利。</div>
-                  </div>
-                )}
-                <div className="bg-[var(--bg-page)] rounded-[var(--radius-sm)] p-3">
-                  <div className="text-[var(--text-muted)] text-xs font-semibold">综合建议</div>
-                  <div className="text-[var(--text-secondary)] text-xs mt-1">
-                    评级 {enterpriseRating.grade}（{enterpriseRating.total_score}/100）：{enterpriseRating.recommendation}
-                    {enterpriseRating.strengths.length > 0 && (
-                      <span className="text-emerald-400 ml-2">优势：{enterpriseRating.strengths.join('、')}</span>
-                    )}
-                    {enterpriseRating.risks.length > 0 && (
-                      <span className="text-red-400 ml-2">风险：{enterpriseRating.risks.join('、')}</span>
-                    )}
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
+              </>
+            );
+          })()}
         </div>
       )}
     </div>

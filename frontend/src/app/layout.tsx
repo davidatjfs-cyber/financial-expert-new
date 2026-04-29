@@ -34,7 +34,7 @@ export default function RootLayout({
           </div>
           
           {/* Main Content */}
-          <main className="flex-1 overflow-auto pb-[calc(env(safe-area-inset-bottom,0px)+160px)] md:pb-0">
+          <main className="flex-1 pb-[calc(env(safe-area-inset-bottom,0px)+80px)] md:pb-0">
             {children}
           </main>
         </div>

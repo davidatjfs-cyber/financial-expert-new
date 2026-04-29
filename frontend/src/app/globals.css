@@ -42,7 +42,6 @@
 }
 
 html, body {
-  height: 100%;
   background: var(--bg-page);
   color: var(--text-primary);
   font-family: 'Inter', 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans SC', sans-serif;
