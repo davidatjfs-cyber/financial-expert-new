@@ -549,18 +549,47 @@ def _ingest_and_analyze_non_cn_akshare(report_id: str) -> None:
         profit_df = None
         balance_df = None
         cash_df = None
+        primary_indicator = "半年度" if "-06-30" in str(period_end) else "年度"
+        secondary_indicator = "年度" if primary_indicator == "半年度" else "半年度"
         try:
-            profit_df = ak.stock_financial_hk_report_em(stock=code, symbol="利润表", indicator="年度")
+            profit_df = ak.stock_financial_hk_report_em(stock=code, symbol="利润表", indicator=primary_indicator)
         except Exception:
             profit_df = None
         try:
-            balance_df = ak.stock_financial_hk_report_em(stock=code, symbol="资产负债表", indicator="年度")
+            balance_df = ak.stock_financial_hk_report_em(stock=code, symbol="资产负债表", indicator=primary_indicator)
         except Exception:
             balance_df = None
         try:
-            cash_df = ak.stock_financial_hk_report_em(stock=code, symbol="现金流量表", indicator="年度")
+            cash_df = ak.stock_financial_hk_report_em(stock=code, symbol="现金流量表", indicator=primary_indicator)
         except Exception:
             cash_df = None
+        try:
+            profit_df2 = ak.stock_financial_hk_report_em(stock=code, symbol="利润表", indicator=secondary_indicator)
+            if profit_df is None:
+                profit_df = profit_df2
+            elif profit_df2 is not None:
+                import pandas as _pd
+                profit_df = _pd.concat([profit_df, profit_df2], ignore_index=True)
+        except Exception:
+            pass
+        try:
+            balance_df2 = ak.stock_financial_hk_report_em(stock=code, symbol="资产负债表", indicator=secondary_indicator)
+            if balance_df is None:
+                balance_df = balance_df2
+            elif balance_df2 is not None:
+                import pandas as _pd
+                balance_df = _pd.concat([balance_df, balance_df2], ignore_index=True)
+        except Exception:
+            pass
+        try:
+            cash_df2 = ak.stock_financial_hk_report_em(stock=code, symbol="现金流量表", indicator=secondary_indicator)
+            if cash_df is None:
+                cash_df = cash_df2
+            elif cash_df2 is not None:
+                import pandas as _pd
+                cash_df = _pd.concat([cash_df, cash_df2], ignore_index=True)
+        except Exception:
+            pass
 
         pe = _pick_effective_period(
             period_end,
