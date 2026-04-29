@@ -314,6 +314,9 @@ def _ingest_and_analyze_non_cn_akshare(report_id: str) -> None:
             return None
 
     def _ingest_items(*, statement_type: str, period_end: str, items: dict[str, float | None], currency: str | None = None):
+        filtered_items = {k: v for k, v in items.items() if v is not None}
+        if not filtered_items:
+            return
         with session_scope() as s:
             st_obj = Statement(
                 id=str(uuid.uuid4()),
@@ -323,11 +326,11 @@ def _ingest_and_analyze_non_cn_akshare(report_id: str) -> None:
                 period_end=period_end,
                 period_type=period_type,
                 source="akshare",
-                raw_payload=dumps({"items": items, "currency": currency}),
+                raw_payload=dumps({"items": filtered_items, "currency": currency}),
                 created_at=int(time.time()),
             )
             s.add(st_obj)
-            for code, v in items.items():
+            for code, v in filtered_items.items():
                 s.add(
                     StatementItem(
                         id=str(uuid.uuid4()),
@@ -599,6 +602,14 @@ def _ingest_and_analyze_non_cn_akshare(report_id: str) -> None:
             + list(yf_revenue_map.keys())
             + list(yf_cfo_map.keys()),
         ) or period_end
+
+        # If indicator table has revenue but statements lag behind target period,
+        # the indicator data reflects the latest published report (e.g. 2025 annual)
+        # even though AkShare statement rows haven't been updated yet.
+        # In this case, keep the original target period_end.
+        if pe < (period_end or "0000") and revenue is not None and revenue != 0:
+            pe = period_end
+
         resolved_period_end = pe
 
         revenue_stmt = _pick_from_df(

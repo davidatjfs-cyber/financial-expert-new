@@ -2903,6 +2903,7 @@ def _build_report_pdf_bytes(report: Report, metrics: list[ComputedMetric], alert
             dim_tbl.setStyle(TableStyle([
                 ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f0f2f6")),
                 ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#d0d7de")),
+                ("FONTNAME", (0, 0), (-1, -1), cjk_font),
                 ("FONTSIZE", (0, 0), (-1, -1), 9),
             ]))
             story.append(dim_tbl)
@@ -5977,30 +5978,34 @@ def _query_latest_period(market: str, symbol_norm: str) -> tuple[str | None, str
 
         if mkt == 'HK':
             code = symbol_norm.replace('.HK', '').zfill(5)
-            all_dates = []
-            for indicator in ['年度', '半年度']:
+            annual_latest_ds = None
+            interim_latest_ds = None
+            for indicator, store in [('年度', 'annual'), ('半年度', 'interim')]:
                 try:
                     df = ak.stock_financial_hk_report_em(stock=code, symbol='利润表', indicator=indicator)
                     if df is not None and not df.empty and 'REPORT_DATE' in df.columns:
-                        all_dates.append(df['REPORT_DATE'].max())
+                        latest = df['REPORT_DATE'].max()
+                        ds = str(latest.date()) if hasattr(latest, 'date') else str(latest)[:10]
+                        if store == 'annual':
+                            annual_latest_ds = ds
+                        else:
+                            interim_latest_ds = ds
                 except Exception:
                     pass
-            if all_dates:
-                latest = max(all_dates)
-                ds = str(latest.date()) if hasattr(latest, 'date') else str(latest)[:10]
+
+            ds = None
+            # Take whichever is newer
+            candidates = [d for d in [annual_latest_ds, interim_latest_ds] if d]
+            if candidates:
+                ds = max(candidates)
+
+            # Note: we do NOT use indicator table to upgrade period_end here.
+            # Even if indicator shows current-year data, statement rows lag behind.
+            # Using a period_end that has no statement data produces incorrect metrics.
+            # The pipeline will still use indicator data for key ratio overrides.
+            if ds:
                 pt = 'interim' if '-06-30' in ds else 'annual'
                 return ds, pt
-            try:
-                ind_df = ak.stock_hk_financial_indicator_em(symbol=code)
-                if ind_df is not None and not ind_df.empty:
-                    for col in ind_df.columns:
-                        if 'REPORT_DATE' in col or 'STD_REPORT_DATE' in col:
-                            latest = ind_df[col].max()
-                            ds = str(latest.date()) if hasattr(latest, 'date') else str(latest)[:10]
-                            pt = 'interim' if '-06-30' in ds else 'annual'
-                            return ds, pt
-            except Exception:
-                pass
 
         elif mkt == 'US':
             base = symbol_norm.split('.')[0].upper()
