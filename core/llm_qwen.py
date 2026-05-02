@@ -10,10 +10,87 @@ from dataclasses import asdict
 
 QWEN_API_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
 
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "qwen").strip().lower()
+LLM_LOCAL_URL = os.environ.get("LLM_LOCAL_URL", "http://localhost:11434/v1").strip().rstrip("/")
+LLM_LOCAL_MODEL = os.environ.get("LLM_LOCAL_MODEL", "gemma3:27b").strip()
+
 
 def get_api_key() -> str:
-    """获取阿里云 API Key"""
     return os.environ.get("DASHSCOPE_API_KEY", "")
+
+
+def call_llm(system_prompt: str, user_prompt: str,
+             temperature: float = 0.3, max_tokens: int = 2000,
+             api_key: Optional[str] = None) -> str:
+    """统一 LLM 调用入口，支持 Qwen 和本地模型(Ollama/vLLM)"""
+    if LLM_PROVIDER == "local":
+        return _call_local_llm(system_prompt, user_prompt, temperature, max_tokens)
+    return _call_qwen_llm(system_prompt, user_prompt, temperature, max_tokens, api_key)
+
+
+def _call_local_llm(system_prompt: str, user_prompt: str,
+                    temperature: float = 0.3, max_tokens: int = 2000) -> str:
+    try:
+        resp = httpx.post(
+            f"{LLM_LOCAL_URL}/chat/completions",
+            headers={"Content-Type": "application/json"},
+            json={
+                "model": LLM_LOCAL_MODEL,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            },
+            timeout=120.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data["choices"][0]["message"]["content"]
+    except Exception as e:
+        print(f"[llm] local LLM error: {e}")
+        raise
+
+
+def _call_qwen_llm(system_prompt: str, user_prompt: str,
+                   temperature: float = 0.3, max_tokens: int = 2000,
+                   api_key: Optional[str] = None) -> str:
+    key = api_key or get_api_key()
+    if not key:
+        raise RuntimeError("missing_api_key")
+    try:
+        resp = httpx.post(
+            QWEN_API_URL,
+            headers={
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "qwen-turbo",
+                "input": {
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ]
+                },
+                "parameters": {
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                },
+            },
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if "output" in data and "text" in data["output"]:
+            return data["output"]["text"]
+        elif "output" in data and "choices" in data["output"]:
+            return data["output"]["choices"][0]["message"]["content"]
+        return ""
+    except Exception as e:
+        print(f"[llm] qwen error: {e}")
+        raise
 
 
 def test_qwen_connection(api_key: Optional[str] = None) -> tuple[bool, str]:

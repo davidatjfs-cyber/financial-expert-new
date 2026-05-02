@@ -21,6 +21,69 @@ function getApiBaseUrl(): string {
 
 // ============ Types ============
 
+export interface RecommendStock {
+  symbol: string;
+  name: string;
+  market: string;
+  value_score: number;
+  growth_score: number;
+  quality_score: number;
+  tech_score: number;
+  total_score: number;
+  pe_ratio: number | null;
+  revenue_growth: number | null;
+  net_profit_growth: number | null;
+  roe: number | null;
+  gross_margin: number | null;
+  rsi14: number | null;
+  slope_pct: number | null;
+  buy_price_aggressive: number | null;
+  sell_price: number | null;
+  strategy_buy_zone_low?: number | null;
+  strategy_buy_zone_high?: number | null;
+  strategy_stop_loss?: number | null;
+  strategy_take_profit_1?: number | null;
+  strategy_take_profit_2?: number | null;
+  buy_score: number | null;
+  sell_score: number | null;
+  buy_grade: string | null;
+  sell_grade: string | null;
+  action: string | null;
+  quality_score_total: number | null;
+  timing_score_total: number | null;
+  sector_name: string | null;
+  sector_strength_score: number | null;
+  recommendation_bucket: string | null;
+  timing_signal_reason: string | null;
+  trend: string | null;
+  reason: string;
+  rank: number;
+  recommend_date?: string;
+}
+
+export interface RecommendScanStatus {
+  status: 'idle' | 'running' | 'done' | 'error';
+  progress: number;
+  message: string;
+}
+
+export interface SectorInfo {
+  label: string;
+  name: string;
+  count: number;
+}
+
+export interface SectorsResponse {
+  sectors: SectorInfo[];
+  count: number;
+}
+
+export interface RecommendLatestResponse {
+  results: RecommendStock[];
+  count: number;
+  message?: string;
+}
+
 export interface Stats {
   total: number;
   done: number;
@@ -200,6 +263,20 @@ export interface StockIndicators {
   buy_price_aggressive?: number | null;
   buy_price_stable?: number | null;
   sell_price?: number | null;
+
+  strategy_action?: string | null;
+  strategy_buy_zone_low?: number | null;
+  strategy_buy_zone_high?: number | null;
+  strategy_stop_loss?: number | null;
+  strategy_take_profit_1?: number | null;
+  strategy_take_profit_2?: number | null;
+  strategy_sell_trigger?: string | null;
+  strategy_buy_trigger?: string | null;
+  indicator_reference_note?: string | null;
+  ma60_reference?: string | null;
+  slope_reference?: string | null;
+  buy_score_reference?: string | null;
+  sell_score_reference?: string | null;
 
   buy_condition_desc?: string | null;
   sell_condition_desc?: string | null;
@@ -484,4 +561,26 @@ export async function fetchMarketReport(
   }
 
   return fetchAPI(`/api/reports/fetch?${params}`, { method: 'POST' });
+}
+
+export async function startRecommendScan(topN: number = 20, useAi: boolean = true, sector?: string) {
+  const body: Record<string, unknown> = { top_n: topN, use_ai: useAi };
+  if (sector) body.sector = sector;
+  return fetchAPI<{ status: string; message: string }>(`/api/recommend/scan`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function getRecommendSectors(): Promise<SectorsResponse> {
+  return fetchAPI<SectorsResponse>('/api/recommend/sectors');
+}
+
+export async function getRecommendScanStatus(): Promise<RecommendScanStatus> {
+  return fetchAPI<RecommendScanStatus>('/api/recommend/scan/status');
+}
+
+export async function getRecommendLatest(): Promise<RecommendLatestResponse> {
+  return fetchAPI<RecommendLatestResponse>('/api/recommend/latest');
 }

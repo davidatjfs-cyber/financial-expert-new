@@ -63,6 +63,8 @@ _MAX_UPLOAD_BYTES = int((os.environ.get("MAX_UPLOAD_MB") or "30").strip() or "30
 _PDF_ANALYSIS_SEM = threading.Semaphore(int((os.environ.get("PDF_ANALYSIS_CONCURRENCY") or "1").strip() or "1"))
 
 _SPOT_CACHE: dict[str, tuple[float, "pd.DataFrame"]] = {}
+_FEISHU_SENT_ALERTS: dict[str, float] = {}
+_FEISHU_SENT_TTL = 6 * 3600
 
 # If yfinance is rate-limited for US symbols, skip yfinance for a short cooldown window.
 _YF_US_COOLDOWN_UNTIL: float = 0.0
@@ -321,6 +323,97 @@ class PortfolioAlertResponse(BaseModel):
     message: str
     current_price: Optional[float] = None
     trigger_price: Optional[float] = None
+
+
+def _feishu_env() -> tuple[str, str, str, str]:
+    app_id = (os.environ.get("FEISHU_APP_ID") or "").strip()
+    app_secret = (os.environ.get("FEISHU_APP_SECRET") or "").strip()
+    receive_id = (os.environ.get("FEISHU_RECEIVE_ID") or "").strip()
+    receive_id_type = (os.environ.get("FEISHU_RECEIVE_ID_TYPE") or "open_id").strip() or "open_id"
+    return app_id, app_secret, receive_id, receive_id_type
+
+
+def _feishu_tenant_token(app_id: str, app_secret: str) -> Optional[str]:
+    try:
+        resp = requests.post(
+            "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+            json={"app_id": app_id, "app_secret": app_secret},
+            timeout=8,
+        )
+        data = resp.json()
+        return data.get("tenant_access_token")
+    except Exception:
+        return None
+
+
+def _send_feishu_portfolio_alert(alert: PortfolioAlertResponse):
+    if (alert.market or "").strip().upper() != "CN":
+        return
+
+    send_types = {
+        "target_buy",
+        "strategy_buy_zone",
+        "strategy_stop_loss",
+        "strategy_take_profit_1",
+        "strategy_take_profit_2",
+    }
+    if alert.alert_type not in send_types:
+        return
+
+    app_id, app_secret, receive_id, receive_id_type = _feishu_env()
+    if not app_id or not app_secret or not receive_id:
+        return
+
+    now = time.time()
+    for k, ts in list(_FEISHU_SENT_ALERTS.items()):
+        if now - ts > _FEISHU_SENT_TTL:
+            del _FEISHU_SENT_ALERTS[k]
+    if alert.key in _FEISHU_SENT_ALERTS:
+        return
+
+    token = _feishu_tenant_token(app_id, app_secret)
+    if not token:
+        return
+
+    title_map = {
+        "target_buy": "到达目标买入价",
+        "target_sell": "到达目标卖出价",
+        "signal_buy": "出现买入信号",
+        "signal_sell": "出现卖出信号",
+        "strategy_buy_zone": "进入策略买入区间",
+        "strategy_stop_loss": "触发严格止损",
+        "strategy_take_profit_1": "触发第一止盈",
+        "strategy_take_profit_2": "触发第二止盈",
+    }
+    title = title_map.get(alert.alert_type, "持仓提醒")
+    symbol_name = f"{alert.name or alert.symbol} ({alert.market}:{alert.symbol})"
+    current = "-" if alert.current_price is None else f"{alert.current_price:.2f}"
+    trigger = "-" if alert.trigger_price is None else f"{alert.trigger_price:.2f}"
+    card = {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "red" if "sell" in alert.alert_type or "stop" in alert.alert_type else "green",
+            "title": {"tag": "plain_text", "content": title},
+        },
+        "elements": [
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"**股票**：{symbol_name}"}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"**当前价**：{current}    **触发价**：{trigger}"}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"**原因**：{alert.message}"}},
+        ],
+    }
+    try:
+        resp = requests.post(
+            f"https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type={receive_id_type}",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json; charset=utf-8"},
+            json={"receive_id": receive_id, "msg_type": "interactive", "content": json.dumps(card, ensure_ascii=False)},
+            timeout=8,
+        )
+        rj = resp.json()
+        print(f"[FEISHU] send alert {alert.alert_type} {alert.symbol}: code={rj.get('code')} msg={rj.get('msg','')[:100]}")
+        if rj.get("code") == 0:
+            _FEISHU_SENT_ALERTS[alert.key] = now
+    except Exception as e:
+        print(f"[FEISHU] send error: {e}")
 
 
 class CreateReportRequest(BaseModel):
@@ -2155,9 +2248,34 @@ if (os.environ.get("ENABLE_INDICATOR_WARMER") or "").strip() == "1":
     _indicator_warmer_thread.start()
 
 
+def _portfolio_feishu_notifier():
+    interval = int((os.environ.get("FEISHU_PORTFOLIO_ALERT_INTERVAL") or "300").strip() or "300")
+    print(f"[FEISHU] notifier started, interval={interval}s, receive_id={os.environ.get('FEISHU_RECEIVE_ID','')[:8]}...")
+    time.sleep(20)
+    while True:
+        try:
+            print(f"[FEISHU] checking portfolio alerts...")
+            get_portfolio_alerts()
+        except Exception as e:
+            print(f"[FEISHU] notifier error: {e}")
+        time.sleep(interval)
+
+
+if (os.environ.get("ENABLE_FEISHU_PORTFOLIO_ALERTS") or "").strip() == "1":
+    _portfolio_feishu_thread = threading.Thread(target=_portfolio_feishu_notifier, daemon=True)
+    _portfolio_feishu_thread.start()
+
+
 @app.get("/api/portfolio/alerts", response_model=list[PortfolioAlertResponse])
 def get_portfolio_alerts():
     alerts: list[PortfolioAlertResponse] = []
+
+    def _si_get(si, key: str):
+        if si is None:
+            return None
+        if isinstance(si, dict):
+            return si.get(key)
+        return getattr(si, key, None)
 
     with session_scope() as s:
         positions = s.execute(select(PortfolioPosition)).scalars().all()
@@ -2220,8 +2338,63 @@ def get_portfolio_alerts():
             except Exception:
                 pass
         if si is not None:
-            if getattr(si, "buy_price_aggressive_ok", None) is True and getattr(si, "buy_price_aggressive", None) is not None:
-                bp = getattr(si, "buy_price_aggressive", None)
+            buy_zone_low = _si_get(si, "strategy_buy_zone_low")
+            buy_zone_high = _si_get(si, "strategy_buy_zone_high")
+            stop_loss = _si_get(si, "strategy_stop_loss")
+            take_profit_1 = _si_get(si, "strategy_take_profit_1")
+            take_profit_2 = _si_get(si, "strategy_take_profit_2")
+
+            try:
+                if current_price is not None and buy_zone_high is not None:
+                    bz_low = float(buy_zone_low) if buy_zone_low is not None else None
+                    bz_high = float(buy_zone_high)
+                    if current_price <= bz_high and (bz_low is None or current_price >= bz_low):
+                        alerts.append(PortfolioAlertResponse(
+                            key=f"{p.id}:strategy_buy_zone:{int(bz_high * 10000)}", position_id=p.id,
+                            market=market, symbol=symbol, name=name, alert_type="strategy_buy_zone",
+                            message=f"已进入策略买入区间 {('-' if bz_low is None else f'{bz_low:.2f}')} - {bz_high:.2f}",
+                            current_price=current_price, trigger_price=bz_high,
+                        ))
+            except Exception:
+                pass
+
+            try:
+                if current_price is not None and float(p.quantity or 0) > 0 and stop_loss is not None:
+                    sl = float(stop_loss)
+                    if current_price <= sl:
+                        alerts.append(PortfolioAlertResponse(
+                            key=f"{p.id}:strategy_stop_loss:{int(sl * 10000)}", position_id=p.id,
+                            market=market, symbol=symbol, name=name, alert_type="strategy_stop_loss",
+                            message=f"已跌破严格止损价 {sl:.2f}", current_price=current_price, trigger_price=sl,
+                        ))
+            except Exception:
+                pass
+
+            try:
+                if current_price is not None and float(p.quantity or 0) > 0 and take_profit_2 is not None:
+                    tp2 = float(take_profit_2)
+                    if current_price >= tp2:
+                        alerts.append(PortfolioAlertResponse(
+                            key=f"{p.id}:strategy_take_profit_2:{int(tp2 * 10000)}", position_id=p.id,
+                            market=market, symbol=symbol, name=name, alert_type="strategy_take_profit_2",
+                            message=f"已触发第二止盈价 {tp2:.2f}，考虑清仓或保留底仓",
+                            current_price=current_price, trigger_price=tp2,
+                        ))
+                if current_price is not None and float(p.quantity or 0) > 0 and take_profit_1 is not None:
+                    tp1 = float(take_profit_1)
+                    tp2 = float(take_profit_2) if take_profit_2 is not None else None
+                    if current_price >= tp1 and (tp2 is None or current_price < tp2):
+                        alerts.append(PortfolioAlertResponse(
+                            key=f"{p.id}:strategy_take_profit_1:{int(tp1 * 10000)}", position_id=p.id,
+                            market=market, symbol=symbol, name=name, alert_type="strategy_take_profit_1",
+                            message=f"已触发第一止盈价 {tp1:.2f}，考虑先卖出1/2",
+                            current_price=current_price, trigger_price=tp1,
+                        ))
+            except Exception:
+                pass
+
+            if _si_get(si, "buy_price_aggressive_ok") is True and _si_get(si, "buy_price_aggressive") is not None:
+                bp = _si_get(si, "buy_price_aggressive")
                 try:
                     bp = float(bp)
                 except Exception:
@@ -2232,8 +2405,8 @@ def get_portfolio_alerts():
                     message=f"出现买入信号（参考价 {('-' if bp is None else f'{bp:.2f}')}）",
                     current_price=current_price, trigger_price=bp,
                 ))
-            if getattr(si, "sell_price_ok", None) is True and getattr(si, "sell_price", None) is not None:
-                spx = getattr(si, "sell_price", None)
+            if _si_get(si, "sell_price_ok") is True and _si_get(si, "sell_price") is not None:
+                spx = _si_get(si, "sell_price")
                 try:
                     spx = float(spx)
                 except Exception:
@@ -2244,6 +2417,9 @@ def get_portfolio_alerts():
                     message=f"出现卖出信号（参考价 {('-' if spx is None else f'{spx:.2f}')}）",
                     current_price=current_price, trigger_price=spx,
                 ))
+
+    for alert in alerts:
+        _send_feishu_portfolio_alert(alert)
 
     return alerts
 
@@ -3903,6 +4079,20 @@ class StockIndicatorsResponse(BaseModel):
     buy_price_stable: Optional[float] = None
     sell_price: Optional[float] = None
 
+    strategy_action: Optional[str] = None
+    strategy_buy_zone_low: Optional[float] = None
+    strategy_buy_zone_high: Optional[float] = None
+    strategy_stop_loss: Optional[float] = None
+    strategy_take_profit_1: Optional[float] = None
+    strategy_take_profit_2: Optional[float] = None
+    strategy_sell_trigger: Optional[str] = None
+    strategy_buy_trigger: Optional[str] = None
+    indicator_reference_note: Optional[str] = None
+    ma60_reference: Optional[str] = None
+    slope_reference: Optional[str] = None
+    buy_score_reference: Optional[str] = None
+    sell_score_reference: Optional[str] = None
+
     buy_condition_desc: Optional[str] = None
     sell_condition_desc: Optional[str] = None
 
@@ -4963,22 +5153,26 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
             slope_raw = 0.0
             slope_pct = 0.0
 
-        # 趋势：斜率大于 0 = 上涨；约等于 0 = 观望；小于 0 = 下跌
-        eps = 0.02
+        # === 趋势综合判定 ===
+        # trend 基于MA60斜率，但需要和MA排列一致
+        # MA一致性修正将在buy_score计算时执行（需要ma5/ma20/ma60）
+        slope_trend = None
         if slope_pct is None:
-            trend = None
-        elif abs(slope_pct) <= eps:
-            trend = "观望"
+            slope_trend = None
+        elif abs(slope_pct) <= 0.02:
+            slope_trend = "震荡"
         elif slope_pct > 0:
-            trend = "上涨"
+            slope_trend = "上涨"
         else:
-            trend = "下跌"
+            slope_trend = "下跌"
+
+        if slope_trend is not None:
+            trend = slope_trend if slope_trend != "震荡" else "观望"
+        else:
+            trend = None
 
         # Slope 率建议：
-        # - Slope% ≈ 0%：不要买
-        # - 0% ~ 0.1%：小心买
-        # - 0.2% ~ 0.3%：放心买
-        # - 0.4%+：有危险
+        eps = 0.02
         if slope_pct is None:
             slope_advice = None
         elif abs(slope_pct) <= eps:
@@ -4991,7 +5185,8 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
             slope_advice = "上涨"
         else:
             slope_advice = "急涨"
-    except Exception:
+    except Exception as _slope_err:
+        pass
         slope_raw = None
         slope_pct = None
         trend = None
@@ -5238,6 +5433,23 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
         if kdj_k_now is not None and kdj_d_now is not None and kdj_k_prev is not None and kdj_d_prev is not None:
             kdj_golden_cross = bool(kdj_k_prev <= kdj_d_prev and kdj_k_now > kdj_d_now)
             kdj_death_cross = bool(kdj_k_prev >= kdj_d_prev and kdj_k_now < kdj_d_now)
+
+        # === TREND × MA CONSISTENCY CHECK ===
+        # Override trend if slope and MA排列 contradict each other
+        if trend is not None and ma5_now is not None and ma20_now is not None and ma60_now is not None:
+            ma_bull = float(ma5_now) > float(ma20_now) > float(ma60_now)
+            ma_bear = float(ma5_now) < float(ma20_now) < float(ma60_now)
+            ma_partial_bull = float(ma20_now) > float(ma60_now)
+            ma_partial_bear = float(ma20_now) < float(ma60_now)
+            if trend == "上涨" and (ma_bear or ma_partial_bear):
+                trend = "震荡偏弱"
+            elif trend == "下跌" and (ma_bull or ma_partial_bull):
+                trend = "震荡偏强"
+            elif trend == "观望" and ma_bull:
+                trend = "震荡偏强"
+            elif trend == "观望" and ma_bear:
+                trend = "震荡偏弱"
+
         # === BUY SCORING (optimized by backtest edge analysis) ===
         # Edge rankings: RSI<30(+0.022) > boll<0.1(+0.005) > ma_full(+0.003) > kdj_j<20(+0.003)
         #   > vol>ma10(+0.003) > macd_bull(+0.003) > slope>0(+0.002)
@@ -5246,8 +5458,17 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
             buy_score_details["trend"] = {"score": 8, "max": 8, "reason": "上涨趋势"}
         elif slope_pct is not None and slope_pct > 0:
             buy_score_details["trend"] = {"score": 5, "max": 8, "reason": "缓慢上行"}
-        else:
+        elif slope_pct is not None and slope_pct <= 0:
             buy_score_details["trend"] = {"score": 0, "max": 8, "reason": "下行趋势"}
+        else:
+            buy_score_details["trend"] = {"score": 0, "max": 8, "reason": "数据不足"}
+        # MA空头排列惩罚: 如果MA5<MA20<MA60，trend额外扣分
+        if trend in ("下跌", "震荡偏弱"):
+            buy_score_details["trend"]["score"] = max(0, buy_score_details["trend"]["score"] - 10)
+            buy_score_details["trend"]["reason"] = "下跌趋势(扣分)"
+        elif trend == "震荡偏强":
+            buy_score_details["trend"]["score"] = max(0, buy_score_details["trend"]["score"] - 3)
+            buy_score_details["trend"]["reason"] += "(偏弱)"
         if ma5_now and ma20_now and ma60_now and last_close:
             if ma5_now > ma20_now > ma60_now:
                 buy_score_details["ma_align"] = {"score": 8, "max": 8, "reason": "多头排列"}
@@ -5342,16 +5563,7 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
             buy_score_details["boll"] = {"score": 0, "max": 12, "reason": "无布林"}
         buy_score = sum(v["score"] for v in buy_score_details.values())
         buy_total_max = 88
-        buy_pct = buy_score / buy_total_max if buy_total_max else 0
-        if buy_pct >= 0.75:
-            buy_grade = "强烈买入"
-        elif buy_pct >= 0.55:
-            buy_grade = "建议买入"
-        elif buy_pct >= 0.35:
-            buy_grade = "观望"
-        else:
-            buy_grade = "不建议"
-        aggressive_ok = buy_pct >= 0.60
+        # buy_pct and buy_grade will be computed after sell conflict adjustment
         # === SELL SCORING (optimized by backtest) ===
         # Key insight: RSI>70 edge=+0.018 (trend continues!), macd_cross_dn edge=+0.009
         # Sell signals should focus on trend REVERSAL, not overbought
@@ -5426,6 +5638,15 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
             sell_score_details["stop_loss"] = {"score": 0, "max": 10, "reason": "无ATR"}
         sell_score = sum(v["score"] for v in sell_score_details.values())
         sell_total_max = 85
+
+        # === BUY/SELL 一致性修正 ===
+        # 如果sell_score较高，buy_score应打折（卖出信号与买入信号矛盾）
+        if sell_score is not None and buy_score is not None and sell_score > 20:
+            penalty = min(buy_score, int(sell_score * 0.6))
+            buy_score = max(0, buy_score - penalty)
+            if penalty > 0:
+                buy_score_details["sell_conflict"] = {"score": -penalty, "max": 0, "reason": f"卖出信号冲突(扣{penalty}分)"}
+
         sell_pct = sell_score / sell_total_max if sell_total_max else 0
         if sell_pct >= 0.65:
             sell_grade = "强烈卖出"
@@ -5433,6 +5654,19 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
             sell_grade = "建议减仓"
         else:
             sell_grade = "继续持有"
+
+        # Recompute buy_pct/buy_grade after conflict adjustments
+        buy_total_max = 88
+        buy_pct = buy_score / buy_total_max if buy_total_max else 0
+        aggressive_ok = buy_pct >= 0.60
+        if buy_pct >= 0.75:
+            buy_grade = "强烈买入"
+        elif buy_pct >= 0.55:
+            buy_grade = "建议买入"
+        elif buy_pct >= 0.35:
+            buy_grade = "观望"
+        else:
+            buy_grade = "不建议"
         if stop_line is not None:
             sell_price = float(stop_line)
         elif ma20_now is not None:
@@ -5444,7 +5678,8 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
             sell_reason = f"{sell_grade}({sell_score}分)：" + "；".join(v["reason"] for _, v in top_rs if v["score"] > 0)
         else:
             sell_reason = "继续持有"
-    except Exception:
+    except Exception as _buysell_err:
+        pass
         aggressive_ok = None
     buy_reason = None
     try:
@@ -5479,6 +5714,171 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
     except Exception:
         buy_price_aggressive = float(ma20_now) if ma20_now is not None else (float(last_close) if last_close is not None else None)
         buy_price_stable = float(ma60_now) if 'ma60_now' in locals() and ma60_now is not None else None
+
+    strategy_action = None
+    strategy_buy_zone_low = None
+    strategy_buy_zone_high = None
+    strategy_stop_loss = sell_price
+    strategy_take_profit_1 = None
+    strategy_take_profit_2 = None
+    strategy_buy_trigger = None
+    strategy_sell_trigger = None
+    ma60_reference = None
+    slope_reference = None
+    buy_score_reference = None
+    sell_score_reference = None
+    indicator_reference_note = "MA60、斜率、买入综合评分是传统趋势参考；新策略以急跌、超卖、放量后的均值回归买点为主。卖出综合评分仍用于识别反转和风控。"
+    try:
+        ret_5d = None
+        ret_10d = None
+        if len(close) >= 6 and pd.notna(close.iloc[-6]) and last_close is not None:
+            ret_5d = (float(last_close) / float(close.iloc[-6]) - 1.0) * 100.0
+        if len(close) >= 11 and pd.notna(close.iloc[-11]) and last_close is not None:
+            ret_10d = (float(last_close) / float(close.iloc[-11]) - 1.0) * 100.0
+
+        dist_ma60_pct = None
+        if ma60_now is not None and last_close is not None and ma60_now != 0:
+            dist_ma60_pct = (float(last_close) / float(ma60_now) - 1.0) * 100.0
+
+        steep_drop = slope_pct is not None and slope_pct < -0.15
+        mild_drop = slope_pct is not None and -0.15 <= slope_pct < -0.05
+        oversold = rsi14 is not None and rsi14 < 30
+        vol_spike = bool(signal_vol_gt_ma10 or signal_vol_gt_ma5)
+        big_drop_5d = ret_5d is not None and ret_5d < -5
+        big_drop_10d = ret_10d is not None and ret_10d < -8
+        below_ma60_10pct = dist_ma60_pct is not None and dist_ma60_pct < -10
+
+        timing_score = 0
+        global_reversal_score = 0
+        if m in {"US", "HK"}:
+            # US/HK use a separately backtested reversal model, not the A-share timing model.
+            if rsi14 is not None and rsi14 < 35:
+                global_reversal_score += 35
+            if big_drop_5d:
+                global_reversal_score += 25
+            if dist_ma60_pct is not None and dist_ma60_pct < -8:
+                global_reversal_score += 20
+            if vol_spike:
+                global_reversal_score += 20
+            timing_score = global_reversal_score
+        else:
+            if big_drop_5d and vol_spike:
+                timing_score = 100
+            elif steep_drop and oversold and vol_spike:
+                timing_score = 98
+            elif big_drop_10d and below_ma60_10pct:
+                timing_score = 96
+            elif steep_drop and oversold and big_drop_5d:
+                timing_score = 94
+            elif steep_drop and oversold:
+                timing_score = 90
+            elif steep_drop or oversold:
+                timing_score = 80 if vol_spike else 60
+            elif mild_drop:
+                timing_score = 30
+
+        entry_ref = buy_price_aggressive or last_close or ma20_now or ma60_now
+        if entry_ref is not None:
+            lower_candidates = [float(entry_ref) * 0.98]
+            if atr14 is not None and atr14 > 0:
+                lower_candidates.append(float(entry_ref) - float(atr14))
+            if boll_lower is not None and not boll_lower.empty and pd.notna(boll_lower.iloc[-1]):
+                lower_candidates.append(float(boll_lower.iloc[-1]))
+            strategy_buy_zone_low = min(lower_candidates)
+            strategy_buy_zone_high = float(entry_ref)
+            stop_ref = float(strategy_buy_zone_low)
+            strategy_stop_loss = max(stop_ref * 0.92, stop_ref - 2 * float(atr14)) if atr14 is not None and atr14 > 0 else stop_ref * 0.92
+
+            tp1_candidates = []
+            if ma20_now is not None and float(ma20_now) > float(entry_ref):
+                tp1_candidates.append(float(ma20_now))
+            tp1_candidates.append(float(entry_ref) * (1.08 if m in {"US", "HK"} else 1.05))
+            strategy_take_profit_1 = max(tp1_candidates)
+
+            tp2_candidates = []
+            if ma60_now is not None and float(ma60_now) > strategy_take_profit_1:
+                tp2_candidates.append(float(ma60_now))
+            tp2_candidates.append(float(entry_ref) * (1.16 if m in {"US", "HK"} else 1.10))
+            strategy_take_profit_2 = max(tp2_candidates)
+
+        if sell_score is not None and sell_score >= 55:
+            strategy_action = "立即卖出"
+        elif sell_score is not None and sell_score >= 34:
+            strategy_action = "分批减仓"
+        elif m in {"US", "HK"} and timing_score >= 90:
+            strategy_action = "高胜率反转买点"
+        elif m in {"US", "HK"} and timing_score >= 80:
+            strategy_action = "反转买点观察"
+        elif m in {"US", "HK"}:
+            strategy_action = "暂不买入"
+        elif timing_score >= 90:
+            strategy_action = "立即分批买入"
+        elif timing_score >= 60:
+            strategy_action = "轻仓试探买入"
+        elif timing_score >= 30:
+            strategy_action = "等待回调确认"
+        else:
+            strategy_action = "暂不买入"
+
+        buy_bits = []
+        if m in {"US", "HK"}:
+            if rsi14 is not None and rsi14 < 35:
+                buy_bits.append("RSI<35超卖")
+            if big_drop_5d:
+                buy_bits.append("5日跌幅超过5%")
+            if dist_ma60_pct is not None and dist_ma60_pct < -8:
+                buy_bits.append("低于MA60超8%")
+            if vol_spike:
+                buy_bits.append("放量确认")
+            market_name = "美股" if m == "US" else "港股"
+            strategy_buy_trigger = " + ".join(buy_bits) if buy_bits else f"未出现{market_name}独立回测验证的反转买点，等待RSI<35、5日急跌、低于MA60或放量确认。"
+        else:
+            if steep_drop:
+                buy_bits.append("60日斜率急跌")
+            elif mild_drop:
+                buy_bits.append("60日斜率缓跌")
+            if oversold:
+                buy_bits.append("RSI<30超卖")
+            if big_drop_5d:
+                buy_bits.append("5日跌幅超过5%")
+            if big_drop_10d:
+                buy_bits.append("10日跌幅超过8%")
+            if vol_spike:
+                buy_bits.append("放量确认")
+            if below_ma60_10pct:
+                buy_bits.append("低于MA60超10%")
+            strategy_buy_trigger = " + ".join(buy_bits) if buy_bits else "未出现急跌+超卖型高胜率买点，等待RSI回落或价格进入买入区间。"
+
+        sell_bits = []
+        if sell_score is not None and sell_score >= 55:
+            sell_bits.append("卖出综合评分达到强卖阈值")
+        elif sell_score is not None and sell_score >= 34:
+            sell_bits.append("卖出综合评分达到减仓阈值")
+        if strategy_take_profit_1 is not None:
+            sell_bits.append(f"触及第一止盈价{strategy_take_profit_1:.2f}先卖出1/2")
+        if strategy_take_profit_2 is not None:
+            sell_bits.append(f"触及第二止盈价{strategy_take_profit_2:.2f}清仓或保留底仓")
+        if strategy_stop_loss is not None:
+            sell_bits.append(f"跌破止损价{strategy_stop_loss:.2f}严格止损")
+        if rsi14 is not None and rsi14 >= 65:
+            sell_bits.append("RSI修复到65以上，均值回归基本完成")
+        strategy_sell_trigger = "；".join(sell_bits) if sell_bits else "未出现卖出触发，继续持有并观察MA20、RSI和MACD。"
+
+        if ma60_now is not None and last_close is not None and dist_ma60_pct is not None:
+            if m in {"US", "HK"}:
+                ma60_reference = f"MA60={ma60_now:.2f}，现价相对MA60为{dist_ma60_pct:+.1f}%；{('美股' if m == 'US' else '港股')}策略使用独立回测的反转模型，低于MA60需结合RSI、5日跌幅和放量判断。"
+            else:
+                ma60_reference = f"MA60={ma60_now:.2f}，现价相对MA60为{dist_ma60_pct:+.1f}%；在新策略里，低于MA60本身不是坏事，需结合急跌、超卖、放量判断。"
+        else:
+            ma60_reference = "MA60数据不足，仅作中期位置参考。"
+        if slope_pct is not None:
+            slope_reference = f"斜率={slope_pct:.3f}%；负斜率代表回调/急跌，若同时超卖和放量，反而是均值回归买点。"
+        else:
+            slope_reference = "斜率数据不足，仅作趋势描述。"
+        buy_score_reference = f"买入综合评分={buy_score}分，是传统趋势评分；它偏好多头排列和上涨趋势，不作为新策略主决策。" if buy_score is not None else "买入综合评分数据不足。"
+        sell_score_reference = f"卖出综合评分={sell_score}分，可继续作为风险和反转参考；达到34分考虑减仓，达到55分优先卖出。" if sell_score is not None else "卖出综合评分数据不足。"
+    except Exception:
+        pass
 
     buy_condition_desc = _build_buy_condition_desc(
         buy_score=buy_score,
@@ -5519,6 +5919,20 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
         buy_price_aggressive=buy_price_aggressive,
         buy_price_stable=buy_price_stable,
         sell_price=sell_price,
+
+        strategy_action=strategy_action,
+        strategy_buy_zone_low=strategy_buy_zone_low,
+        strategy_buy_zone_high=strategy_buy_zone_high,
+        strategy_stop_loss=strategy_stop_loss,
+        strategy_take_profit_1=strategy_take_profit_1,
+        strategy_take_profit_2=strategy_take_profit_2,
+        strategy_buy_trigger=strategy_buy_trigger,
+        strategy_sell_trigger=strategy_sell_trigger,
+        indicator_reference_note=indicator_reference_note,
+        ma60_reference=ma60_reference,
+        slope_reference=slope_reference,
+        buy_score_reference=buy_score_reference,
+        sell_score_reference=sell_score_reference,
 
         buy_condition_desc=buy_condition_desc,
         sell_condition_desc=sell_condition_desc,
@@ -6235,6 +6649,223 @@ def fetch_market_report(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取失败: {str(e)}")
+
+
+# ==================== Recommend API ====================
+
+_RECOMMEND_SCAN_STATUS: dict = {"status": "idle", "progress": 0.0, "message": ""}
+
+
+class RecommendScanRequest(BaseModel):
+    top_n: int = 20
+    use_ai: bool = True
+    sector: Optional[str] = None
+
+
+@app.get("/api/recommend/sectors")
+def get_recommend_sectors():
+    from core.recommend import get_sectors
+    sectors = get_sectors()
+    return {"sectors": sectors, "count": len(sectors)}
+
+
+@app.get("/api/recommend/scan/status")
+def get_recommend_scan_status():
+    return _RECOMMEND_SCAN_STATUS
+
+
+@app.get("/api/recommend/latest")
+def get_recommend_latest():
+    from core.recommend import get_latest_scan
+    results = get_latest_scan()
+    if results is None:
+        return {"results": [], "message": "暂无推荐结果，请先执行扫描"}
+    return {"results": results, "count": len(results)}
+
+
+@app.post("/api/recommend/scan")
+def start_recommend_scan(req: RecommendScanRequest, background_tasks: BackgroundTasks):
+    from core.recommend import run_scan, save_scan_result, generate_ai_reasons
+    from core.llm_qwen import call_llm
+
+    if _RECOMMEND_SCAN_STATUS.get("status") == "running":
+        raise HTTPException(status_code=409, detail="扫描正在进行中，请稍后")
+
+    def _progress(pct: float, msg: str):
+        _RECOMMEND_SCAN_STATUS["progress"] = pct
+        _RECOMMEND_SCAN_STATUS["message"] = msg
+
+    def _run():
+        _RECOMMEND_SCAN_STATUS["status"] = "running"
+        _RECOMMEND_SCAN_STATUS["progress"] = 0.0
+        _RECOMMEND_SCAN_STATUS["message"] = "开始扫描..."
+        try:
+            results = run_scan(
+                top_n=req.top_n,
+                get_indicators_fn=get_stock_indicators,
+                progress_cb=_progress,
+                sector=req.sector,
+            )
+            if not results:
+                _RECOMMEND_SCAN_STATUS["status"] = "error"
+                _RECOMMEND_SCAN_STATUS["message"] = "扫描无结果，请检查数据源"
+                return
+
+            if req.use_ai:
+                _RECOMMEND_SCAN_STATUS["message"] = "正在生成AI推荐理由..."
+                try:
+                    results = generate_ai_reasons(results, llm_call_fn=call_llm)
+                except Exception as e:
+                    print(f"[recommend] AI reasons failed: {e}")
+
+            for r in results:
+                r["recommend_date"] = date.today().isoformat()
+
+            save_scan_result(results)
+            _RECOMMEND_SCAN_STATUS["status"] = "done"
+            _RECOMMEND_SCAN_STATUS["progress"] = 1.0
+            _RECOMMEND_SCAN_STATUS["message"] = f"扫描完成，推荐 {len(results)} 只股票"
+        except Exception as e:
+            _RECOMMEND_SCAN_STATUS["status"] = "error"
+            _RECOMMEND_SCAN_STATUS["message"] = f"扫描失败: {e}"
+            print(f"[recommend] scan error: {e}")
+
+    background_tasks.add_task(_run)
+    return {"status": "started", "message": "扫描已启动"}
+
+
+# ==================== Backtest & ML API ====================
+
+_BACKTEST_STATUS: dict = {"status": "idle", "progress": 0.0, "message": ""}
+_ML_TRAIN_STATUS: dict = {"status": "idle", "progress": 0.0, "message": ""}
+_WEIGHT_OPT_STATUS: dict = {"status": "idle", "progress": 0.0, "message": ""}
+
+
+@app.get("/api/backtest/status")
+def get_backtest_status():
+    return _BACKTEST_STATUS
+
+
+@app.get("/api/backtest/result")
+def get_backtest_result():
+    from core.backtest import load_backtest_result
+    r = load_backtest_result()
+    if r is None:
+        return {"status": "none", "message": "暂无回测结果"}
+    from dataclasses import asdict
+    return {"status": "ok", "result": asdict(r)}
+
+
+@app.post("/api/backtest/run")
+def start_backtest(background_tasks: BackgroundTasks):
+    if _BACKTEST_STATUS.get("status") == "running":
+        raise HTTPException(status_code=409, detail="回测正在进行中")
+
+    def _run():
+        _BACKTEST_STATUS["status"] = "running"
+        _BACKTEST_STATUS["progress"] = 0.0
+        _BACKTEST_STATUS["message"] = "开始回测..."
+        try:
+            from core.backtest import run_backtest, save_backtest_result
+
+            def _scan_simple(as_of_date: str) -> list[str]:
+                from core.recommend import get_hs300_stocks
+                stocks = get_hs300_stocks()
+                return [s["symbol"] for s in stocks[:20]]
+
+            result = run_backtest(
+                scan_fn=_scan_simple,
+                top_n=20,
+                hold_days=20,
+                lookback_months=12,
+                progress_cb=lambda p, m: _BACKTEST_STATUS.update({"progress": p, "message": m}),
+            )
+            save_backtest_result(result)
+            _BACKTEST_STATUS["status"] = "done"
+            _BACKTEST_STATUS["progress"] = 1.0
+            wr = result.win_rate
+            ae = result.annualized_excess
+            _BACKTEST_STATUS["message"] = f"回测完成: 胜率{wr:.1f}% 年化超额{ae:.1f}%"
+        except Exception as e:
+            _BACKTEST_STATUS["status"] = "error"
+            _BACKTEST_STATUS["message"] = f"回测失败: {e}"
+            print(f"[backtest] error: {e}")
+
+    background_tasks.add_task(_run)
+    return {"status": "started", "message": "回测已启动"}
+
+
+@app.get("/api/ml/status")
+def get_ml_status():
+    from core.ml_model import get_model_info
+    return {**get_model_info(), "train_status": _ML_TRAIN_STATUS}
+
+
+@app.post("/api/ml/train")
+def start_ml_train(background_tasks: BackgroundTasks):
+    if _ML_TRAIN_STATUS.get("status") == "running":
+        raise HTTPException(status_code=409, detail="模型训练正在进行中")
+
+    def _run():
+        _ML_TRAIN_STATUS["status"] = "running"
+        _ML_TRAIN_STATUS["progress"] = 0.0
+        _ML_TRAIN_STATUS["message"] = "开始训练..."
+        try:
+            from core.ml_model import train_and_save
+            result = train_and_save(
+                progress_cb=lambda p, m: _ML_TRAIN_STATUS.update({"progress": p, "message": m}),
+            )
+            if result.get("status") == "ok":
+                _ML_TRAIN_STATUS["status"] = "done"
+                acc = result.get("train_accuracy", 0)
+                _ML_TRAIN_STATUS["message"] = f"训练完成: 准确率{acc:.1%} 样本{result.get('samples',0)}"
+            else:
+                _ML_TRAIN_STATUS["status"] = "error"
+                _ML_TRAIN_STATUS["message"] = result.get("message", "训练失败")
+        except Exception as e:
+            _ML_TRAIN_STATUS["status"] = "error"
+            _ML_TRAIN_STATUS["message"] = f"训练失败: {e}"
+            print(f"[ml] train error: {e}")
+
+    background_tasks.add_task(_run)
+    return {"status": "started", "message": "模型训练已启动"}
+
+
+@app.get("/api/weights/status")
+def get_weights_status():
+    return _WEIGHT_OPT_STATUS
+
+
+@app.get("/api/weights/current")
+def get_current_weights():
+    from core.recommend import _load_dynamic_weights
+    return {"weights": _load_dynamic_weights()}
+
+
+@app.post("/api/weights/optimize")
+def start_weight_optimization(background_tasks: BackgroundTasks):
+    if _WEIGHT_OPT_STATUS.get("status") == "running":
+        raise HTTPException(status_code=409, detail="权重优化正在进行中")
+
+    def _run():
+        _WEIGHT_OPT_STATUS["status"] = "running"
+        _WEIGHT_OPT_STATUS["progress"] = 0.0
+        _WEIGHT_OPT_STATUS["message"] = "开始优化权重..."
+        try:
+            from core.factor_weights import optimize_weights
+            weights = optimize_weights(
+                progress_cb=lambda p, m: _WEIGHT_OPT_STATUS.update({"progress": p, "message": m}),
+            )
+            _WEIGHT_OPT_STATUS["status"] = "done"
+            _WEIGHT_OPT_STATUS["progress"] = 1.0
+            _WEIGHT_OPT_STATUS["message"] = f"权重优化完成: {weights}"
+        except Exception as e:
+            _WEIGHT_OPT_STATUS["status"] = "error"
+            _WEIGHT_OPT_STATUS["message"] = f"优化失败: {e}"
+            print(f"[weights] error: {e}")
+
+    background_tasks.add_task(_run)
+    return {"status": "started", "message": "权重优化已启动"}
 
 
 if __name__ == "__main__":

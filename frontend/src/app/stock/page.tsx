@@ -345,7 +345,7 @@ function StockPageInner() {
                 </div>
                 <div className="text-right">
                   <div className={`text-2xl font-extrabold ${trendColorClass(stockIndicators?.trend)}`}>{trendLabel(stockIndicators?.trend)}</div>
-                  <div className="text-[var(--text-muted)] text-[10px] mt-0.5">MA60趋势</div>
+                  <div className="text-[var(--text-muted)] text-[10px] mt-0.5">MA60中期状态</div>
                 </div>
               </div>
 
@@ -364,7 +364,56 @@ function StockPageInner() {
                 ))}
               </div>
 
-              {/* Section 3: Technical Indicators */}
+              {/* Section 3: Strategy Plan */}
+              <div className="rounded-2xl p-4 border-2 border-emerald-500/30 bg-gradient-to-br from-emerald-500/12 via-[var(--bg-surface)] to-amber-500/8">
+                <div className="flex items-center justify-between gap-3 mb-3">
+                  <div>
+                    <div className="text-[var(--text-muted)] text-[10px] font-bold tracking-[0.18em] uppercase">Strategy Plan</div>
+                    <div className="text-[var(--text-primary)] text-sm font-extrabold mt-1">
+                      {selectedStock.market === 'US' ? '美股反转买卖计划' : selectedStock.market === 'HK' ? '港股反转买卖计划' : '新策略买卖计划'}
+                    </div>
+                  </div>
+                  <div className={`px-3 py-1.5 rounded-full text-xs font-extrabold ${stockIndicators?.strategy_action?.includes('买入') ? 'bg-emerald-500 text-white' : stockIndicators?.strategy_action?.includes('卖出') || stockIndicators?.strategy_action?.includes('减仓') ? 'bg-red-500 text-white' : 'bg-[var(--bg-elevated)] text-[var(--text-secondary)]'}`}>
+                    {stockIndicators?.strategy_action || '计算中'}
+                  </div>
+                </div>
+
+                {(selectedStock.market === 'US' || selectedStock.market === 'HK') && (
+                  <div className="mb-3 rounded-xl border border-blue-500/20 bg-blue-500/10 px-3 py-2 text-[10px] leading-relaxed text-blue-200">
+                    已切换为{selectedStock.market === 'US' ? '美股' : '港股'}独立回测模型：买点以RSI超卖、5日急跌、低于MA60和放量确认计算；止损/止盈为风控价位，不宣称能提升卖出胜率。
+                  </div>
+                )}
+
+                <div className="grid grid-cols-2 gap-2 mb-3">
+                  <div className="rounded-xl bg-black/20 border border-emerald-500/20 p-3">
+                    <div className="text-[var(--text-muted)] text-[10px]">什么时候买</div>
+                    <div className="text-emerald-400 text-sm font-extrabold mt-1">
+                      {currencyPrefix(selectedStock.market)}{fmt(stockIndicators?.strategy_buy_zone_low)} - {currencyPrefix(selectedStock.market)}{fmt(stockIndicators?.strategy_buy_zone_high)}
+                    </div>
+                  </div>
+                  <div className="rounded-xl bg-black/20 border border-red-500/20 p-3">
+                    <div className="text-[var(--text-muted)] text-[10px]">严格止损</div>
+                    <div className="text-red-400 text-sm font-extrabold mt-1">{currencyPrefix(selectedStock.market)}{fmt(stockIndicators?.strategy_stop_loss)}</div>
+                  </div>
+                  <div className="rounded-xl bg-black/20 border border-amber-500/20 p-3">
+                    <div className="text-[var(--text-muted)] text-[10px]">第一止盈</div>
+                    <div className="text-amber-300 text-sm font-extrabold mt-1">{currencyPrefix(selectedStock.market)}{fmt(stockIndicators?.strategy_take_profit_1)}</div>
+                    <div className="text-[var(--text-muted)] text-[9px] mt-0.5">先卖出1/2</div>
+                  </div>
+                  <div className="rounded-xl bg-black/20 border border-amber-500/20 p-3">
+                    <div className="text-[var(--text-muted)] text-[10px]">第二止盈</div>
+                    <div className="text-amber-300 text-sm font-extrabold mt-1">{currencyPrefix(selectedStock.market)}{fmt(stockIndicators?.strategy_take_profit_2)}</div>
+                    <div className="text-[var(--text-muted)] text-[9px] mt-0.5">清仓或留底仓</div>
+                  </div>
+                </div>
+
+                <div className="space-y-2 text-[11px] leading-relaxed">
+                  <div className="text-emerald-300"><span className="font-bold">买入触发：</span>{stockIndicators?.strategy_buy_trigger || '数据加载中...'}</div>
+                  <div className="text-red-300"><span className="font-bold">卖出触发：</span>{stockIndicators?.strategy_sell_trigger || '数据加载中...'}</div>
+                </div>
+              </div>
+
+              {/* Section 4: Technical Indicators */}
               <div className="bg-[var(--bg-surface)] rounded-xl p-4">
                 <div className="text-[var(--text-primary)] text-xs font-bold mb-3 flex items-center gap-1.5">
                   <span className="w-1 h-3.5 bg-[var(--accent-primary)] rounded-full"></span>
@@ -390,7 +439,7 @@ function StockPageInner() {
                     <div className="text-[var(--text-primary)] text-sm font-bold">{stockIndicators?.slope_pct == null ? '-' : `${fmt(stockIndicators?.slope_pct, 3)}%`}</div>
                   </div>
                   <div>
-                    <div className="text-[var(--text-muted)] text-[9px]">Slope建议</div>
+                    <div className="text-[var(--text-muted)] text-[9px]">斜率状态</div>
                     <div className={`text-sm font-bold ${stockIndicators?.slope_advice === '放心买' ? 'text-emerald-400' : stockIndicators?.slope_advice === '有危险' ? 'text-red-400' : stockIndicators?.slope_advice === '不要买' ? 'text-red-400' : 'text-amber-400'}`}>
                       {stockIndicators?.slope_advice || '-'}
                     </div>
@@ -419,14 +468,20 @@ function StockPageInner() {
                     </div>
                   </div>
                 </div>
+                <div className="mt-3 rounded-lg bg-[var(--bg-elevated)]/70 p-3 text-[10px] text-[var(--text-secondary)] leading-relaxed space-y-1.5">
+                  <div>{stockIndicators?.ma60_reference || 'MA60用于观察中期位置。'}</div>
+                  <div>{stockIndicators?.slope_reference || '斜率状态用于观察回调速度。'}</div>
+                  <div>{stockIndicators?.buy_score_reference || '买入综合评分是传统趋势评分。'}</div>
+                  <div>{stockIndicators?.sell_score_reference || '卖出综合评分用于观察反转风险。'}</div>
+                </div>
               </div>
 
-              {/* Section 4: Buy Signal */}
+              {/* Section 5: Traditional Buy Signal */}
               <div className={`rounded-xl p-4 border-2 ${stockIndicators?.buy_price_aggressive_ok ? 'bg-emerald-500/8 border-emerald-500/30' : 'bg-[var(--bg-surface)] border-[var(--border-color)]'}`}>
                 <div className="flex items-center justify-between mb-2">
                   <div className="text-xs font-bold flex items-center gap-1.5">
                     <span className="w-1 h-3.5 bg-emerald-500 rounded-full"></span>
-                    <span className="text-emerald-400">买入信号</span>
+                    <span className="text-emerald-400">传统买入评分</span>
                   </div>
                   <div className={`text-xs font-extrabold px-3 py-1 rounded-full ${stockIndicators?.buy_price_aggressive_ok ? 'bg-emerald-500 text-white' : 'bg-[var(--bg-elevated)] text-[var(--text-muted)]'}`}>
                     {stockIndicators?.buy_price_aggressive_ok ? '✓ 满足' : '等待中'}
@@ -440,9 +495,12 @@ function StockPageInner() {
                 <div className="text-[var(--text-secondary)] text-[11px] leading-relaxed">
                   {stockIndicators?.buy_condition_desc || '数据加载中...'}
                 </div>
+                <div className="mt-2 text-[10px] text-amber-400 leading-relaxed">
+                  注：这里是传统趋势评分，不作为新策略主买入决策；上方“新策略买卖计划”优先级更高。
+                </div>
               </div>
 
-              {/* Section 5: Sell Signal */}
+              {/* Section 6: Sell Signal */}
               <div className={`rounded-xl p-4 border-2 ${stockIndicators?.sell_price_ok ? 'bg-red-500/8 border-red-500/30' : 'bg-[var(--bg-surface)] border-[var(--border-color)]'}`}>
                 <div className="flex items-center justify-between mb-2">
                   <div className="text-xs font-bold flex items-center gap-1.5">
@@ -466,7 +524,7 @@ function StockPageInner() {
                 )}
               </div>
 
-              {/* Section 6: Signal Summary */}
+              {/* Section 7: Signal Summary */}
               <div className="flex gap-1.5 flex-wrap">
                 {[
                   { label: '金叉', active: stockIndicators?.signal_golden_cross, color: 'emerald' },

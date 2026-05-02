@@ -13,14 +13,14 @@
   --accent-secondary: #818CF8;
   --accent-coral: #F87171;
   
-  /* 文字色 - 更好的对比度 */
+  /* 文字色 - 更高对比度，提升可读性 */
   --text-primary: #F4F4F5;
-  --text-secondary: #71717A;
-  --text-muted: #52525B;
+  --text-secondary: #A1A1AA;
+  --text-muted: #71717A;
   
   /* 边框 - 更精细 */
-  --border-color: #27272A;
-  --border-subtle: #3F3F46;
+  --border-color: #3F3F46;
+  --border-subtle: #52525B;
   
   /* 语义色 */
   --green-success: #34D399;
