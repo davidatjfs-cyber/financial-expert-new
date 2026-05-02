@@ -399,6 +399,7 @@ def _send_feishu_portfolio_alert(alert: PortfolioAlertResponse):
             {"tag": "div", "text": {"tag": "lark_md", "content": f"**股票**：{symbol_name}"}},
             {"tag": "div", "text": {"tag": "lark_md", "content": f"**当前价**：{current}    **触发价**：{trigger}"}},
             {"tag": "div", "text": {"tag": "lark_md", "content": f"**原因**：{alert.message}"}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"**触发时间**：{_dt.datetime.now(_ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M:%S')}"}},
         ],
     }
     try:
