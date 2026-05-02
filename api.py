@@ -63,8 +63,40 @@ _MAX_UPLOAD_BYTES = int((os.environ.get("MAX_UPLOAD_MB") or "30").strip() or "30
 _PDF_ANALYSIS_SEM = threading.Semaphore(int((os.environ.get("PDF_ANALYSIS_CONCURRENCY") or "1").strip() or "1"))
 
 _SPOT_CACHE: dict[str, tuple[float, "pd.DataFrame"]] = {}
-_FEISHU_SENT_ALERTS: dict[str, float] = {}
+_FEISHU_SENT_ALERTS: dict[str, tuple[float, str]] = {}
 _FEISHU_SENT_TTL = 6 * 3600
+
+
+def _cn_market_closed() -> bool:
+    now_bj = _dt.datetime.now(_ZoneInfo("Asia/Shanghai"))
+    if now_bj.weekday() >= 5:
+        return True
+    CN_HOLIDAYS_2025 = {
+        _dt.date(2025, 1, 1),
+        _dt.date(2025, 1, 28), _dt.date(2025, 1, 29), _dt.date(2025, 1, 30),
+        _dt.date(2025, 1, 31), _dt.date(2025, 2, 1), _dt.date(2025, 2, 2),
+        _dt.date(2025, 2, 3), _dt.date(2025, 2, 4),
+        _dt.date(2025, 4, 4), _dt.date(2025, 4, 5), _dt.date(2025, 4, 6),
+        _dt.date(2025, 5, 1), _dt.date(2025, 5, 2), _dt.date(2025, 5, 3),
+        _dt.date(2025, 5, 4), _dt.date(2025, 5, 5),
+        _dt.date(2025, 5, 31), _dt.date(2025, 6, 1), _dt.date(2025, 6, 2),
+        _dt.date(2025, 10, 1), _dt.date(2025, 10, 2), _dt.date(2025, 10, 3),
+        _dt.date(2025, 10, 4), _dt.date(2025, 10, 5), _dt.date(2025, 10, 6),
+        _dt.date(2025, 10, 7), _dt.date(2025, 10, 8),
+    }
+    CN_HOLIDAYS_2026 = {
+        _dt.date(2026, 1, 1), _dt.date(2026, 1, 2), _dt.date(2026, 1, 3),
+        _dt.date(2026, 2, 16), _dt.date(2026, 2, 17), _dt.date(2026, 2, 18),
+        _dt.date(2026, 2, 19), _dt.date(2026, 2, 20),
+        _dt.date(2026, 4, 4), _dt.date(2026, 4, 5), _dt.date(2026, 4, 6),
+        _dt.date(2026, 5, 1), _dt.date(2026, 5, 2), _dt.date(2026, 5, 3),
+        _dt.date(2026, 5, 4), _dt.date(2026, 5, 5),
+        _dt.date(2026, 6, 19), _dt.date(2026, 6, 20), _dt.date(2026, 6, 21),
+        _dt.date(2026, 10, 1), _dt.date(2026, 10, 2), _dt.date(2026, 10, 3),
+        _dt.date(2026, 10, 4), _dt.date(2026, 10, 5), _dt.date(2026, 10, 6),
+        _dt.date(2026, 10, 7),
+    }
+    return now_bj.date() in (CN_HOLIDAYS_2025 | CN_HOLIDAYS_2026)
 
 # If yfinance is rate-limited for US symbols, skip yfinance for a short cooldown window.
 _YF_US_COOLDOWN_UNTIL: float = 0.0
@@ -349,6 +381,8 @@ def _feishu_tenant_token(app_id: str, app_secret: str) -> Optional[str]:
 def _send_feishu_portfolio_alert(alert: PortfolioAlertResponse):
     if (alert.market or "").strip().upper() != "CN":
         return
+    if _cn_market_closed():
+        return
 
     send_types = {
         "target_buy",
@@ -365,10 +399,20 @@ def _send_feishu_portfolio_alert(alert: PortfolioAlertResponse):
         return
 
     now = time.time()
-    for k, ts in list(_FEISHU_SENT_ALERTS.items()):
+    alert_data = f"{alert.current_price:.2f}|{alert.trigger_price:.2f}" if alert.current_price is not None and alert.trigger_price is not None else ""
+    for k, v in list(_FEISHU_SENT_ALERTS.items()):
+        ts, old_data = v
         if now - ts > _FEISHU_SENT_TTL:
             del _FEISHU_SENT_ALERTS[k]
-    if alert.key in _FEISHU_SENT_ALERTS:
+
+    is_new = False
+    prev = _FEISHU_SENT_ALERTS.get(alert.key)
+    if prev is None:
+        is_new = True
+    elif prev[1] != alert_data:
+        is_new = True
+
+    if not is_new:
         return
 
     token = _feishu_tenant_token(app_id, app_secret)
@@ -386,6 +430,8 @@ def _send_feishu_portfolio_alert(alert: PortfolioAlertResponse):
         "strategy_take_profit_2": "触发第二止盈",
     }
     title = title_map.get(alert.alert_type, "持仓提醒")
+    if is_new and prev is not None:
+        title = "【新】" + title
     symbol_name = f"{alert.name or alert.symbol} ({alert.market}:{alert.symbol})"
     current = "-" if alert.current_price is None else f"{alert.current_price:.2f}"
     trigger = "-" if alert.trigger_price is None else f"{alert.trigger_price:.2f}"
@@ -410,9 +456,9 @@ def _send_feishu_portfolio_alert(alert: PortfolioAlertResponse):
             timeout=8,
         )
         rj = resp.json()
-        print(f"[FEISHU] send alert {alert.alert_type} {alert.symbol}: code={rj.get('code')} msg={rj.get('msg','')[:100]}")
+        print(f"[FEISHU] send alert {alert.alert_type} {alert.symbol}: code={rj.get('code')} msg={rj.get('msg','')[:100]} new={is_new}")
         if rj.get("code") == 0:
-            _FEISHU_SENT_ALERTS[alert.key] = now
+            _FEISHU_SENT_ALERTS[alert.key] = (now, alert_data)
     except Exception as e:
         print(f"[FEISHU] send error: {e}")
 
