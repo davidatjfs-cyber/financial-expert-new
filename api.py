@@ -65,6 +65,7 @@ _PDF_ANALYSIS_SEM = threading.Semaphore(int((os.environ.get("PDF_ANALYSIS_CONCUR
 _SPOT_CACHE: dict[str, tuple[float, "pd.DataFrame"]] = {}
 _FEISHU_SENT_ALERTS: dict[str, tuple[float, str]] = {}
 _FEISHU_SENT_TTL = 6 * 3600
+_CN_MARKET_STATE_CACHE: tuple[float, str] = (0.0, "unknown")
 
 
 def _cn_market_closed() -> bool:
@@ -3851,6 +3852,27 @@ def _tencent_fetch_history_df(symbol: str, market: str, count: int = 420):
         return None
 
 
+def _cn_index_market_state() -> str:
+    """Return weak/not_weak/unknown for HS300 using the validated filter."""
+    global _CN_MARKET_STATE_CACHE
+    now = time.time()
+    if _CN_MARKET_STATE_CACHE[0] and (now - _CN_MARKET_STATE_CACHE[0]) < 1800:
+        return _CN_MARKET_STATE_CACHE[1]
+    state = "unknown"
+    try:
+        df = _tencent_fetch_history_df("000300.SH", "CN", count=120)
+        if df is not None and not df.empty and len(df) >= 65:
+            close = pd.to_numeric(df["close"], errors="coerce").dropna()
+            if len(close) >= 65:
+                ma60 = float(close.tail(60).mean())
+                ret20 = (float(close.iloc[-1]) / float(close.iloc[-21]) - 1.0) * 100.0
+                state = "weak" if float(close.iloc[-1]) < ma60 and ret20 <= 0 else "not_weak"
+    except Exception:
+        state = "unknown"
+    _CN_MARKET_STATE_CACHE = (now, state)
+    return state
+
+
 @app.get("/api/stock/search", response_model=list[StockSearchResult])
 def search_stocks(q: str, market: str = "ALL"):
     """Search for stocks by keyword across CN/HK/US markets.
@@ -5848,6 +5870,8 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
             tp2_candidates.append(float(entry_ref) * (1.16 if m in {"US", "HK"} else 1.10))
             strategy_take_profit_2 = max(tp2_candidates)
 
+        cn_market_allows_strong_buy = m != "CN" or _cn_index_market_state() in ("weak", "unknown")
+
         if sell_score is not None and sell_score >= 55:
             strategy_action = "立即卖出"
         elif sell_score is not None and sell_score >= 34:
@@ -5858,8 +5882,12 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
             strategy_action = "反转买点观察"
         elif m in {"US", "HK"}:
             strategy_action = "暂不买入"
-        elif timing_score >= 90:
-            strategy_action = "立即分批买入"
+        elif timing_score >= 96 and cn_market_allows_strong_buy:
+            strategy_action = "强买信号"
+        elif timing_score >= 80 and cn_market_allows_strong_buy:
+            strategy_action = "积极建仓"
+        elif timing_score >= 80:
+            strategy_action = "关注等买点"
         elif timing_score >= 60:
             strategy_action = "轻仓试探买入"
         elif timing_score >= 30:

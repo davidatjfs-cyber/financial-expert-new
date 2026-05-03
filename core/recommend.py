@@ -33,6 +33,7 @@ _SECTOR_LIST_CACHE: tuple[float, list[dict]] = (0.0, [])
 _STOCK_SECTOR_MAP: dict[str, str] = {}
 _STOCK_SECTOR_MAP_TIME: float = 0.0
 _STATIC_SECTOR_MAP: Optional[dict[str, str]] = None
+_CN_MARKET_STATE_CACHE: tuple[float, str] = (0.0, "unknown")
 
 
 def _disable_proxies():
@@ -41,6 +42,44 @@ def _disable_proxies():
         disable_proxies_for_process()
     except Exception:
         pass
+
+
+def _cn_index_market_state() -> str:
+    """Classify HS300 market regime for the A-share reversal strategy.
+
+    The backtest showed this strategy works best when the index is weak; in
+    strong/neutral regimes high timing scores are downgraded to observation.
+    """
+    global _CN_MARKET_STATE_CACHE
+    now = time.time()
+    if _CN_MARKET_STATE_CACHE[0] and (now - _CN_MARKET_STATE_CACHE[0]) < 1800:
+        return _CN_MARKET_STATE_CACHE[1]
+    try:
+        _disable_proxies()
+        import httpx
+
+        q = "sh000300"
+        url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={q},day,,,120,qfq"
+        resp = httpx.get(url, timeout=8.0, follow_redirects=True)
+        data = resp.json()
+        raw = (((data or {}).get("data") or {}).get(q) or {}).get("day") or []
+        closes = []
+        for item in raw:
+            if len(item) >= 3:
+                try:
+                    closes.append(float(item[2]))
+                except Exception:
+                    pass
+        if len(closes) < 65:
+            raise ValueError("not enough index data")
+        arr = np.array(closes, dtype=float)
+        ma60 = float(np.mean(arr[-60:]))
+        ret20 = (float(arr[-1]) / float(arr[-21]) - 1.0) * 100.0
+        state = "weak" if float(arr[-1]) < ma60 and ret20 <= 0 else "not_weak"
+    except Exception:
+        state = "unknown"
+    _CN_MARKET_STATE_CACHE = (now, state)
+    return state
 
 
 @dataclass
@@ -1277,6 +1316,8 @@ def run_scan(top_n: int = 20,
         s.sector_strength_score = sector_strength.get(sec, 50.0)
 
     QUALITY_THRESHOLD = 30.0
+    cn_market_state = _cn_index_market_state()
+    cn_market_allows_strong_buy = cn_market_state in ("weak", "unknown")
 
     qualified = [s for s in scores if (s.quality_score_total or 0) >= QUALITY_THRESHOLD]
     unqualified = [s for s in scores if (s.quality_score_total or 0) < QUALITY_THRESHOLD]
@@ -1304,10 +1345,12 @@ def run_scan(top_n: int = 20,
         s.reason = _generate_factor_reason(s)
         qt = s.quality_score_total or 0
         tt = s.timing_score_total or 0
-        if qt >= QUALITY_THRESHOLD and tt >= 96:
+        if qt >= QUALITY_THRESHOLD and tt >= 96 and cn_market_allows_strong_buy:
             s.action = "强买信号"
-        elif qt >= QUALITY_THRESHOLD and tt >= 80:
+        elif qt >= QUALITY_THRESHOLD and tt >= 80 and cn_market_allows_strong_buy:
             s.action = "积极建仓"
+        elif qt >= QUALITY_THRESHOLD and tt >= 80:
+            s.action = "关注等买点"
         elif qt >= QUALITY_THRESHOLD and tt >= 60:
             s.action = "轻仓试探"
         elif qt >= QUALITY_THRESHOLD and tt >= 0:
