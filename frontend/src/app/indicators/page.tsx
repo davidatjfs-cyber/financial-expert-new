@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { Search, Plus, Trash2, TrendingUp, TrendingDown, X, Brain, Timer, XCircle, ChevronRight, Wallet, PiggyBank, BarChart3 } from 'lucide-react';
 import {
   searchStocks,
@@ -31,6 +32,7 @@ const HOT_STOCKS = [
 ];
 
 export default function PortfolioPage() {
+  const router = useRouter();
   const [positions, setPositions] = useState<PortfolioPosition[]>([]);
   const [alerts, setAlerts] = useState<PortfolioAlert[]>([]);
   const [loading, setLoading] = useState(true);
@@ -408,7 +410,8 @@ export default function PortfolioPage() {
       ) : (
         <div className="flex flex-col gap-2">
           {positions.map((p) => (
-            <div key={p.id} className="card-surface px-4 py-3">
+            <div key={p.id} className="card-surface px-4 py-3 cursor-pointer active:scale-[0.99] transition-transform"
+                 onClick={() => router.push(`/stock?symbol=${encodeURIComponent(p.symbol)}&market=${encodeURIComponent(p.market)}&name=${encodeURIComponent(p.name || '')}`)}>
               {/* Top row: name + price + PnL */}
               <div className="flex items-center justify-between">
                 <div className="min-w-0 flex-1">
@@ -431,7 +434,7 @@ export default function PortfolioPage() {
                 <span>市值 <b className="text-[var(--text-secondary)]">{p.market_value != null ? p.market_value.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '-'}</b></span>
               </div>
               {/* Action row — compact pills */}
-              <div className="flex items-center gap-1.5 mt-2.5">
+              <div className="flex items-center gap-1.5 mt-2.5" onClick={e => e.stopPropagation()}>
                 <button
                   onClick={() => { setTradeTarget(p); setTradeSide('BUY'); setTradeQty(''); }}
                   className="px-3 py-1.5 rounded-full bg-emerald-500/15 text-emerald-400 text-xs font-bold active:scale-[0.97] transition-transform"

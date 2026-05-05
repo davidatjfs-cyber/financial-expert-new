@@ -6729,6 +6729,8 @@ def fetch_market_report(
 # ==================== Recommend API ====================
 
 _RECOMMEND_SCAN_STATUS: dict = {"status": "idle", "progress": 0.0, "message": ""}
+_RECOMMEND_SCAN_STARTED_AT: float = 0.0
+_SCAN_STUCK_TIMEOUT_SEC: float = 600.0
 
 
 class RecommendScanRequest(BaseModel):
@@ -6763,14 +6765,21 @@ def start_recommend_scan(req: RecommendScanRequest, background_tasks: Background
     from core.recommend import run_scan, save_scan_result, generate_ai_reasons
     from core.llm_qwen import call_llm
 
+    import time as _time
     if _RECOMMEND_SCAN_STATUS.get("status") == "running":
-        raise HTTPException(status_code=409, detail="扫描正在进行中，请稍后")
+        elapsed = _time.time() - _RECOMMEND_SCAN_STARTED_AT
+        if elapsed < _SCAN_STUCK_TIMEOUT_SEC:
+            raise HTTPException(status_code=409, detail="扫描正在进行中，请稍后")
+        _RECOMMEND_SCAN_STATUS["status"] = "error"
+        _RECOMMEND_SCAN_STATUS["message"] = f"扫描超时({int(elapsed)}s)已自动重置，请重试"
 
     def _progress(pct: float, msg: str):
         _RECOMMEND_SCAN_STATUS["progress"] = pct
         _RECOMMEND_SCAN_STATUS["message"] = msg
 
     def _run():
+        global _RECOMMEND_SCAN_STARTED_AT
+        _RECOMMEND_SCAN_STARTED_AT = _time.time()
         _RECOMMEND_SCAN_STATUS["status"] = "running"
         _RECOMMEND_SCAN_STATUS["progress"] = 0.0
         _RECOMMEND_SCAN_STATUS["message"] = "开始扫描..."
