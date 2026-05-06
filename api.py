@@ -439,7 +439,11 @@ def _send_feishu_portfolio_alert(alert: PortfolioAlertResponse):
     card = {
         "config": {"wide_screen_mode": True},
         "header": {
-            "template": "red" if "sell" in alert.alert_type or "stop" in alert.alert_type else "green",
+            "template": (
+                "black" if alert.alert_type == "strategy_stop_loss"
+                else "red" if alert.alert_type in ("strategy_take_profit_1", "strategy_take_profit_2")
+                else "green"
+            ),
             "title": {"tag": "plain_text", "content": title},
         },
         "elements": [
