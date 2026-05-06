@@ -521,10 +521,12 @@ def _score_timing(rsi14: Optional[float], boll_position: Optional[float],
     if steep_drop and oversold and big_drop_5d:
         return 94.0
     if steep_drop and oversold:
-        score = 90.0
+        # Strict backtest shows this plain double-signal bucket is too weak to
+        # qualify as a buy on its own; keep it as observation only.
+        score = 72.0
         if kdj_golden:
-            score += 2.0
-        return min(97.0, score)
+            score += 4.0
+        return min(79.0, score)
     if steep_drop or oversold:
         score = 60.0
         if vol_spike:

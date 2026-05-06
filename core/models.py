@@ -119,6 +119,7 @@ class PortfolioTrade(Base):
     price: Mapped[float] = mapped_column(Float)
     quantity: Mapped[float] = mapped_column(Float)
     amount: Mapped[float] = mapped_column(Float)
+    fee: Mapped[float] = mapped_column(Float, default=0.0)
     source: Mapped[str] = mapped_column(String, default="manual")  # manual / auto_strategy / auto_order
 
     created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))

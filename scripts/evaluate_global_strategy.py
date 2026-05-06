@@ -3,11 +3,16 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import signal
 import time
+import csv
 from collections import defaultdict
+from io import StringIO
 
 import numpy as np
 import pandas as pd
+import requests
 
 
 US_SYMBOLS = [
@@ -27,6 +32,8 @@ HK_SYMBOLS = [
     "02382.HK", "00992.HK", "02018.HK", "02359.HK", "00388.HK", "00669.HK", "01928.HK", "00688.HK", "01044.HK", "00291.HK",
 ]
 
+HK_COMPOSITE_SUBINDEXES = ["HSHKLI", "HSHKMI", "HSHKSI"]
+
 
 def _disable_proxies():
     for k in list(os.environ):
@@ -34,17 +41,88 @@ def _disable_proxies():
             del os.environ[k]
 
 
+class _FetchTimeout(Exception):
+    pass
+
+
+def _alarm_handler(_signum, _frame):
+    raise _FetchTimeout()
+
+
+def _fetch_history_tencent(symbol: str, days: int = 900) -> pd.DataFrame | None:
+    try:
+        base = symbol.split(".", 1)[0].upper()
+        if symbol.upper().endswith(".HK"):
+            q = f"hk{base.zfill(5)}"
+        else:
+            return None
+        url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={q},day,2022-01-01,,{days},"
+        resp = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        body = resp.json().get("data", {}).get(q, {})
+        raw = body.get("day", []) or []
+        rows = []
+        for item in raw:
+            if len(item) < 6:
+                continue
+            try:
+                rows.append({
+                    "date": pd.to_datetime(item[0], errors="coerce"),
+                    "open": pd.to_numeric(item[1], errors="coerce"),
+                    "high": pd.to_numeric(item[3], errors="coerce"),
+                    "low": pd.to_numeric(item[4], errors="coerce"),
+                    "close": pd.to_numeric(item[2], errors="coerce"),
+                    "volume": pd.to_numeric(item[5], errors="coerce"),
+                })
+            except Exception:
+                continue
+        if not rows:
+            return None
+        out = pd.DataFrame(rows).dropna(subset=["date", "close", "high", "low"]).sort_values("date")
+        return out.tail(days) if len(out) >= 180 else None
+    except Exception:
+        return None
+
+
+def _fetch_history_stooq(symbol: str, days: int = 900) -> pd.DataFrame | None:
+    try:
+        base = symbol.split(".", 1)[0].lower()
+        url = f"https://stooq.com/q/d/l/?s={base}.us&i=d"
+        resp = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+        reader = csv.DictReader(resp.text.splitlines())
+        rows = [r for r in reader if r.get("Close") and r.get("Close") != "-"]
+        if not rows:
+            return None
+        out = pd.DataFrame({
+            "date": pd.to_datetime([r.get("Date") for r in rows], errors="coerce"),
+            "open": pd.to_numeric([r.get("Open") for r in rows], errors="coerce"),
+            "high": pd.to_numeric([r.get("High") for r in rows], errors="coerce"),
+            "low": pd.to_numeric([r.get("Low") for r in rows], errors="coerce"),
+            "close": pd.to_numeric([r.get("Close") for r in rows], errors="coerce"),
+            "volume": pd.to_numeric([r.get("Volume") for r in rows], errors="coerce"),
+        }).dropna(subset=["date", "close", "high", "low"]).sort_values("date")
+        return out.tail(days) if len(out) >= 180 else None
+    except Exception:
+        return None
+
+
 def fetch_history(symbol: str, days: int = 900) -> pd.DataFrame | None:
     _disable_proxies()
-    import yfinance as yf
-
     try:
         if symbol.upper().endswith(".HK"):
-            base = symbol[:-3]
-            symbol = f"{base[-4:]}.HK" if base.isdigit() else symbol
-        df = yf.download(symbol, period="3y", interval="1d", progress=False, threads=False, auto_adjust=False)
+            return _fetch_history_tencent(symbol, days)
+
+        import yfinance as yf
+        old_handler = signal.getsignal(signal.SIGALRM)
+        signal.signal(signal.SIGALRM, _alarm_handler)
+        signal.alarm(12)
+        try:
+            df = yf.download(symbol, period="3y", interval="1d", progress=False, threads=False, auto_adjust=False)
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old_handler)
         if df is None or df.empty:
-            return None
+            return _fetch_history_stooq(symbol, days)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = [c[0] for c in df.columns]
         out = pd.DataFrame({
@@ -56,8 +134,53 @@ def fetch_history(symbol: str, days: int = 900) -> pd.DataFrame | None:
             "volume": pd.to_numeric(df.get("Volume"), errors="coerce"),
         }).dropna(subset=["date", "close", "high", "low"]).sort_values("date")
         return out.tail(days) if len(out) >= 180 else None
+    except _FetchTimeout:
+        return _fetch_history_stooq(symbol, days)
     except Exception:
-        return None
+        return _fetch_history_stooq(symbol, days) if not symbol.upper().endswith(".HK") else None
+
+
+def get_sp500_symbols() -> list[str]:
+    try:
+        resp = requests.get(
+            "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
+            timeout=20,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        resp.raise_for_status()
+        tables = pd.read_html(StringIO(resp.text))
+        if not tables:
+            raise ValueError("no tables")
+        symbol_col = next((c for c in tables[0].columns if str(c).lower() == "symbol"), None)
+        if symbol_col is None:
+            raise ValueError("symbol column missing")
+        out = []
+        for value in tables[0][symbol_col].astype(str).tolist():
+            sym = value.strip().upper().replace(".", "-")
+            if sym:
+                out.append(sym)
+        return list(dict.fromkeys(out))
+    except Exception:
+        return US_SYMBOLS
+
+
+def get_hk_composite_symbols() -> list[str]:
+    symbols: list[str] = []
+    headers = {"User-Agent": "Mozilla/5.0"}
+    for index_code in HK_COMPOSITE_SUBINDEXES:
+        url = f"https://www.aastocks.com/en/stocks/market/index/hk-index-con.aspx?index={index_code}&t=6&o=1"
+        try:
+            html = requests.get(url, timeout=20, headers=headers).text
+            codes = re.findall(r"symbol=(\d{5})", html)
+            for code in codes:
+                if code == "02800":
+                    continue
+                symbols.append(f"{code}.HK")
+            time.sleep(0.2)
+        except Exception:
+            continue
+    deduped = list(dict.fromkeys(symbols))
+    return deduped or HK_SYMBOLS
 
 
 def ma(values: np.ndarray, n: int) -> np.ndarray:
@@ -235,8 +358,20 @@ def evaluate_market(symbols: list[str], limit: int, cost_pct: float) -> dict:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--market", choices=["US", "HK"], required=True)
-    parser.add_argument("--limit", type=int, default=60)
+    parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--cost-pct", type=float, default=0.3)
+    parser.add_argument("--universe", choices=["default", "expanded"], default="default")
     args = parser.parse_args()
-    symbols = US_SYMBOLS if args.market == "US" else HK_SYMBOLS
-    print(json.dumps(evaluate_market(symbols, args.limit, args.cost_pct), ensure_ascii=False, indent=2))
+    if args.market == "US":
+        symbols = get_sp500_symbols() if args.universe == "expanded" else US_SYMBOLS
+    else:
+        symbols = get_hk_composite_symbols() if args.universe == "expanded" else HK_SYMBOLS
+    limit = args.limit or len(symbols)
+    result = evaluate_market(symbols, limit, args.cost_pct)
+    result.update({
+        "market": args.market,
+        "universe": args.universe,
+        "requested_symbols": len(symbols),
+        "effective_limit": limit,
+    })
+    print(json.dumps(result, ensure_ascii=False, indent=2))

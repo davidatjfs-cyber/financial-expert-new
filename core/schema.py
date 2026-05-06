@@ -19,5 +19,8 @@ def _ensure_portfolio_schema() -> None:
         if "source" not in trade_columns:
             with _engine.begin() as conn:
                 conn.execute(text("ALTER TABLE portfolio_trades ADD COLUMN source VARCHAR DEFAULT 'manual'"))
+        if "fee" not in trade_columns:
+            with _engine.begin() as conn:
+                conn.execute(text("ALTER TABLE portfolio_trades ADD COLUMN fee FLOAT DEFAULT 0"))
     except Exception:
         pass

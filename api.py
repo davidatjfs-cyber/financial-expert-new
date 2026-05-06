@@ -25,7 +25,7 @@ import requests
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select
 
 from core.db import session_scope
@@ -388,6 +388,7 @@ class PortfolioTradeResponse(BaseModel):
     price: float
     quantity: float
     amount: float
+    fee: float = 0.0
     source: str = "manual"
     symbol: Optional[str] = None
     name: Optional[str] = None
@@ -438,6 +439,8 @@ class PortfolioSummaryResponse(BaseModel):
     total_trades: int = 0
     total_buy_amount: float = 0.0
     total_sell_amount: float = 0.0
+    manual: "PortfolioSourceSummaryResponse" = Field(default_factory=lambda: PortfolioSourceSummaryResponse())
+    agent: "PortfolioSourceSummaryResponse" = Field(default_factory=lambda: PortfolioSourceSummaryResponse())
 
 
 class PortfolioAgentConfigRequest(BaseModel):
@@ -485,6 +488,28 @@ class PortfolioAgentStatusResponse(BaseModel):
 
 
 class PortfolioReturnsResponse(BaseModel):
+    today_pnl: float = 0.0
+    week_pnl: float = 0.0
+    month_pnl: float = 0.0
+    total_pnl: float = 0.0
+    realized_pnl: float = 0.0
+    unrealized_pnl: float = 0.0
+    manual: "PortfolioSourceReturnsResponse" = Field(default_factory=lambda: PortfolioSourceReturnsResponse())
+    agent: "PortfolioSourceReturnsResponse" = Field(default_factory=lambda: PortfolioSourceReturnsResponse())
+
+
+class PortfolioSourceSummaryResponse(BaseModel):
+    total_cost: float = 0.0
+    total_market_value: float = 0.0
+    unrealized_pnl: float = 0.0
+    unrealized_pnl_pct: float = 0.0
+    realized_pnl: float = 0.0
+    total_trades: int = 0
+    total_buy_amount: float = 0.0
+    total_sell_amount: float = 0.0
+
+
+class PortfolioSourceReturnsResponse(BaseModel):
     today_pnl: float = 0.0
     week_pnl: float = 0.0
     month_pnl: float = 0.0
@@ -711,10 +736,11 @@ def _create_trade_at_price(position_id: str, side: str, quantity: float, price: 
         pos_name = (p.name or "").strip() or None
         old_qty = float(p.quantity or 0.0)
         old_avg = float(p.avg_cost or 0.0)
+        fee = px * qty * _portfolio_fee_rate(market, side)
 
         if side == "BUY":
             new_qty = old_qty + qty
-            new_avg = ((old_qty * old_avg) + (qty * px)) / new_qty if new_qty > 0 else 0.0
+            new_avg = ((old_qty * old_avg) + (qty * px) + fee) / new_qty if new_qty > 0 else 0.0
             p.quantity = new_qty
             p.avg_cost = new_avg
             exec_qty = qty
@@ -735,6 +761,7 @@ def _create_trade_at_price(position_id: str, side: str, quantity: float, price: 
             price=px,
             quantity=exec_qty,
             amount=px * exec_qty,
+            fee=fee * (exec_qty / qty) if qty > 0 else 0.0,
             source=source,
             created_at=now,
         )
@@ -752,6 +779,7 @@ def _create_trade_at_price(position_id: str, side: str, quantity: float, price: 
             price=px,
             quantity=exec_qty,
             amount=px * exec_qty,
+            fee=float(trade.fee or 0.0),
             source=source,
             symbol=symbol,
             name=pos_name,
@@ -2260,12 +2288,13 @@ def create_portfolio_trade(req: PortfolioTradeRequest):
         price = float(price)
 
         amount = price * qty
+        fee = amount * _portfolio_fee_rate(market, side)
         old_qty = float(p.quantity or 0.0)
         old_avg = float(p.avg_cost or 0.0)
 
         if side == "BUY":
             new_qty = old_qty + qty
-            new_avg = 0.0 if new_qty <= 0 else (old_qty * old_avg + qty * price) / new_qty
+            new_avg = 0.0 if new_qty <= 0 else (old_qty * old_avg + qty * price + fee) / new_qty
             p.quantity = new_qty
             p.avg_cost = new_avg
         else:
@@ -2282,6 +2311,7 @@ def create_portfolio_trade(req: PortfolioTradeRequest):
             price=price,
             quantity=qty,
             amount=amount,
+            fee=fee,
             source=(req.source or "manual"),
             created_at=now,
         )
@@ -2302,6 +2332,7 @@ def create_portfolio_trade(req: PortfolioTradeRequest):
             price=price,
             quantity=qty,
             amount=amount,
+            fee=fee,
             source=(req.source or "manual"),
             symbol=symbol,
             name=pos_name,
@@ -2323,19 +2354,151 @@ def list_portfolio_trades(position_id: Optional[str] = None, limit: int = 100):
             out.append(PortfolioTradeResponse(
                 id=t.id, position_id=t.position_id, side=t.side,
                 price=float(t.price or 0), quantity=float(t.quantity or 0),
-                amount=float(t.amount or 0), source=getattr(t, "source", "manual") or "manual",
+                amount=float(t.amount or 0), fee=float(getattr(t, "fee", 0.0) or 0.0), source=getattr(t, "source", "manual") or "manual",
                 symbol=p.symbol if p else None, name=p.name if p else None,
                 market=p.market if p else None, created_at=int(t.created_at or 0),
             ))
         return out
 
 
-def _compute_realized_pnl_from_trades(trades: list[PortfolioTrade]) -> float:
+def _trade_source_bucket(source: Optional[str]) -> str:
+    return "manual" if (source or "manual").strip() == "manual" else "agent"
+
+
+def _portfolio_fee_rate(market: Optional[str], side: Optional[str]) -> float:
+    mkt = (market or "CN").strip().upper() or "CN"
+    txn_side = (side or "BUY").strip().upper() or "BUY"
+    specific = os.environ.get(f"PORTFOLIO_FEE_RATE_{mkt}_{txn_side}")
+    if specific not in (None, ""):
+        try:
+            return max(0.0, float(specific))
+        except Exception:
+            pass
+    default = os.environ.get("PORTFOLIO_FEE_RATE_DEFAULT") or "0.0015"
+    try:
+        return max(0.0, float(default))
+    except Exception:
+        return 0.0015
+
+
+def _trade_fee_value(trade: PortfolioTrade, position_map: Optional[dict[str, PortfolioPosition]] = None) -> float:
+    fee = float(getattr(trade, "fee", 0.0) or 0.0)
+    if fee > 0:
+        return fee
+    market = None
+    if position_map is not None:
+        market = getattr(position_map.get(trade.position_id), "market", None)
+    return float(trade.amount or 0.0) * _portfolio_fee_rate(market, trade.side)
+
+
+def _empty_source_summary() -> dict[str, float]:
+    return {
+        "total_cost": 0.0,
+        "total_market_value": 0.0,
+        "unrealized_pnl": 0.0,
+        "realized_pnl": 0.0,
+        "total_trades": 0.0,
+        "total_buy_amount": 0.0,
+        "total_sell_amount": 0.0,
+    }
+
+
+def _portfolio_source_breakdown(
+    trades: list[PortfolioTrade],
+    positions: list[PortfolioPosition],
+    pos_prices: dict[str, float],
+) -> tuple[dict[str, dict[str, float]], dict[str, dict[str, float]]]:
+    breakdown = {
+        "manual": _empty_source_summary(),
+        "agent": _empty_source_summary(),
+    }
+    holdings = {
+        "manual": {},
+        "agent": {},
+    }
+
+    by_position: dict[str, list[PortfolioTrade]] = {}
+    for trade in trades:
+        bucket = _trade_source_bucket(getattr(trade, "source", "manual"))
+        info = breakdown[bucket]
+        info["total_trades"] += 1.0
+        amount = float(trade.amount or 0.0)
+        if (trade.side or "").strip().upper() == "SELL":
+            info["total_sell_amount"] += amount
+        else:
+            info["total_buy_amount"] += amount
+        by_position.setdefault(trade.position_id, []).append(trade)
+
+    position_map = {p.id: p for p in positions}
+    for position_id, items in by_position.items():
+        items.sort(key=lambda x: (int(x.created_at or 0), x.id or ""))
+        lots: list[dict[str, float | str]] = []
+        for trade in items:
+            side = (trade.side or "").strip().upper()
+            qty = float(trade.quantity or 0.0)
+            price = float(trade.price or 0.0)
+            fee = _trade_fee_value(trade, position_map)
+            if qty <= 0:
+                continue
+            if side == "BUY":
+                unit_cost = (qty * price + fee) / qty if qty > 0 else price
+                lots.append({"bucket": _trade_source_bucket(getattr(trade, "source", "manual")), "qty": qty, "price": unit_cost})
+                continue
+            remaining = qty
+            unit_proceeds = (qty * price - fee) / qty if qty > 0 else price
+            while remaining > 1e-9 and lots:
+                lot = lots[0]
+                lot_qty = float(lot["qty"])
+                used = min(remaining, lot_qty)
+                bucket = str(lot["bucket"])
+                breakdown[bucket]["realized_pnl"] += used * (unit_proceeds - float(lot["price"]))
+                lot_qty -= used
+                remaining -= used
+                lot["qty"] = lot_qty
+                if lot_qty <= 1e-9:
+                    lots.pop(0)
+
+        current_price = float(pos_prices.get(position_id, 0.0) or 0.0)
+        live_qty = float(getattr(position_map.get(position_id), "quantity", 0.0) or 0.0)
+        remaining_cap = live_qty
+        for lot in lots:
+            qty = min(float(lot["qty"]), remaining_cap)
+            if qty <= 0:
+                continue
+            remaining_cap -= qty
+            bucket = str(lot["bucket"])
+            cost = qty * float(lot["price"])
+            mv = qty * current_price
+            breakdown[bucket]["total_cost"] += cost
+            breakdown[bucket]["total_market_value"] += mv
+            breakdown[bucket]["unrealized_pnl"] += mv - cost
+            holdings[bucket][position_id] = holdings[bucket].get(position_id, 0.0) + qty
+
+    return breakdown, holdings
+
+
+def _source_summary_response(data: dict[str, float]) -> PortfolioSourceSummaryResponse:
+    total_cost = float(data.get("total_cost", 0.0) or 0.0)
+    unrealized_pnl = float(data.get("unrealized_pnl", 0.0) or 0.0)
+    return PortfolioSourceSummaryResponse(
+        total_cost=total_cost,
+        total_market_value=float(data.get("total_market_value", 0.0) or 0.0),
+        unrealized_pnl=unrealized_pnl,
+        unrealized_pnl_pct=(unrealized_pnl / total_cost * 100.0) if total_cost > 0 else 0.0,
+        realized_pnl=float(data.get("realized_pnl", 0.0) or 0.0),
+        total_trades=int(data.get("total_trades", 0.0) or 0.0),
+        total_buy_amount=float(data.get("total_buy_amount", 0.0) or 0.0),
+        total_sell_amount=float(data.get("total_sell_amount", 0.0) or 0.0),
+    )
+
+
+def _compute_realized_pnl_from_trades(trades: list[PortfolioTrade], positions: Optional[list[PortfolioPosition]] = None) -> float:
     by_position: dict[str, list[PortfolioTrade]] = {}
     for trade in trades:
         by_position.setdefault(trade.position_id, []).append(trade)
 
     realized_pnl = 0.0
+    position_map = {p.id: p for p in (positions or [])}
     for items in by_position.values():
         items.sort(key=lambda x: (int(x.created_at or 0), x.id or ""))
         qty = 0.0
@@ -2344,15 +2507,17 @@ def _compute_realized_pnl_from_trades(trades: list[PortfolioTrade]) -> float:
             side = (trade.side or "").strip().upper()
             trade_qty = float(trade.quantity or 0.0)
             trade_price = float(trade.price or 0.0)
+            fee = _trade_fee_value(trade, position_map)
             if trade_qty <= 0:
                 continue
             if side == "BUY":
                 new_qty = qty + trade_qty
-                avg_cost = ((qty * avg_cost) + (trade_qty * trade_price)) / new_qty if new_qty > 0 else 0.0
+                avg_cost = ((qty * avg_cost) + (trade_qty * trade_price) + fee) / new_qty if new_qty > 0 else 0.0
                 qty = new_qty
                 continue
             sell_qty = min(qty, trade_qty)
-            realized_pnl += sell_qty * (trade_price - avg_cost)
+            net_sell_price = ((trade_qty * trade_price) - fee) / trade_qty if trade_qty > 0 else trade_price
+            realized_pnl += sell_qty * (net_sell_price - avg_cost)
             qty = max(0.0, qty - sell_qty)
             if qty <= 0:
                 avg_cost = 0.0
@@ -2361,6 +2526,7 @@ def _compute_realized_pnl_from_trades(trades: list[PortfolioTrade]) -> float:
 
 def _compute_agent_pick_kpis(trades: list[PortfolioTrade], positions: list[PortfolioPosition]) -> tuple[int, int, int, int, float]:
     position_qty = {p.id: float(p.quantity or 0.0) for p in positions}
+    position_map = {p.id: p for p in positions}
     by_position: dict[str, list[PortfolioTrade]] = {}
     for trade in trades:
         by_position.setdefault(trade.position_id, []).append(trade)
@@ -2384,6 +2550,7 @@ def _compute_agent_pick_kpis(trades: list[PortfolioTrade], positions: list[Portf
             source = (getattr(trade, "source", "manual") or "manual").strip()
             trade_qty = float(trade.quantity or 0.0)
             trade_price = float(trade.price or 0.0)
+            trade_fee = _trade_fee_value(trade, position_map)
             if source == "auto_strategy":
                 auto_trade_count += 1
             if trade_qty <= 0:
@@ -2392,11 +2559,12 @@ def _compute_agent_pick_kpis(trades: list[PortfolioTrade], positions: list[Portf
                 if source == "auto_strategy":
                     has_auto_pick_buy = True
                 new_qty = qty + trade_qty
-                avg_cost = ((qty * avg_cost) + (trade_qty * trade_price)) / new_qty if new_qty > 0 else 0.0
+                avg_cost = ((qty * avg_cost) + (trade_qty * trade_price) + trade_fee) / new_qty if new_qty > 0 else 0.0
                 qty = new_qty
                 continue
             sell_qty = min(qty, trade_qty)
-            realized += sell_qty * (trade_price - avg_cost)
+            net_sell_price = ((trade_qty * trade_price) - trade_fee) / trade_qty if trade_qty > 0 else trade_price
+            realized += sell_qty * (net_sell_price - avg_cost)
             qty = max(0.0, qty - sell_qty)
             if qty <= 0:
                 avg_cost = 0.0
@@ -2412,6 +2580,7 @@ def _compute_agent_pick_kpis(trades: list[PortfolioTrade], positions: list[Portf
 
 def _compute_agent_advanced_kpis(trades: list[PortfolioTrade], positions: list[PortfolioPosition]) -> tuple[float, float, float]:
     by_position: dict[str, list[PortfolioTrade]] = {}
+    position_map = {p.id: p for p in positions}
     for trade in trades:
         by_position.setdefault(trade.position_id, []).append(trade)
 
@@ -2435,14 +2604,16 @@ def _compute_agent_advanced_kpis(trades: list[PortfolioTrade], positions: list[P
         avg = inv_avg_by_position.get(pid, 0.0)
         tqty = float(trade.quantity or 0.0)
         tprice = float(trade.price or 0.0)
+        tfee = _trade_fee_value(trade, position_map)
         side = (trade.side or "").upper()
         if side == "BUY":
             new_qty = qty + tqty
-            inv_avg_by_position[pid] = ((qty * avg) + (tqty * tprice)) / new_qty if new_qty > 0 else 0.0
+            inv_avg_by_position[pid] = ((qty * avg) + (tqty * tprice) + tfee) / new_qty if new_qty > 0 else 0.0
             inv_qty_by_position[pid] = new_qty
         elif qty > 0:
             sell_qty = min(qty, tqty)
-            running_realized += sell_qty * (tprice - avg)
+            net_sell_price = ((tqty * tprice) - tfee) / tqty if tqty > 0 else tprice
+            running_realized += sell_qty * (net_sell_price - avg)
             inv_qty_by_position[pid] = max(0.0, qty - sell_qty)
             if inv_qty_by_position[pid] <= 0:
                 inv_avg_by_position[pid] = 0.0
@@ -2464,17 +2635,19 @@ def _compute_agent_advanced_kpis(trades: list[PortfolioTrade], positions: list[P
         for trade in auto_items:
             tqty = float(trade.quantity or 0.0)
             tprice = float(trade.price or 0.0)
+            tfee = _trade_fee_value(trade, position_map)
             side = (trade.side or "").upper()
             if tqty <= 0:
                 continue
             if side == "BUY":
                 first_buy_ts = first_buy_ts or int(trade.created_at or 0)
                 new_qty = qty + tqty
-                avg = ((qty * avg) + (tqty * tprice)) / new_qty if new_qty > 0 else 0.0
+                avg = ((qty * avg) + (tqty * tprice) + tfee) / new_qty if new_qty > 0 else 0.0
                 qty = new_qty
             else:
                 sell_qty = min(qty, tqty)
-                realized += sell_qty * (tprice - avg)
+                net_sell_price = ((tqty * tprice) - tfee) / tqty if tqty > 0 else tprice
+                realized += sell_qty * (net_sell_price - avg)
                 qty = max(0.0, qty - sell_qty)
                 last_sell_ts = int(trade.created_at or 0)
                 if qty <= 0:
@@ -2489,50 +2662,19 @@ def _compute_agent_advanced_kpis(trades: list[PortfolioTrade], positions: list[P
 
 
 def _compute_agent_managed_financials(trades: list[PortfolioTrade], positions: list[PortfolioPosition]) -> tuple[float, float, float, float]:
-    position_map = {p.id: p for p in positions}
-    managed_capital = 0.0
-    managed_realized_pnl = 0.0
-    managed_unrealized_pnl = 0.0
+    pos_prices: dict[str, float] = {}
+    for pos in positions:
+        try:
+            sp = get_stock_price(symbol=(pos.symbol or "").strip().upper(), market=(pos.market or "CN").strip().upper())
+            pos_prices[pos.id] = float(getattr(sp, "price", 0.0) or 0.0)
+        except Exception:
+            pos_prices[pos.id] = 0.0
 
-    by_position: dict[str, list[PortfolioTrade]] = {}
-    for trade in trades:
-        by_position.setdefault(trade.position_id, []).append(trade)
-
-    for position_id, items in by_position.items():
-        auto_items = [t for t in items if (getattr(t, "source", "manual") or "manual") == "auto_strategy"]
-        if not auto_items:
-            continue
-        auto_items.sort(key=lambda x: (int(x.created_at or 0), x.id or ""))
-        qty = 0.0
-        avg = 0.0
-        for trade in auto_items:
-            trade_qty = float(trade.quantity or 0.0)
-            trade_price = float(trade.price or 0.0)
-            side = (trade.side or "").upper()
-            if trade_qty <= 0:
-                continue
-            if side == "BUY":
-                managed_capital += trade_qty * trade_price
-                new_qty = qty + trade_qty
-                avg = ((qty * avg) + (trade_qty * trade_price)) / new_qty if new_qty > 0 else 0.0
-                qty = new_qty
-            else:
-                sell_qty = min(qty, trade_qty)
-                managed_realized_pnl += sell_qty * (trade_price - avg)
-                qty = max(0.0, qty - sell_qty)
-                if qty <= 0:
-                    avg = 0.0
-
-        pos = position_map.get(position_id)
-        if pos and float(pos.quantity or 0.0) > 0 and qty > 0:
-            try:
-                sp = get_stock_price(symbol=(pos.symbol or "").strip().upper(), market=(pos.market or "CN").strip().upper())
-                current_price = float(getattr(sp, "price", 0.0) or 0.0)
-                if current_price > 0:
-                    managed_unrealized_pnl += min(qty, float(pos.quantity or 0.0)) * (current_price - avg)
-            except Exception:
-                pass
-
+    breakdown, _ = _portfolio_source_breakdown(trades, positions, pos_prices)
+    agent = breakdown["agent"]
+    managed_capital = float(agent["total_buy_amount"])
+    managed_realized_pnl = float(agent["realized_pnl"])
+    managed_unrealized_pnl = float(agent["unrealized_pnl"])
     managed_net_pnl = managed_realized_pnl + managed_unrealized_pnl
     return managed_capital, managed_realized_pnl, managed_unrealized_pnl, managed_net_pnl
 
@@ -2565,10 +2707,18 @@ def _agent_dynamic_buy_quantity(min_buy_quantity: float, target_profit: Optional
     return base * units
 
 
-def _compute_period_returns(positions: list[PortfolioPosition], summary: PortfolioSummaryResponse) -> PortfolioReturnsResponse:
+def _compute_period_returns(
+    positions: list[PortfolioPosition],
+    summary: PortfolioSummaryResponse,
+    holdings: dict[str, dict[str, float]],
+) -> PortfolioReturnsResponse:
     today_pnl = 0.0
     week_pnl = 0.0
     month_pnl = 0.0
+    bucket_periods = {
+        "manual": {"today": 0.0, "week": 0.0, "month": 0.0},
+        "agent": {"today": 0.0, "week": 0.0, "month": 0.0},
+    }
 
     for p in positions:
         qty = float(p.quantity or 0.0)
@@ -2586,15 +2736,26 @@ def _compute_period_returns(positions: list[PortfolioPosition], summary: Portfol
                 continue
             closes = pd.to_numeric(df["close"], errors="coerce").dropna().tolist()
             if len(closes) >= 2:
-                today_pnl += qty * (current - float(closes[-2]))
+                delta = current - float(closes[-2])
+                today_pnl += qty * delta
+                for bucket in ("manual", "agent"):
+                    bucket_periods[bucket]["today"] += float(holdings.get(bucket, {}).get(p.id, 0.0) or 0.0) * delta
             if len(closes) >= 6:
-                week_pnl += qty * (current - float(closes[-6]))
+                delta = current - float(closes[-6])
+                week_pnl += qty * delta
+                for bucket in ("manual", "agent"):
+                    bucket_periods[bucket]["week"] += float(holdings.get(bucket, {}).get(p.id, 0.0) or 0.0) * delta
             if len(closes) >= 21:
-                month_pnl += qty * (current - float(closes[-21]))
+                delta = current - float(closes[-21])
+                month_pnl += qty * delta
+                for bucket in ("manual", "agent"):
+                    bucket_periods[bucket]["month"] += float(holdings.get(bucket, {}).get(p.id, 0.0) or 0.0) * delta
         except Exception:
             continue
 
     total_pnl = float(summary.realized_pnl or 0.0) + float(summary.unrealized_pnl or 0.0)
+    manual_total = float(summary.manual.realized_pnl or 0.0) + float(summary.manual.unrealized_pnl or 0.0)
+    agent_total = float(summary.agent.realized_pnl or 0.0) + float(summary.agent.unrealized_pnl or 0.0)
     return PortfolioReturnsResponse(
         today_pnl=today_pnl,
         week_pnl=week_pnl,
@@ -2602,6 +2763,22 @@ def _compute_period_returns(positions: list[PortfolioPosition], summary: Portfol
         total_pnl=total_pnl,
         realized_pnl=float(summary.realized_pnl or 0.0),
         unrealized_pnl=float(summary.unrealized_pnl or 0.0),
+        manual=PortfolioSourceReturnsResponse(
+            today_pnl=float(bucket_periods["manual"]["today"]),
+            week_pnl=float(bucket_periods["manual"]["week"]),
+            month_pnl=float(bucket_periods["manual"]["month"]),
+            total_pnl=manual_total,
+            realized_pnl=float(summary.manual.realized_pnl or 0.0),
+            unrealized_pnl=float(summary.manual.unrealized_pnl or 0.0),
+        ),
+        agent=PortfolioSourceReturnsResponse(
+            today_pnl=float(bucket_periods["agent"]["today"]),
+            week_pnl=float(bucket_periods["agent"]["week"]),
+            month_pnl=float(bucket_periods["agent"]["month"]),
+            total_pnl=agent_total,
+            realized_pnl=float(summary.agent.realized_pnl or 0.0),
+            unrealized_pnl=float(summary.agent.unrealized_pnl or 0.0),
+        ),
     )
 
 
@@ -2611,14 +2788,6 @@ def get_portfolio_summary():
         positions = s.execute(select(PortfolioPosition)).scalars().all()
         trades = s.execute(select(PortfolioTrade)).scalars().all()
 
-    total_cost = 0.0
-    total_mv = 0.0
-    for p in positions:
-        qty = float(p.quantity or 0)
-        avg = float(p.avg_cost or 0)
-        total_cost += qty * avg
-
-    positions_map = {p.id: p for p in positions}
     pos_prices = {}
     from concurrent.futures import ThreadPoolExecutor
     def _fetch(args):
@@ -2636,23 +2805,12 @@ def get_portfolio_summary():
         for pid, cp in ex.map(_fetch, [(p,) for p in positions]):
             pos_prices[pid] = cp
 
-    for p in positions:
-        qty = float(p.quantity or 0)
-        avg = float(p.avg_cost or 0)
-        cp = pos_prices.get(p.id, 0)
-        total_mv += qty * cp
-
-    realized_pnl = _compute_realized_pnl_from_trades(trades)
-    total_buy_amt = 0.0
-    total_sell_amt = 0.0
-    for t in trades:
-        side = (t.side or "").upper()
-        amt = float(t.amount or 0)
-        if side == "SELL":
-            total_sell_amt += amt
-        else:
-            total_buy_amt += amt
-
+    breakdown, _ = _portfolio_source_breakdown(trades, positions, pos_prices)
+    total_cost = float(sum(part["total_cost"] for part in breakdown.values()))
+    total_mv = float(sum(part["total_market_value"] for part in breakdown.values()))
+    realized_pnl = _compute_realized_pnl_from_trades(trades, positions)
+    total_buy_amt = float(sum(part["total_buy_amount"] for part in breakdown.values()))
+    total_sell_amt = float(sum(part["total_sell_amount"] for part in breakdown.values()))
     unrealized_pnl = total_mv - total_cost
     unrealized_pnl_pct = (unrealized_pnl / total_cost * 100) if total_cost > 0 else 0
 
@@ -2661,6 +2819,8 @@ def get_portfolio_summary():
         unrealized_pnl=unrealized_pnl, unrealized_pnl_pct=unrealized_pnl_pct,
         realized_pnl=realized_pnl, total_trades=len(trades),
         total_buy_amount=total_buy_amt, total_sell_amount=total_sell_amt,
+        manual=_source_summary_response(breakdown["manual"]),
+        agent=_source_summary_response(breakdown["agent"]),
     )
 
 
@@ -2885,8 +3045,32 @@ def get_portfolio_agent_status():
 def get_portfolio_returns():
     with session_scope() as s:
         positions = s.execute(select(PortfolioPosition)).scalars().all()
-    summary = get_portfolio_summary()
-    return _compute_period_returns(positions, summary)
+        trades = s.execute(select(PortfolioTrade)).scalars().all()
+
+    pos_prices = {}
+    for pos in positions:
+        try:
+            sp = get_stock_price(symbol=(pos.symbol or "").strip().upper(), market=(pos.market or "CN").strip().upper())
+            pos_prices[pos.id] = float(getattr(sp, "price", 0.0) or 0.0)
+        except Exception:
+            pos_prices[pos.id] = 0.0
+
+    breakdown, holdings = _portfolio_source_breakdown(trades, positions, pos_prices)
+    total_cost = float(sum(part["total_cost"] for part in breakdown.values()))
+    total_market_value = float(sum(part["total_market_value"] for part in breakdown.values()))
+    summary = PortfolioSummaryResponse(
+        total_cost=total_cost,
+        total_market_value=total_market_value,
+        unrealized_pnl=total_market_value - total_cost,
+        unrealized_pnl_pct=((total_market_value - total_cost) / total_cost * 100.0) if total_cost > 0 else 0.0,
+        realized_pnl=_compute_realized_pnl_from_trades(trades, positions),
+        total_trades=len(trades),
+        total_buy_amount=float(sum(part["total_buy_amount"] for part in breakdown.values())),
+        total_sell_amount=float(sum(part["total_sell_amount"] for part in breakdown.values())),
+        manual=_source_summary_response(breakdown["manual"]),
+        agent=_source_summary_response(breakdown["agent"]),
+    )
+    return _compute_period_returns(positions, summary, holdings)
 
 
 @app.put("/api/portfolio/agent/config", response_model=PortfolioAgentConfigResponse)
@@ -3041,10 +3225,12 @@ def _execute_auto_trade(at_id: str):
             old_qty = float(p.quantity or 0.0)
             old_avg = float(p.avg_cost or 0.0)
             now = int(time.time())
+            gross_amount = float(exec_price or 0.0) * qty
+            trade_fee = gross_amount * _portfolio_fee_rate(p.market, at.side)
 
             if at.side == "BUY":
                 new_qty = old_qty + qty
-                new_avg = (old_qty * old_avg + qty * exec_price) / new_qty if new_qty > 0 else 0.0
+                new_avg = (old_qty * old_avg + qty * exec_price + trade_fee) / new_qty if new_qty > 0 else 0.0
                 p.quantity = new_qty
                 p.avg_cost = new_avg
             else:
@@ -3063,6 +3249,7 @@ def _execute_auto_trade(at_id: str):
                 position_id=p.id, side=at.side, price=exec_price,
                 quantity=actual_qty if at.side == "SELL" else qty,
                 amount=exec_price * (actual_qty if at.side == "SELL" else qty),
+                fee=trade_fee * ((actual_qty if at.side == "SELL" else qty) / qty) if qty > 0 else 0.0,
                 source="auto_order",
                 created_at=now,
             )
@@ -6792,7 +6979,7 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
             elif steep_drop and oversold and big_drop_5d:
                 timing_score = 94
             elif steep_drop and oversold:
-                timing_score = 90
+                timing_score = 76 if kdj_golden_cross else 72
             elif steep_drop or oversold:
                 timing_score = 80 if vol_spike else 60
             elif mild_drop:
@@ -6841,7 +7028,7 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
         elif timing_score >= 80:
             strategy_action = "关注等买点"
         elif timing_score >= 60:
-            strategy_action = "轻仓试探买入"
+            strategy_action = "观察信号，暂不买入"
         elif timing_score >= 30:
             strategy_action = "等待回调确认"
         else:
@@ -6969,7 +7156,7 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
 
         buy_price_aggressive_ok=aggressive_ok,
         buy_price_stable_ok=stable_ok,
-         sell_price_ok=sell_score >= 50 if sell_score else None,
+        sell_price_ok=sell_score >= 50 if sell_score else None,
         signal_golden_cross=signal_golden_cross,
         signal_death_cross=signal_death_cross,
         signal_macd_bullish=signal_macd_bullish,

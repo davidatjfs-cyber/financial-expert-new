@@ -170,6 +170,7 @@ export interface PortfolioTrade {
   price: number;
   quantity: number;
   amount: number;
+  fee: number;
   source: 'manual' | 'auto_strategy' | 'auto_order';
   symbol?: string | null;
   name?: string | null;
@@ -178,6 +179,19 @@ export interface PortfolioTrade {
 }
 
 export interface PortfolioSummary {
+  total_cost: number;
+  total_market_value: number;
+  unrealized_pnl: number;
+  unrealized_pnl_pct: number;
+  realized_pnl: number;
+  total_trades: number;
+  total_buy_amount: number;
+  total_sell_amount: number;
+  manual: PortfolioSourceSummary;
+  agent: PortfolioSourceSummary;
+}
+
+export interface PortfolioSourceSummary {
   total_cost: number;
   total_market_value: number;
   unrealized_pnl: number;
@@ -226,6 +240,17 @@ export interface PortfolioAgentStatus {
 }
 
 export interface PortfolioReturns {
+  today_pnl: number;
+  week_pnl: number;
+  month_pnl: number;
+  total_pnl: number;
+  realized_pnl: number;
+  unrealized_pnl: number;
+  manual: PortfolioSourceReturns;
+  agent: PortfolioSourceReturns;
+}
+
+export interface PortfolioSourceReturns {
   today_pnl: number;
   week_pnl: number;
   month_pnl: number;
