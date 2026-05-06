@@ -433,6 +433,29 @@ export default function PortfolioPage() {
                 <span>成本 <b className="text-[var(--text-secondary)]">{fmt(p.avg_cost)}</b></span>
                 <span>市值 <b className="text-[var(--text-secondary)]">{p.market_value != null ? p.market_value.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '-'}</b></span>
               </div>
+              {/* Buy/Sell price row */}
+              <div className="flex items-center gap-2 mt-1.5">
+                {p.target_buy_price != null && p.target_buy_price > 0 && (
+                  <span className="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 text-[11px] font-bold">
+                    买入 {fmt(p.target_buy_price)}
+                  </span>
+                )}
+                {p.target_sell_price != null && p.target_sell_price > 0 && (
+                  <span className="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full bg-red-500/15 text-red-400 text-[11px] font-bold">
+                    卖出 {fmt(p.target_sell_price)}
+                  </span>
+                )}
+                {p.strategy_buy_price != null && p.strategy_buy_price > 0 && p.strategy_buy_price !== p.target_buy_price && (
+                  <span className="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400/80 text-[10px] font-semibold">
+                    策略买 {fmt(p.strategy_buy_price)}
+                  </span>
+                )}
+                {p.strategy_sell_price != null && p.strategy_sell_price > 0 && p.strategy_sell_price !== p.target_sell_price && (
+                  <span className="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full bg-red-500/10 text-red-400/80 text-[10px] font-semibold">
+                    策略卖 {fmt(p.strategy_sell_price)}
+                  </span>
+                )}
+              </div>
               {/* Action row — compact pills */}
               <div className="flex items-center gap-1.5 mt-2.5" onClick={e => e.stopPropagation()}>
                 <button

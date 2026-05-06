@@ -6886,7 +6886,7 @@ def start_recommend_scan(req: RecommendScanRequest, background_tasks: Background
             _RECOMMEND_SCAN_STATUS["message"] = f"扫描失败: {e}"
             print(f"[recommend] scan error: {e}")
 
-    background_tasks.add_task(_run)
+    threading.Thread(target=_run, daemon=True).start()
     return {"status": "started", "message": "扫描已启动"}
 
 
@@ -6947,7 +6947,7 @@ def start_backtest(background_tasks: BackgroundTasks):
             _BACKTEST_STATUS["message"] = f"回测失败: {e}"
             print(f"[backtest] error: {e}")
 
-    background_tasks.add_task(_run)
+    threading.Thread(target=_run, daemon=True).start()
     return {"status": "started", "message": "回测已启动"}
 
 
@@ -6983,7 +6983,7 @@ def start_ml_train(background_tasks: BackgroundTasks):
             _ML_TRAIN_STATUS["message"] = f"训练失败: {e}"
             print(f"[ml] train error: {e}")
 
-    background_tasks.add_task(_run)
+    threading.Thread(target=_run, daemon=True).start()
     return {"status": "started", "message": "模型训练已启动"}
 
 
@@ -7020,7 +7020,7 @@ def start_weight_optimization(background_tasks: BackgroundTasks):
             _WEIGHT_OPT_STATUS["message"] = f"优化失败: {e}"
             print(f"[weights] error: {e}")
 
-    background_tasks.add_task(_run)
+    threading.Thread(target=_run, daemon=True).start()
     return {"status": "started", "message": "权重优化已启动"}
 
 
