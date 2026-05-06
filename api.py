@@ -2717,11 +2717,12 @@ def _agent_dynamic_buy_quantity(min_buy_quantity: float, target_profit: Optional
     return base * units
 
 
-def _compute_period_realized_pnl(trades: list[PortfolioTrade], today_ts: int, week_ts: int, month_ts: int) -> dict[str, dict[str, float]]:
+def _compute_period_realized_pnl(trades: list[PortfolioTrade], today_ts: int, week_ts: int, month_ts: int, positions: list[PortfolioPosition] | None = None) -> dict[str, dict[str, float]]:
     result = {
         "manual": {"today": 0.0, "week": 0.0, "month": 0.0},
         "agent": {"today": 0.0, "week": 0.0, "month": 0.0},
     }
+    position_map = {p.id: p for p in (positions or [])}
     by_position: dict[str, list[PortfolioTrade]] = {}
     for trade in trades:
         by_position.setdefault(trade.position_id, []).append(trade)
@@ -2732,7 +2733,7 @@ def _compute_period_realized_pnl(trades: list[PortfolioTrade], today_ts: int, we
             side = (trade.side or "").strip().upper()
             qty = float(trade.quantity or 0.0)
             price = float(trade.price or 0.0)
-            fee = float(trade.fee or 0.0)
+            fee = _trade_fee_value(trade, position_map)
             if qty <= 0:
                 continue
             bucket = _trade_source_bucket(getattr(trade, "source", "manual"))
@@ -2776,41 +2777,19 @@ def _compute_period_returns(
     week_ts = int((now_cn.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=now_cn.weekday())).timestamp())
     month_ts = int(now_cn.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp())
 
-    bucket_holding_delta = {
-        "manual": {"today": 0.0, "week": 0.0, "month": 0.0},
-        "agent": {"today": 0.0, "week": 0.0, "month": 0.0},
-    }
+    unrealized_pnl_by_bucket = {"manual": 0.0, "agent": 0.0}
+    unrealized_pnl_by_bucket["manual"] = float(summary.manual.unrealized_pnl or 0.0)
+    unrealized_pnl_by_bucket["agent"] = float(summary.agent.unrealized_pnl or 0.0)
 
-    for p in positions:
-        qty = float(p.quantity or 0.0)
-        if qty <= 0:
-            continue
-        market = (p.market or "CN").strip().upper()
-        symbol = (p.symbol or "").strip().upper()
-        try:
-            sp = get_stock_price(symbol=symbol, market=market)
-            current = float(getattr(sp, "price", 0.0) or 0.0)
-            if current <= 0:
-                continue
-            df = _fetch_history_df(symbol, market)
-            if df is None or df.empty or "close" not in df.columns:
-                continue
-            closes = pd.to_numeric(df["close"], errors="coerce").dropna().tolist()
-            for period, idx, key in [("today", 2, "today"), ("week", 6, "week"), ("month", 21, "month")]:
-                if len(closes) >= idx:
-                    delta = current - float(closes[-idx])
-                    for bucket in ("manual", "agent"):
-                        bucket_holding_delta[bucket][key] += float(holdings.get(bucket, {}).get(p.id, 0.0) or 0.0) * delta
-        except Exception:
-            continue
-
-    bucket_realized = _compute_period_realized_pnl(trades, today_ts, week_ts, month_ts)
+    bucket_realized = _compute_period_realized_pnl(trades, today_ts, week_ts, month_ts, positions)
 
     bucket_periods = {}
     for bucket in ("manual", "agent"):
-        bucket_periods[bucket] = {}
-        for key in ("today", "week", "month"):
-            bucket_periods[bucket][key] = bucket_holding_delta[bucket][key] + bucket_realized[bucket][key]
+        bucket_periods[bucket] = {
+            "today": bucket_realized[bucket]["today"] + unrealized_pnl_by_bucket[bucket],
+            "week": bucket_realized[bucket]["week"] + unrealized_pnl_by_bucket[bucket],
+            "month": bucket_realized[bucket]["month"] + unrealized_pnl_by_bucket[bucket],
+        }
 
     total_pnl = float(summary.realized_pnl or 0.0) + float(summary.unrealized_pnl or 0.0)
     manual_total = float(summary.manual.realized_pnl or 0.0) + float(summary.manual.unrealized_pnl or 0.0)
