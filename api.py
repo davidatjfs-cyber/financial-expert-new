@@ -99,6 +99,62 @@ def _cn_market_closed() -> bool:
     }
     return now_bj.date() in (CN_HOLIDAYS_2025 | CN_HOLIDAYS_2026)
 
+HK_HOLIDAYS_2025 = {
+    _dt.date(2025, 1, 1),
+    _dt.date(2025, 1, 29), _dt.date(2025, 1, 30), _dt.date(2025, 1, 31),
+    _dt.date(2025, 4, 4), _dt.date(2025, 4, 18), _dt.date(2025, 4, 19),
+    _dt.date(2025, 5, 1), _dt.date(2025, 5, 5),
+    _dt.date(2025, 7, 1),
+    _dt.date(2025, 10, 1), _dt.date(2025, 10, 2),
+    _dt.date(2025, 12, 25),
+}
+HK_HOLIDAYS_2026 = {
+    _dt.date(2026, 1, 1), _dt.date(2026, 1, 2),
+    _dt.date(2026, 2, 17), _dt.date(2026, 2, 18), _dt.date(2026, 2, 19),
+    _dt.date(2026, 4, 3), _dt.date(2026, 4, 6),
+    _dt.date(2026, 5, 1), _dt.date(2026, 5, 25),
+    _dt.date(2026, 7, 1),
+    _dt.date(2026, 10, 1), _dt.date(2026, 10, 2), _dt.date(2026, 10, 22),
+    _dt.date(2026, 12, 25),
+}
+
+US_HOLIDAYS_2025 = {
+    _dt.date(2025, 1, 1), _dt.date(2025, 1, 20),
+    _dt.date(2025, 2, 17),
+    _dt.date(2025, 4, 18),
+    _dt.date(2025, 5, 26),
+    _dt.date(2025, 6, 19),
+    _dt.date(2025, 7, 4),
+    _dt.date(2025, 9, 1),
+    _dt.date(2025, 11, 27),
+    _dt.date(2025, 12, 25),
+}
+US_HOLIDAYS_2026 = {
+    _dt.date(2026, 1, 1), _dt.date(2026, 1, 19),
+    _dt.date(2026, 2, 16),
+    _dt.date(2026, 4, 3),
+    _dt.date(2026, 5, 25),
+    _dt.date(2026, 6, 19),
+    _dt.date(2026, 7, 3),
+    _dt.date(2026, 9, 7),
+    _dt.date(2026, 11, 26),
+    _dt.date(2026, 12, 25),
+}
+
+
+def _hk_market_closed() -> bool:
+    now_hk = _dt.datetime.now(_ZoneInfo("Asia/Hong_Kong"))
+    if now_hk.weekday() >= 5:
+        return True
+    return now_hk.date() in (HK_HOLIDAYS_2025 | HK_HOLIDAYS_2026)
+
+
+def _us_market_closed() -> bool:
+    now_ny = _dt.datetime.now(_ZoneInfo("America/New_York"))
+    if now_ny.weekday() >= 5:
+        return True
+    return now_ny.date() in (US_HOLIDAYS_2025 | US_HOLIDAYS_2026)
+
 # If yfinance is rate-limited for US symbols, skip yfinance for a short cooldown window.
 _YF_US_COOLDOWN_UNTIL: float = 0.0
 
@@ -380,9 +436,17 @@ def _feishu_tenant_token(app_id: str, app_secret: str) -> Optional[str]:
 
 
 def _send_feishu_portfolio_alert(alert: PortfolioAlertResponse):
-    if (alert.market or "").strip().upper() != "CN":
-        return
-    if _cn_market_closed():
+    mkt = (alert.market or "").strip().upper()
+    if mkt == "CN":
+        if _cn_market_closed():
+            return
+    elif mkt == "HK":
+        if _hk_market_closed():
+            return
+    elif mkt == "US":
+        if _us_market_closed():
+            return
+    else:
         return
 
     send_types = {
@@ -433,24 +497,28 @@ def _send_feishu_portfolio_alert(alert: PortfolioAlertResponse):
     title = title_map.get(alert.alert_type, "持仓提醒")
     if is_new and prev is not None:
         title = "【新】" + title
+    _mkt_labels = {"CN": "A股", "HK": "港股", "US": "美股"}
+    _mkt_currencies = {"CN": "CNY", "HK": "HKD", "US": "USD"}
+    mkt_tag = _mkt_labels.get(mkt, mkt)
+    mkt_currency = _mkt_currencies.get(mkt, "")
     symbol_name = f"{alert.name or alert.symbol} ({alert.market}:{alert.symbol})"
-    current = "-" if alert.current_price is None else f"{alert.current_price:.2f}"
-    trigger = "-" if alert.trigger_price is None else f"{alert.trigger_price:.2f}"
+    current = "-" if alert.current_price is None else (f"{alert.current_price:.2f} {mkt_currency}" if mkt_currency else f"{alert.current_price:.2f}")
+    trigger = "-" if alert.trigger_price is None else (f"{alert.trigger_price:.2f} {mkt_currency}" if mkt_currency else f"{alert.trigger_price:.2f}")
     card = {
         "config": {"wide_screen_mode": True},
         "header": {
             "template": (
                 "black" if alert.alert_type == "strategy_stop_loss"
-                else "red" if alert.alert_type in ("strategy_take_profit_1", "strategy_take_profit_2")
+                else "red" if alert.alert_type in ("strategy_take_profit_1", "strategy_take_profit_2", "target_sell", "signal_sell")
                 else "green"
             ),
-            "title": {"tag": "plain_text", "content": title},
+            "title": {"tag": "plain_text", "content": f"[{mkt_tag}] {title}"},
         },
         "elements": [
             {"tag": "div", "text": {"tag": "lark_md", "content": f"**股票**：{symbol_name}"}},
             {"tag": "div", "text": {"tag": "lark_md", "content": f"**当前价**：{current}    **触发价**：{trigger}"}},
             {"tag": "div", "text": {"tag": "lark_md", "content": f"**原因**：{alert.message}"}},
-            {"tag": "div", "text": {"tag": "lark_md", "content": f"**触发时间**：{_dt.datetime.now(_ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M:%S')}"}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"**触发时间**：{(_dt.datetime.now(_ZoneInfo('America/New_York')) if mkt == 'US' else _dt.datetime.now(_ZoneInfo('Asia/Hong_Kong')) if mkt == 'HK' else _dt.datetime.now(_ZoneInfo('Asia/Shanghai'))).strftime('%Y-%m-%d %H:%M:%S')}"}},
         ],
     }
     try:
