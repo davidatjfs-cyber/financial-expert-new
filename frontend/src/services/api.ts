@@ -160,6 +160,7 @@ export interface PortfolioTradeRequest {
   position_id: string;
   side: 'BUY' | 'SELL';
   quantity: number;
+  source?: 'manual' | 'auto_strategy' | 'auto_order';
 }
 
 export interface PortfolioTrade {
@@ -169,7 +170,52 @@ export interface PortfolioTrade {
   price: number;
   quantity: number;
   amount: number;
+  source: 'manual' | 'auto_strategy' | 'auto_order';
+  symbol?: string | null;
+  name?: string | null;
+  market?: string | null;
   created_at: number;
+}
+
+export interface PortfolioSummary {
+  total_cost: number;
+  total_market_value: number;
+  unrealized_pnl: number;
+  unrealized_pnl_pct: number;
+  realized_pnl: number;
+  total_trades: number;
+  total_buy_amount: number;
+  total_sell_amount: number;
+}
+
+export interface PortfolioAgentConfig {
+  enabled: boolean;
+  target_profit?: number | null;
+  deadline_ts?: number | null;
+  min_buy_quantity: number;
+  last_run_at?: number | null;
+  last_action?: string | null;
+  last_status?: string | null;
+}
+
+export interface PortfolioAgentStatus {
+  enabled: boolean;
+  market_scope: 'CN' | string;
+  target_profit?: number | null;
+  deadline_ts?: number | null;
+  min_buy_quantity: number;
+  realized_pnl: number;
+  unrealized_pnl: number;
+  net_pnl: number;
+  target_progress_pct: number;
+  auto_trade_count: number;
+  auto_pick_count: number;
+  auto_pick_success_count: number;
+  auto_pick_closed_count: number;
+  auto_pick_success_rate: number;
+  last_run_at?: number | null;
+  last_action?: string | null;
+  last_status?: string | null;
 }
 
 export interface PortfolioAlert {
@@ -460,6 +506,39 @@ export async function createPortfolioTrade(req: PortfolioTradeRequest) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(req),
+  });
+}
+
+export async function getPortfolioTrades(positionId?: string, limit: number = 100) {
+  const params = new URLSearchParams();
+  params.set('limit', String(limit));
+  if (positionId) params.set('position_id', positionId);
+  return fetchAPI<PortfolioTrade[]>(`/api/portfolio/trades?${params.toString()}`);
+}
+
+export async function getPortfolioSummary() {
+  return fetchAPI<PortfolioSummary>(`/api/portfolio/summary`);
+}
+
+export async function getPortfolioAgentConfig() {
+  return fetchAPI<PortfolioAgentConfig>(`/api/portfolio/agent/config`);
+}
+
+export async function getPortfolioAgentStatus() {
+  return fetchAPI<PortfolioAgentStatus>(`/api/portfolio/agent/status`);
+}
+
+export async function updatePortfolioAgentConfig(req: PortfolioAgentConfig) {
+  return fetchAPI<PortfolioAgentConfig>(`/api/portfolio/agent/config`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  });
+}
+
+export async function runPortfolioAgentNow() {
+  return fetchAPI<{ ok: boolean; message: string; trade?: PortfolioTrade }>(`/api/portfolio/agent/run`, {
+    method: 'POST',
   });
 }
 

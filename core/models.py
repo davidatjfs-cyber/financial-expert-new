@@ -119,6 +119,7 @@ class PortfolioTrade(Base):
     price: Mapped[float] = mapped_column(Float)
     quantity: Mapped[float] = mapped_column(Float)
     amount: Mapped[float] = mapped_column(Float)
+    source: Mapped[str] = mapped_column(String, default="manual")  # manual / auto_strategy / auto_order
 
     created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
 
@@ -137,6 +138,21 @@ class PortfolioAutoTrade(Base):
     created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
     executed_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
     executed_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+class PortfolioAgentConfig(Base):
+    __tablename__ = "portfolio_agent_configs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default="default")
+    enabled: Mapped[str] = mapped_column(String, default="0")  # 0 / 1
+    target_profit: Mapped[float | None] = mapped_column(Float, nullable=True)
+    deadline_ts: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    min_buy_quantity: Mapped[float] = mapped_column(Float, default=10000.0)
+    last_run_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_action: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
+    updated_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
 
 
 class MappingRule(Base):

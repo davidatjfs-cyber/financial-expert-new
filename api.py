@@ -33,6 +33,7 @@ from core.models import (
     Alert,
     Company,
     ComputedMetric,
+    PortfolioAgentConfig,
     PortfolioAutoTrade,
     PortfolioPosition,
     PortfolioTrade,
@@ -98,6 +99,15 @@ def _cn_market_closed() -> bool:
         _dt.date(2026, 10, 7),
     }
     return now_bj.date() in (CN_HOLIDAYS_2025 | CN_HOLIDAYS_2026)
+
+
+def _cn_market_trading_now() -> bool:
+    if _cn_market_closed():
+        return False
+    now_bj = _dt.datetime.now(_ZoneInfo("Asia/Shanghai")).time()
+    morning = _dt.time(9, 30) <= now_bj <= _dt.time(11, 30)
+    afternoon = _dt.time(13, 0) <= now_bj <= _dt.time(15, 0)
+    return morning or afternoon
 
 HK_HOLIDAYS_2025 = {
     _dt.date(2025, 1, 1),
@@ -368,6 +378,7 @@ class PortfolioTradeRequest(BaseModel):
     position_id: str
     side: str  # BUY / SELL
     quantity: float
+    source: str = "manual"  # manual / auto_strategy / auto_order
 
 
 class PortfolioTradeResponse(BaseModel):
@@ -377,6 +388,10 @@ class PortfolioTradeResponse(BaseModel):
     price: float
     quantity: float
     amount: float
+    source: str = "manual"
+    symbol: Optional[str] = None
+    name: Optional[str] = None
+    market: Optional[str] = None
     created_at: int
 
 
@@ -412,6 +427,54 @@ class PortfolioAlertResponse(BaseModel):
     message: str
     current_price: Optional[float] = None
     trigger_price: Optional[float] = None
+
+
+class PortfolioSummaryResponse(BaseModel):
+    total_cost: float = 0.0
+    total_market_value: float = 0.0
+    unrealized_pnl: float = 0.0
+    unrealized_pnl_pct: float = 0.0
+    realized_pnl: float = 0.0
+    total_trades: int = 0
+    total_buy_amount: float = 0.0
+    total_sell_amount: float = 0.0
+
+
+class PortfolioAgentConfigRequest(BaseModel):
+    enabled: bool = False
+    target_profit: Optional[float] = None
+    deadline_ts: Optional[int] = None
+    min_buy_quantity: float = 10000.0
+
+
+class PortfolioAgentConfigResponse(BaseModel):
+    enabled: bool = False
+    target_profit: Optional[float] = None
+    deadline_ts: Optional[int] = None
+    min_buy_quantity: float = 10000.0
+    last_run_at: Optional[int] = None
+    last_action: Optional[str] = None
+    last_status: Optional[str] = None
+
+
+class PortfolioAgentStatusResponse(BaseModel):
+    enabled: bool = False
+    market_scope: str = "CN"
+    target_profit: Optional[float] = None
+    deadline_ts: Optional[int] = None
+    min_buy_quantity: float = 10000.0
+    realized_pnl: float = 0.0
+    unrealized_pnl: float = 0.0
+    net_pnl: float = 0.0
+    target_progress_pct: float = 0.0
+    auto_trade_count: int = 0
+    auto_pick_count: int = 0
+    auto_pick_success_count: int = 0
+    auto_pick_closed_count: int = 0
+    auto_pick_success_rate: float = 0.0
+    last_run_at: Optional[int] = None
+    last_action: Optional[str] = None
+    last_status: Optional[str] = None
 
 
 def _feishu_env() -> tuple[str, str, str, str]:
@@ -534,6 +597,188 @@ def _send_feishu_portfolio_alert(alert: PortfolioAlertResponse):
             _FEISHU_SENT_ALERTS[alert.key] = (now, alert_data)
     except Exception as e:
         print(f"[FEISHU] send error: {e}")
+
+
+_FEISHU_SENT_TRADES: dict[str, float] = {}
+_FEISHU_SENT_TRADE_TTL = 3600  # 1h dedup
+_AUTO_STRATEGY_EXEC_CACHE: dict[str, float] = {}
+_AUTO_STRATEGY_EXEC_TTL = 12 * 3600
+
+
+def _send_feishu_trade_notify(position_id: str, side: str, price: float, quantity: float,
+                               symbol: str, name: str | None, market: str, source: str):
+    mkt = (market or "").strip().upper()
+    if mkt == "CN":
+        if _cn_market_closed():
+            return
+    elif mkt == "HK":
+        if _hk_market_closed():
+            return
+    elif mkt == "US":
+        if _us_market_closed():
+            return
+    else:
+        return
+
+    app_id, app_secret, receive_id, receive_id_type = _feishu_env()
+    if not app_id or not app_secret or not receive_id:
+        return
+
+    dedup_key = f"{position_id}:{side}:{price:.2f}:{quantity}:{source}"
+    now = time.time()
+    for k in list(_FEISHU_SENT_TRADES):
+        if now - _FEISHU_SENT_TRADES[k] > _FEISHU_SENT_TRADE_TTL:
+            del _FEISHU_SENT_TRADES[k]
+    if dedup_key in _FEISHU_SENT_TRADES:
+        return
+
+    token = _feishu_tenant_token(app_id, app_secret)
+    if not token:
+        return
+
+    _mkt_labels = {"CN": "A股", "HK": "港股", "US": "美股"}
+    _mkt_currencies = {"CN": "CNY", "HK": "HKD", "US": "USD"}
+    mkt_tag = _mkt_labels.get(mkt, mkt)
+    currency = _mkt_currencies.get(mkt, "")
+    side_label = "买入" if side == "BUY" else "卖出"
+    source_label = {"manual": "手动", "auto_strategy": "策略自动", "auto_order": "委托自动"}.get(source, source)
+    amount = price * quantity
+    tz = _ZoneInfo('America/New_York') if mkt == 'US' else _ZoneInfo('Asia/Hong_Kong') if mkt == 'HK' else _ZoneInfo('Asia/Shanghai')
+    time_str = _dt.datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')
+
+    card = {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "green" if side == "BUY" else "red",
+            "title": {"tag": "plain_text", "content": f"[{mkt_tag}] 执行{side_label}"},
+        },
+        "elements": [
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"**股票**：{name or symbol} ({market}:{symbol})"}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"**方向**：{side_label}    **来源**：{source_label}"}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"**价格**：{price:.2f} {currency}    **数量**：{int(quantity)}股"}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"**金额**：{amount:,.0f} {currency}"}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"**时间**：{time_str}"}},
+        ],
+    }
+    try:
+        resp = requests.post(
+            f"https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type={receive_id_type}",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json; charset=utf-8"},
+            json={"receive_id": receive_id, "msg_type": "interactive", "content": json.dumps(card, ensure_ascii=False)},
+            timeout=8,
+        )
+        rj = resp.json()
+        print(f"[FEISHU] trade notify {side} {symbol}: code={rj.get('code')} msg={rj.get('msg','')[:100]}")
+        if rj.get("code") == 0:
+            _FEISHU_SENT_TRADES[dedup_key] = now
+    except Exception as e:
+        print(f"[FEISHU] trade notify error: {e}")
+
+
+def _create_trade_at_price(position_id: str, side: str, quantity: float, price: float, source: str) -> Optional[PortfolioTradeResponse]:
+    side = (side or "").strip().upper()
+    if side not in {"BUY", "SELL"}:
+        return None
+    qty = float(quantity or 0.0)
+    px = float(price or 0.0)
+    if qty <= 0 or px <= 0:
+        return None
+
+    now = int(time.time())
+    with session_scope() as s:
+        p = s.get(PortfolioPosition, position_id)
+        if not p:
+            return None
+
+        market = (p.market or "CN").strip().upper()
+        symbol = (p.symbol or "").strip().upper()
+        pos_name = (p.name or "").strip() or None
+        old_qty = float(p.quantity or 0.0)
+        old_avg = float(p.avg_cost or 0.0)
+
+        if side == "BUY":
+            new_qty = old_qty + qty
+            new_avg = ((old_qty * old_avg) + (qty * px)) / new_qty if new_qty > 0 else 0.0
+            p.quantity = new_qty
+            p.avg_cost = new_avg
+            exec_qty = qty
+        else:
+            if old_qty <= 0:
+                return None
+            exec_qty = min(qty, old_qty)
+            new_qty = max(0.0, old_qty - exec_qty)
+            p.quantity = new_qty
+            if new_qty <= 0:
+                p.avg_cost = 0.0
+
+        p.updated_at = now
+
+        trade = PortfolioTrade(
+            position_id=p.id,
+            side=side,
+            price=px,
+            quantity=exec_qty,
+            amount=px * exec_qty,
+            source=source,
+            created_at=now,
+        )
+        s.add(trade)
+        s.flush()
+
+        if side == "SELL" and float(p.quantity or 0.0) <= 0:
+            s.query(PortfolioAutoTrade).filter(PortfolioAutoTrade.position_id == p.id).update({"status": "CANCELLED"})
+
+        _send_feishu_trade_notify(p.id, side, px, exec_qty, symbol, pos_name, market, source)
+        return PortfolioTradeResponse(
+            id=trade.id,
+            position_id=p.id,
+            side=side,
+            price=px,
+            quantity=exec_qty,
+            amount=px * exec_qty,
+            source=source,
+            symbol=symbol,
+            name=pos_name,
+            market=market,
+            created_at=now,
+        )
+
+
+def _should_skip_strategy_exec(exec_key: str) -> bool:
+    now = time.time()
+    for key in list(_AUTO_STRATEGY_EXEC_CACHE):
+        if now - _AUTO_STRATEGY_EXEC_CACHE[key] > _AUTO_STRATEGY_EXEC_TTL:
+            del _AUTO_STRATEGY_EXEC_CACHE[key]
+    if exec_key in _AUTO_STRATEGY_EXEC_CACHE:
+        return True
+    _AUTO_STRATEGY_EXEC_CACHE[exec_key] = now
+    return False
+
+
+def _execute_strategy_alert_trade(alert: PortfolioAlertResponse) -> Optional[PortfolioTradeResponse]:
+    exec_key = f"{alert.position_id}:{alert.alert_type}:{int((alert.trigger_price or 0) * 10000)}"
+    if _should_skip_strategy_exec(exec_key):
+        return None
+
+    with session_scope() as s:
+        p = s.get(PortfolioPosition, alert.position_id)
+        if not p:
+            return None
+        held_qty = float(p.quantity or 0.0)
+
+    trigger_price = float(alert.trigger_price or 0.0)
+    if trigger_price <= 0:
+        trigger_price = float(alert.current_price or 0.0)
+    if trigger_price <= 0:
+        return None
+
+    if alert.alert_type in {"target_buy", "strategy_buy_zone", "signal_buy"}:
+        return _create_trade_at_price(alert.position_id, "BUY", 10000.0, trigger_price, "auto_strategy")
+    if alert.alert_type == "strategy_take_profit_1":
+        return _create_trade_at_price(alert.position_id, "SELL", max(1.0, held_qty / 2.0), trigger_price, "auto_strategy")
+    if alert.alert_type in {"target_sell", "signal_sell", "strategy_take_profit_2", "strategy_stop_loss"}:
+        return _create_trade_at_price(alert.position_id, "SELL", held_qty, trigger_price, "auto_strategy")
+    return None
 
 
 class CreateReportRequest(BaseModel):
@@ -2021,15 +2266,18 @@ def create_portfolio_trade(req: PortfolioTradeRequest):
             price=price,
             quantity=qty,
             amount=amount,
+            source=(req.source or "manual"),
             created_at=now,
         )
         s.add(t)
         s.flush()
 
         pos_id = p.id
-        # Mark position as closed instead of deleting — preserves trade history
+        pos_name = (p.name or "").strip() or None
         if side == "SELL" and new_qty <= 0:
             s.query(PortfolioAutoTrade).filter(PortfolioAutoTrade.position_id == pos_id).update({"status": "CANCELLED"})
+
+        _send_feishu_trade_notify(pos_id, side, price, qty, symbol, pos_name, market, req.source or "manual")
 
         return PortfolioTradeResponse(
             id=t.id,
@@ -2038,8 +2286,386 @@ def create_portfolio_trade(req: PortfolioTradeRequest):
             price=price,
             quantity=qty,
             amount=amount,
+            source=(req.source or "manual"),
+            symbol=symbol,
+            name=pos_name,
+            market=market,
             created_at=now,
         )
+
+
+@app.get("/api/portfolio/trades", response_model=list[PortfolioTradeResponse])
+def list_portfolio_trades(position_id: Optional[str] = None, limit: int = 100):
+    with session_scope() as s:
+        q = s.query(PortfolioTrade).order_by(PortfolioTrade.created_at.desc())
+        if position_id:
+            q = q.filter(PortfolioTrade.position_id == position_id)
+        trades = q.limit(min(limit, 500)).all()
+        out = []
+        for t in trades:
+            p = s.get(PortfolioPosition, t.position_id)
+            out.append(PortfolioTradeResponse(
+                id=t.id, position_id=t.position_id, side=t.side,
+                price=float(t.price or 0), quantity=float(t.quantity or 0),
+                amount=float(t.amount or 0), source=getattr(t, "source", "manual") or "manual",
+                symbol=p.symbol if p else None, name=p.name if p else None,
+                market=p.market if p else None, created_at=int(t.created_at or 0),
+            ))
+        return out
+
+
+def _compute_realized_pnl_from_trades(trades: list[PortfolioTrade]) -> float:
+    by_position: dict[str, list[PortfolioTrade]] = {}
+    for trade in trades:
+        by_position.setdefault(trade.position_id, []).append(trade)
+
+    realized_pnl = 0.0
+    for items in by_position.values():
+        items.sort(key=lambda x: (int(x.created_at or 0), x.id or ""))
+        qty = 0.0
+        avg_cost = 0.0
+        for trade in items:
+            side = (trade.side or "").strip().upper()
+            trade_qty = float(trade.quantity or 0.0)
+            trade_price = float(trade.price or 0.0)
+            if trade_qty <= 0:
+                continue
+            if side == "BUY":
+                new_qty = qty + trade_qty
+                avg_cost = ((qty * avg_cost) + (trade_qty * trade_price)) / new_qty if new_qty > 0 else 0.0
+                qty = new_qty
+                continue
+            sell_qty = min(qty, trade_qty)
+            realized_pnl += sell_qty * (trade_price - avg_cost)
+            qty = max(0.0, qty - sell_qty)
+            if qty <= 0:
+                avg_cost = 0.0
+    return realized_pnl
+
+
+def _compute_agent_pick_kpis(trades: list[PortfolioTrade], positions: list[PortfolioPosition]) -> tuple[int, int, int, int, float]:
+    position_qty = {p.id: float(p.quantity or 0.0) for p in positions}
+    by_position: dict[str, list[PortfolioTrade]] = {}
+    for trade in trades:
+        by_position.setdefault(trade.position_id, []).append(trade)
+
+    auto_pick_count = 0
+    closed_count = 0
+    success_count = 0
+    auto_trade_count = 0
+
+    for items in by_position.values():
+        items.sort(key=lambda x: (int(x.created_at or 0), x.id or ""))
+        if any(((getattr(t, "source", "manual") or "manual") == "auto_strategy" and (t.side or "").upper() == "BUY") for t in items):
+            auto_pick_count += 1
+
+        qty = 0.0
+        avg_cost = 0.0
+        realized = 0.0
+        has_auto_pick_buy = False
+        for trade in items:
+            side = (trade.side or "").strip().upper()
+            source = (getattr(trade, "source", "manual") or "manual").strip()
+            trade_qty = float(trade.quantity or 0.0)
+            trade_price = float(trade.price or 0.0)
+            if source == "auto_strategy":
+                auto_trade_count += 1
+            if trade_qty <= 0:
+                continue
+            if side == "BUY":
+                if source == "auto_strategy":
+                    has_auto_pick_buy = True
+                new_qty = qty + trade_qty
+                avg_cost = ((qty * avg_cost) + (trade_qty * trade_price)) / new_qty if new_qty > 0 else 0.0
+                qty = new_qty
+                continue
+            sell_qty = min(qty, trade_qty)
+            realized += sell_qty * (trade_price - avg_cost)
+            qty = max(0.0, qty - sell_qty)
+            if qty <= 0:
+                avg_cost = 0.0
+
+        if has_auto_pick_buy and position_qty.get(items[0].position_id, 0.0) <= 0:
+            closed_count += 1
+            if realized > 0:
+                success_count += 1
+
+    success_rate = (success_count / closed_count * 100.0) if closed_count > 0 else 0.0
+    return auto_trade_count, auto_pick_count, success_count, closed_count, success_rate
+
+
+@app.get("/api/portfolio/summary", response_model=PortfolioSummaryResponse)
+def get_portfolio_summary():
+    with session_scope() as s:
+        positions = s.execute(select(PortfolioPosition)).scalars().all()
+        trades = s.execute(select(PortfolioTrade)).scalars().all()
+
+    total_cost = 0.0
+    total_mv = 0.0
+    for p in positions:
+        qty = float(p.quantity or 0)
+        avg = float(p.avg_cost or 0)
+        total_cost += qty * avg
+
+    positions_map = {p.id: p for p in positions}
+    pos_prices = {}
+    from concurrent.futures import ThreadPoolExecutor
+    def _fetch(args):
+        p, = args
+        try:
+            mk = (p.market or "CN").strip().upper()
+            sy = (p.symbol or "").strip().upper()
+            sp = get_stock_price(symbol=sy, market=mk)
+            cp = float(getattr(sp, "price", 0)) if sp else 0
+            return (p.id, cp)
+        except Exception:
+            return (p.id, 0)
+
+    with ThreadPoolExecutor(max_workers=min(10, max(1, len(positions)))) as ex:
+        for pid, cp in ex.map(_fetch, [(p,) for p in positions]):
+            pos_prices[pid] = cp
+
+    for p in positions:
+        qty = float(p.quantity or 0)
+        avg = float(p.avg_cost or 0)
+        cp = pos_prices.get(p.id, 0)
+        total_mv += qty * cp
+
+    realized_pnl = _compute_realized_pnl_from_trades(trades)
+    total_buy_amt = 0.0
+    total_sell_amt = 0.0
+    for t in trades:
+        side = (t.side or "").upper()
+        amt = float(t.amount or 0)
+        if side == "SELL":
+            total_sell_amt += amt
+        else:
+            total_buy_amt += amt
+
+    unrealized_pnl = total_mv - total_cost
+    unrealized_pnl_pct = (unrealized_pnl / total_cost * 100) if total_cost > 0 else 0
+
+    return PortfolioSummaryResponse(
+        total_cost=total_cost, total_market_value=total_mv,
+        unrealized_pnl=unrealized_pnl, unrealized_pnl_pct=unrealized_pnl_pct,
+        realized_pnl=realized_pnl, total_trades=len(trades),
+        total_buy_amount=total_buy_amt, total_sell_amount=total_sell_amt,
+    )
+
+
+def _get_or_create_agent_config(session) -> PortfolioAgentConfig:
+    cfg = session.get(PortfolioAgentConfig, "default")
+    if cfg:
+        return cfg
+    now = int(time.time())
+    cfg = PortfolioAgentConfig(id="default", created_at=now, updated_at=now)
+    session.add(cfg)
+    session.flush()
+    return cfg
+
+
+def _portfolio_agent_pick_candidate(min_buy_quantity: float) -> Optional[tuple[str, str, str, float]]:
+    from core.recommend import get_latest_scan, run_scan, save_scan_result
+
+    latest = get_latest_scan() or []
+    if not latest:
+        try:
+            latest = run_scan(top_n=10, get_indicators_fn=get_stock_indicators)
+            if latest:
+                save_scan_result(latest)
+        except Exception:
+            latest = []
+
+    for item in latest:
+        market = (item.get("market") or "CN").strip().upper()
+        symbol = (item.get("symbol") or "").strip().upper()
+        name = (item.get("name") or symbol).strip()
+        # First version of the agent is CN-only by design.
+        if market != "CN" or not symbol:
+            continue
+        action = (item.get("action") or "").strip()
+        if action not in {"强买信号", "积极建仓", "轻仓试探", "关注等买点"}:
+            continue
+        buy_price = item.get("strategy_buy_zone_high") or item.get("buy_price_aggressive") or item.get("current_price")
+        try:
+            buy_price = float(buy_price)
+        except Exception:
+            buy_price = 0.0
+        if buy_price <= 0:
+            continue
+        return market, symbol, name, buy_price
+    return None
+
+
+def _run_portfolio_agent_once() -> dict:
+    now = int(time.time())
+    with session_scope() as s:
+        cfg = _get_or_create_agent_config(s)
+        cfg.last_run_at = now
+        cfg.updated_at = now
+        if (cfg.enabled or "0") != "1":
+            cfg.last_status = "agent_disabled"
+            return {"ok": True, "message": "agent_disabled"}
+        if not _cn_market_trading_now():
+            cfg.last_status = "cn_market_closed"
+            return {"ok": True, "message": "cn_market_closed"}
+        if cfg.deadline_ts is not None and now > int(cfg.deadline_ts):
+            cfg.enabled = "0"
+            cfg.last_status = "deadline_reached"
+            return {"ok": True, "message": "deadline_reached"}
+
+    summary = get_portfolio_summary()
+    net_pnl = float(summary.realized_pnl or 0.0) + float(summary.unrealized_pnl or 0.0)
+    with session_scope() as s:
+        cfg = _get_or_create_agent_config(s)
+        if cfg.target_profit is not None and net_pnl >= float(cfg.target_profit):
+            cfg.enabled = "0"
+            cfg.last_status = f"target_reached:{net_pnl:.2f}"
+            cfg.updated_at = now
+            return {"ok": True, "message": "target_reached", "net_pnl": net_pnl}
+
+    alerts = [a for a in get_portfolio_alerts() if (a.market or "").strip().upper() == "CN"]
+    sell_priority = ["strategy_stop_loss", "strategy_take_profit_2", "target_sell", "signal_sell", "strategy_take_profit_1"]
+    buy_priority = ["strategy_buy_zone", "target_buy", "signal_buy"]
+
+    for alert_type in sell_priority:
+        for alert in alerts:
+            if alert.alert_type == alert_type:
+                trade = _execute_strategy_alert_trade(alert)
+                if trade is not None:
+                    with session_scope() as s:
+                        cfg = _get_or_create_agent_config(s)
+                        cfg.last_action = f"{trade.side}:{trade.symbol}:{trade.quantity}@{trade.price:.2f}"
+                        cfg.last_status = f"executed:{alert_type}"
+                        cfg.updated_at = now
+                    return {"ok": True, "message": "trade_executed", "trade": trade.model_dump()}
+
+    for alert_type in buy_priority:
+        for alert in alerts:
+            if alert.alert_type == alert_type:
+                trade = _execute_strategy_alert_trade(alert)
+                if trade is not None:
+                    with session_scope() as s:
+                        cfg = _get_or_create_agent_config(s)
+                        cfg.last_action = f"{trade.side}:{trade.symbol}:{trade.quantity}@{trade.price:.2f}"
+                        cfg.last_status = f"executed:{alert_type}"
+                        cfg.updated_at = now
+                    return {"ok": True, "message": "trade_executed", "trade": trade.model_dump()}
+
+    with session_scope() as s:
+        cfg = _get_or_create_agent_config(s)
+        candidate = _portfolio_agent_pick_candidate(float(cfg.min_buy_quantity or 10000.0))
+        if not candidate:
+            cfg.last_status = "no_candidate"
+            cfg.updated_at = now
+            return {"ok": True, "message": "no_candidate"}
+        market, symbol, name, buy_price = candidate
+        existing = s.execute(select(PortfolioPosition).where(
+            PortfolioPosition.market == market,
+            PortfolioPosition.symbol == symbol,
+        )).scalars().first()
+        if existing is not None and float(existing.quantity or 0.0) > 0:
+            cfg.last_status = "candidate_already_held"
+            cfg.updated_at = now
+            return {"ok": True, "message": "candidate_already_held"}
+        if existing is None:
+            existing = PortfolioPosition(
+                market=market,
+                symbol=symbol,
+                name=name,
+                quantity=0.0,
+                avg_cost=0.0,
+                created_at=now,
+                updated_at=now,
+            )
+            s.add(existing)
+            s.flush()
+        trade = _create_trade_at_price(existing.id, "BUY", float(cfg.min_buy_quantity or 10000.0), buy_price, "auto_strategy")
+        if trade is not None:
+            cfg.last_action = f"BUY:{symbol}:{trade.quantity}@{trade.price:.2f}"
+            cfg.last_status = "picked_new_stock"
+            cfg.updated_at = now
+            return {"ok": True, "message": "picked_new_stock", "trade": trade.model_dump()}
+        cfg.last_status = "candidate_trade_skipped"
+        cfg.updated_at = now
+        return {"ok": True, "message": "candidate_trade_skipped"}
+
+
+@app.get("/api/portfolio/agent/config", response_model=PortfolioAgentConfigResponse)
+def get_portfolio_agent_config():
+    with session_scope() as s:
+        cfg = _get_or_create_agent_config(s)
+        return PortfolioAgentConfigResponse(
+            enabled=(cfg.enabled or "0") == "1",
+            target_profit=cfg.target_profit,
+            deadline_ts=cfg.deadline_ts,
+            min_buy_quantity=float(cfg.min_buy_quantity or 10000.0),
+            last_run_at=cfg.last_run_at,
+            last_action=cfg.last_action,
+            last_status=cfg.last_status,
+        )
+
+
+@app.get("/api/portfolio/agent/status", response_model=PortfolioAgentStatusResponse)
+def get_portfolio_agent_status():
+    summary = get_portfolio_summary()
+    with session_scope() as s:
+        cfg = _get_or_create_agent_config(s)
+        positions = s.execute(select(PortfolioPosition)).scalars().all()
+        trades = s.execute(select(PortfolioTrade)).scalars().all()
+
+    net_pnl = float(summary.realized_pnl or 0.0) + float(summary.unrealized_pnl or 0.0)
+    auto_trade_count, auto_pick_count, auto_pick_success_count, auto_pick_closed_count, auto_pick_success_rate = _compute_agent_pick_kpis(trades, positions)
+
+    target_progress_pct = 0.0
+    if cfg.target_profit and float(cfg.target_profit) > 0:
+        target_progress_pct = max(0.0, min(100.0, net_pnl / float(cfg.target_profit) * 100.0))
+
+    return PortfolioAgentStatusResponse(
+        enabled=(cfg.enabled or "0") == "1",
+        market_scope="CN",
+        target_profit=cfg.target_profit,
+        deadline_ts=cfg.deadline_ts,
+        min_buy_quantity=float(cfg.min_buy_quantity or 10000.0),
+        realized_pnl=float(summary.realized_pnl or 0.0),
+        unrealized_pnl=float(summary.unrealized_pnl or 0.0),
+        net_pnl=net_pnl,
+        target_progress_pct=target_progress_pct,
+        auto_trade_count=auto_trade_count,
+        auto_pick_count=auto_pick_count,
+        auto_pick_success_count=auto_pick_success_count,
+        auto_pick_closed_count=auto_pick_closed_count,
+        auto_pick_success_rate=auto_pick_success_rate,
+        last_run_at=cfg.last_run_at,
+        last_action=cfg.last_action,
+        last_status=cfg.last_status,
+    )
+
+
+@app.put("/api/portfolio/agent/config", response_model=PortfolioAgentConfigResponse)
+def update_portfolio_agent_config(req: PortfolioAgentConfigRequest):
+    now = int(time.time())
+    with session_scope() as s:
+        cfg = _get_or_create_agent_config(s)
+        cfg.enabled = "1" if req.enabled else "0"
+        cfg.target_profit = req.target_profit
+        cfg.deadline_ts = req.deadline_ts
+        cfg.min_buy_quantity = max(10000.0, float(req.min_buy_quantity or 10000.0))
+        cfg.updated_at = now
+        return PortfolioAgentConfigResponse(
+            enabled=(cfg.enabled or "0") == "1",
+            target_profit=cfg.target_profit,
+            deadline_ts=cfg.deadline_ts,
+            min_buy_quantity=float(cfg.min_buy_quantity or 10000.0),
+            last_run_at=cfg.last_run_at,
+            last_action=cfg.last_action,
+            last_status=cfg.last_status,
+        )
+
+
+@app.post("/api/portfolio/agent/run")
+def run_portfolio_agent_now():
+    return _run_portfolio_agent_once()
 
 
 # ── Auto-Trade endpoints ──────────────────────────────────────────────
@@ -2190,6 +2816,7 @@ def _execute_auto_trade(at_id: str):
                 position_id=p.id, side=at.side, price=exec_price,
                 quantity=actual_qty if at.side == "SELL" else qty,
                 amount=exec_price * (actual_qty if at.side == "SELL" else qty),
+                source="auto_order",
                 created_at=now,
             )
             s.add(trade)
@@ -2197,6 +2824,11 @@ def _execute_auto_trade(at_id: str):
             at.status = "EXECUTED"
             at.executed_at = now
             at.executed_price = exec_price
+
+            pos_name = (p.name or "").strip() or None
+            _send_feishu_trade_notify(p.id, at.side, exec_price,
+                actual_qty if at.side == "SELL" else qty,
+                symbol, pos_name, market, "auto_order")
 
             # Mark position as closed (quantity=0) instead of deleting — preserves trade history
             if at.side == "SELL" and new_qty <= 0:
@@ -2370,14 +3002,15 @@ if (os.environ.get("ENABLE_INDICATOR_WARMER") or "").strip() == "1":
 
 def _portfolio_feishu_notifier():
     interval = int((os.environ.get("FEISHU_PORTFOLIO_ALERT_INTERVAL") or "300").strip() or "300")
-    print(f"[FEISHU] notifier started, interval={interval}s, receive_id={os.environ.get('FEISHU_RECEIVE_ID','')[:8]}...")
+    print(f"[FEISHU] trade/agent worker started, interval={interval}s, receive_id={os.environ.get('FEISHU_RECEIVE_ID','')[:8]}...")
     time.sleep(20)
     while True:
         try:
-            print(f"[FEISHU] checking portfolio alerts...")
+            print(f"[FEISHU] checking portfolio alerts and agent...")
             get_portfolio_alerts()
+            _run_portfolio_agent_once()
         except Exception as e:
-            print(f"[FEISHU] notifier error: {e}")
+            print(f"[FEISHU] trade/agent worker error: {e}")
         time.sleep(interval)
 
 
@@ -2539,7 +3172,7 @@ def get_portfolio_alerts():
                 ))
 
     for alert in alerts:
-        _send_feishu_portfolio_alert(alert)
+        pass  # price-trigger alerts no longer send to Feishu; trade execution notifies instead
 
     return alerts
 
