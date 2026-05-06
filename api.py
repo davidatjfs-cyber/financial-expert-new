@@ -442,14 +442,14 @@ class PortfolioSummaryResponse(BaseModel):
 
 class PortfolioAgentConfigRequest(BaseModel):
     enabled: bool = False
-    target_profit: Optional[float] = None
+    target_profit: Optional[float] = None  # interpreted as target return percentage
     deadline_ts: Optional[int] = None
     min_buy_quantity: float = 10000.0
 
 
 class PortfolioAgentConfigResponse(BaseModel):
     enabled: bool = False
-    target_profit: Optional[float] = None
+    target_profit: Optional[float] = None  # target return percentage
     deadline_ts: Optional[int] = None
     min_buy_quantity: float = 10000.0
     last_run_at: Optional[int] = None
@@ -463,6 +463,10 @@ class PortfolioAgentStatusResponse(BaseModel):
     target_profit: Optional[float] = None
     deadline_ts: Optional[int] = None
     min_buy_quantity: float = 10000.0
+    managed_capital: float = 0.0
+    managed_realized_pnl: float = 0.0
+    managed_unrealized_pnl: float = 0.0
+    managed_net_pnl: float = 0.0
     realized_pnl: float = 0.0
     unrealized_pnl: float = 0.0
     net_pnl: float = 0.0
@@ -472,9 +476,21 @@ class PortfolioAgentStatusResponse(BaseModel):
     auto_pick_success_count: int = 0
     auto_pick_closed_count: int = 0
     auto_pick_success_rate: float = 0.0
+    avg_closed_pick_pnl: float = 0.0
+    avg_closed_pick_days: float = 0.0
+    max_drawdown_pct: float = 0.0
     last_run_at: Optional[int] = None
     last_action: Optional[str] = None
     last_status: Optional[str] = None
+
+
+class PortfolioReturnsResponse(BaseModel):
+    today_pnl: float = 0.0
+    week_pnl: float = 0.0
+    month_pnl: float = 0.0
+    total_pnl: float = 0.0
+    realized_pnl: float = 0.0
+    unrealized_pnl: float = 0.0
 
 
 def _feishu_env() -> tuple[str, str, str, str]:
@@ -2394,6 +2410,201 @@ def _compute_agent_pick_kpis(trades: list[PortfolioTrade], positions: list[Portf
     return auto_trade_count, auto_pick_count, success_count, closed_count, success_rate
 
 
+def _compute_agent_advanced_kpis(trades: list[PortfolioTrade], positions: list[PortfolioPosition]) -> tuple[float, float, float]:
+    by_position: dict[str, list[PortfolioTrade]] = {}
+    for trade in trades:
+        by_position.setdefault(trade.position_id, []).append(trade)
+
+    closed_pick_pnls: list[float] = []
+    closed_pick_days: list[float] = []
+    equity_curve: list[float] = []
+    running_realized = 0.0
+    peak = 0.0
+    max_drawdown_pct = 0.0
+    live_position_ids = {p.id for p in positions if float(p.quantity or 0.0) > 0}
+
+    all_auto_trades = sorted(
+        [t for t in trades if (getattr(t, "source", "manual") or "manual") == "auto_strategy"],
+        key=lambda x: (int(x.created_at or 0), x.id or ""),
+    )
+    inv_qty_by_position: dict[str, float] = {}
+    inv_avg_by_position: dict[str, float] = {}
+    for trade in all_auto_trades:
+        pid = trade.position_id
+        qty = inv_qty_by_position.get(pid, 0.0)
+        avg = inv_avg_by_position.get(pid, 0.0)
+        tqty = float(trade.quantity or 0.0)
+        tprice = float(trade.price or 0.0)
+        side = (trade.side or "").upper()
+        if side == "BUY":
+            new_qty = qty + tqty
+            inv_avg_by_position[pid] = ((qty * avg) + (tqty * tprice)) / new_qty if new_qty > 0 else 0.0
+            inv_qty_by_position[pid] = new_qty
+        elif qty > 0:
+            sell_qty = min(qty, tqty)
+            running_realized += sell_qty * (tprice - avg)
+            inv_qty_by_position[pid] = max(0.0, qty - sell_qty)
+            if inv_qty_by_position[pid] <= 0:
+                inv_avg_by_position[pid] = 0.0
+        equity_curve.append(running_realized)
+        peak = max(peak, running_realized)
+        if peak > 0:
+            max_drawdown_pct = max(max_drawdown_pct, (peak - running_realized) / peak * 100.0)
+
+    for pid, items in by_position.items():
+        auto_items = [t for t in items if (getattr(t, "source", "manual") or "manual") == "auto_strategy"]
+        if not auto_items or pid in live_position_ids:
+            continue
+        auto_items.sort(key=lambda x: (int(x.created_at or 0), x.id or ""))
+        qty = 0.0
+        avg = 0.0
+        realized = 0.0
+        first_buy_ts: Optional[int] = None
+        last_sell_ts: Optional[int] = None
+        for trade in auto_items:
+            tqty = float(trade.quantity or 0.0)
+            tprice = float(trade.price or 0.0)
+            side = (trade.side or "").upper()
+            if tqty <= 0:
+                continue
+            if side == "BUY":
+                first_buy_ts = first_buy_ts or int(trade.created_at or 0)
+                new_qty = qty + tqty
+                avg = ((qty * avg) + (tqty * tprice)) / new_qty if new_qty > 0 else 0.0
+                qty = new_qty
+            else:
+                sell_qty = min(qty, tqty)
+                realized += sell_qty * (tprice - avg)
+                qty = max(0.0, qty - sell_qty)
+                last_sell_ts = int(trade.created_at or 0)
+                if qty <= 0:
+                    avg = 0.0
+        closed_pick_pnls.append(realized)
+        if first_buy_ts and last_sell_ts and last_sell_ts >= first_buy_ts:
+            closed_pick_days.append((last_sell_ts - first_buy_ts) / 86400.0)
+
+    avg_closed_pick_pnl = sum(closed_pick_pnls) / len(closed_pick_pnls) if closed_pick_pnls else 0.0
+    avg_closed_pick_days = sum(closed_pick_days) / len(closed_pick_days) if closed_pick_days else 0.0
+    return avg_closed_pick_pnl, avg_closed_pick_days, max_drawdown_pct
+
+
+def _compute_agent_managed_financials(trades: list[PortfolioTrade], positions: list[PortfolioPosition]) -> tuple[float, float, float, float]:
+    position_map = {p.id: p for p in positions}
+    managed_capital = 0.0
+    managed_realized_pnl = 0.0
+    managed_unrealized_pnl = 0.0
+
+    by_position: dict[str, list[PortfolioTrade]] = {}
+    for trade in trades:
+        by_position.setdefault(trade.position_id, []).append(trade)
+
+    for position_id, items in by_position.items():
+        auto_items = [t for t in items if (getattr(t, "source", "manual") or "manual") == "auto_strategy"]
+        if not auto_items:
+            continue
+        auto_items.sort(key=lambda x: (int(x.created_at or 0), x.id or ""))
+        qty = 0.0
+        avg = 0.0
+        for trade in auto_items:
+            trade_qty = float(trade.quantity or 0.0)
+            trade_price = float(trade.price or 0.0)
+            side = (trade.side or "").upper()
+            if trade_qty <= 0:
+                continue
+            if side == "BUY":
+                managed_capital += trade_qty * trade_price
+                new_qty = qty + trade_qty
+                avg = ((qty * avg) + (trade_qty * trade_price)) / new_qty if new_qty > 0 else 0.0
+                qty = new_qty
+            else:
+                sell_qty = min(qty, trade_qty)
+                managed_realized_pnl += sell_qty * (trade_price - avg)
+                qty = max(0.0, qty - sell_qty)
+                if qty <= 0:
+                    avg = 0.0
+
+        pos = position_map.get(position_id)
+        if pos and float(pos.quantity or 0.0) > 0 and qty > 0:
+            try:
+                sp = get_stock_price(symbol=(pos.symbol or "").strip().upper(), market=(pos.market or "CN").strip().upper())
+                current_price = float(getattr(sp, "price", 0.0) or 0.0)
+                if current_price > 0:
+                    managed_unrealized_pnl += min(qty, float(pos.quantity or 0.0)) * (current_price - avg)
+            except Exception:
+                pass
+
+    managed_net_pnl = managed_realized_pnl + managed_unrealized_pnl
+    return managed_capital, managed_realized_pnl, managed_unrealized_pnl, managed_net_pnl
+
+
+def _agent_dynamic_buy_quantity(min_buy_quantity: float, target_profit: Optional[float], deadline_ts: Optional[int], net_pnl: float, action: str, managed_capital: float) -> float:
+    base = max(10000.0, float(min_buy_quantity or 10000.0))
+    units = 1.0
+    action = (action or "").strip()
+    if action == "强买信号":
+        units += 1.0
+    elif action == "积极建仓":
+        units += 0.5
+
+    if target_profit is not None and float(target_profit) > 0 and managed_capital > 0:
+        target_profit_amount = managed_capital * float(target_profit) / 100.0
+        progress = net_pnl / target_profit_amount if target_profit_amount > 0 else 0.0
+        if progress < 0.2:
+            units += 1.0
+        elif progress < 0.5:
+            units += 0.5
+
+    if deadline_ts:
+        days_left = max(0.0, (float(deadline_ts) - time.time()) / 86400.0)
+        if days_left <= 3:
+            units += 1.0
+        elif days_left <= 7:
+            units += 0.5
+
+    units = max(1.0, min(3.0, units))
+    return base * units
+
+
+def _compute_period_returns(positions: list[PortfolioPosition], summary: PortfolioSummaryResponse) -> PortfolioReturnsResponse:
+    today_pnl = 0.0
+    week_pnl = 0.0
+    month_pnl = 0.0
+
+    for p in positions:
+        qty = float(p.quantity or 0.0)
+        if qty <= 0:
+            continue
+        market = (p.market or "CN").strip().upper()
+        symbol = (p.symbol or "").strip().upper()
+        try:
+            sp = get_stock_price(symbol=symbol, market=market)
+            current = float(getattr(sp, "price", 0.0) or 0.0)
+            if current <= 0:
+                continue
+            df = _fetch_history_df(symbol, market)
+            if df is None or df.empty or "close" not in df.columns:
+                continue
+            closes = pd.to_numeric(df["close"], errors="coerce").dropna().tolist()
+            if len(closes) >= 2:
+                today_pnl += qty * (current - float(closes[-2]))
+            if len(closes) >= 6:
+                week_pnl += qty * (current - float(closes[-6]))
+            if len(closes) >= 21:
+                month_pnl += qty * (current - float(closes[-21]))
+        except Exception:
+            continue
+
+    total_pnl = float(summary.realized_pnl or 0.0) + float(summary.unrealized_pnl or 0.0)
+    return PortfolioReturnsResponse(
+        today_pnl=today_pnl,
+        week_pnl=week_pnl,
+        month_pnl=month_pnl,
+        total_pnl=total_pnl,
+        realized_pnl=float(summary.realized_pnl or 0.0),
+        unrealized_pnl=float(summary.unrealized_pnl or 0.0),
+    )
+
+
 @app.get("/api/portfolio/summary", response_model=PortfolioSummaryResponse)
 def get_portfolio_summary():
     with session_scope() as s:
@@ -2464,7 +2675,7 @@ def _get_or_create_agent_config(session) -> PortfolioAgentConfig:
     return cfg
 
 
-def _portfolio_agent_pick_candidate(min_buy_quantity: float) -> Optional[tuple[str, str, str, float]]:
+def _portfolio_agent_pick_candidate(min_buy_quantity: float) -> Optional[tuple[str, str, str, float, str]]:
     from core.recommend import get_latest_scan, run_scan, save_scan_result
 
     latest = get_latest_scan() or []
@@ -2493,7 +2704,7 @@ def _portfolio_agent_pick_candidate(min_buy_quantity: float) -> Optional[tuple[s
             buy_price = 0.0
         if buy_price <= 0:
             continue
-        return market, symbol, name, buy_price
+        return market, symbol, name, buy_price, action
     return None
 
 
@@ -2518,11 +2729,16 @@ def _run_portfolio_agent_once() -> dict:
     net_pnl = float(summary.realized_pnl or 0.0) + float(summary.unrealized_pnl or 0.0)
     with session_scope() as s:
         cfg = _get_or_create_agent_config(s)
-        if cfg.target_profit is not None and net_pnl >= float(cfg.target_profit):
+        managed_capital, _, _, managed_net_pnl = _compute_agent_managed_financials(
+            s.execute(select(PortfolioTrade)).scalars().all(),
+            s.execute(select(PortfolioPosition)).scalars().all(),
+        )
+        target_return_pct = float(cfg.target_profit or 0.0)
+        if managed_capital > 0 and target_return_pct > 0 and managed_net_pnl >= managed_capital * target_return_pct / 100.0:
             cfg.enabled = "0"
-            cfg.last_status = f"target_reached:{net_pnl:.2f}"
+            cfg.last_status = f"target_reached:{managed_net_pnl:.2f}"
             cfg.updated_at = now
-            return {"ok": True, "message": "target_reached", "net_pnl": net_pnl}
+            return {"ok": True, "message": "target_reached", "net_pnl": managed_net_pnl}
 
     alerts = [a for a in get_portfolio_alerts() if (a.market or "").strip().upper() == "CN"]
     sell_priority = ["strategy_stop_loss", "strategy_take_profit_2", "target_sell", "signal_sell", "strategy_take_profit_1"]
@@ -2559,7 +2775,7 @@ def _run_portfolio_agent_once() -> dict:
             cfg.last_status = "no_candidate"
             cfg.updated_at = now
             return {"ok": True, "message": "no_candidate"}
-        market, symbol, name, buy_price = candidate
+        market, symbol, name, buy_price, action = candidate
         existing = s.execute(select(PortfolioPosition).where(
             PortfolioPosition.market == market,
             PortfolioPosition.symbol == symbol,
@@ -2580,7 +2796,19 @@ def _run_portfolio_agent_once() -> dict:
             )
             s.add(existing)
             s.flush()
-        trade = _create_trade_at_price(existing.id, "BUY", float(cfg.min_buy_quantity or 10000.0), buy_price, "auto_strategy")
+        managed_capital, _, _, managed_net_pnl = _compute_agent_managed_financials(
+            s.execute(select(PortfolioTrade)).scalars().all(),
+            s.execute(select(PortfolioPosition)).scalars().all(),
+        )
+        dynamic_qty = _agent_dynamic_buy_quantity(
+            float(cfg.min_buy_quantity or 10000.0),
+            cfg.target_profit,
+            cfg.deadline_ts,
+            managed_net_pnl,
+            action,
+            managed_capital,
+        )
+        trade = _create_trade_at_price(existing.id, "BUY", dynamic_qty, buy_price, "auto_strategy")
         if trade is not None:
             cfg.last_action = f"BUY:{symbol}:{trade.quantity}@{trade.price:.2f}"
             cfg.last_status = "picked_new_stock"
@@ -2615,11 +2843,15 @@ def get_portfolio_agent_status():
         trades = s.execute(select(PortfolioTrade)).scalars().all()
 
     net_pnl = float(summary.realized_pnl or 0.0) + float(summary.unrealized_pnl or 0.0)
+    managed_capital, managed_realized_pnl, managed_unrealized_pnl, managed_net_pnl = _compute_agent_managed_financials(trades, positions)
     auto_trade_count, auto_pick_count, auto_pick_success_count, auto_pick_closed_count, auto_pick_success_rate = _compute_agent_pick_kpis(trades, positions)
+    avg_closed_pick_pnl, avg_closed_pick_days, max_drawdown_pct = _compute_agent_advanced_kpis(trades, positions)
 
     target_progress_pct = 0.0
-    if cfg.target_profit and float(cfg.target_profit) > 0:
-        target_progress_pct = max(0.0, min(100.0, net_pnl / float(cfg.target_profit) * 100.0))
+    if cfg.target_profit and float(cfg.target_profit) > 0 and managed_capital > 0:
+        target_profit_amount = managed_capital * float(cfg.target_profit) / 100.0
+        if target_profit_amount > 0:
+            target_progress_pct = max(0.0, min(100.0, managed_net_pnl / target_profit_amount * 100.0))
 
     return PortfolioAgentStatusResponse(
         enabled=(cfg.enabled or "0") == "1",
@@ -2627,6 +2859,10 @@ def get_portfolio_agent_status():
         target_profit=cfg.target_profit,
         deadline_ts=cfg.deadline_ts,
         min_buy_quantity=float(cfg.min_buy_quantity or 10000.0),
+        managed_capital=managed_capital,
+        managed_realized_pnl=managed_realized_pnl,
+        managed_unrealized_pnl=managed_unrealized_pnl,
+        managed_net_pnl=managed_net_pnl,
         realized_pnl=float(summary.realized_pnl or 0.0),
         unrealized_pnl=float(summary.unrealized_pnl or 0.0),
         net_pnl=net_pnl,
@@ -2636,10 +2872,21 @@ def get_portfolio_agent_status():
         auto_pick_success_count=auto_pick_success_count,
         auto_pick_closed_count=auto_pick_closed_count,
         auto_pick_success_rate=auto_pick_success_rate,
+        avg_closed_pick_pnl=avg_closed_pick_pnl,
+        avg_closed_pick_days=avg_closed_pick_days,
+        max_drawdown_pct=max_drawdown_pct,
         last_run_at=cfg.last_run_at,
         last_action=cfg.last_action,
         last_status=cfg.last_status,
     )
+
+
+@app.get("/api/portfolio/returns", response_model=PortfolioReturnsResponse)
+def get_portfolio_returns():
+    with session_scope() as s:
+        positions = s.execute(select(PortfolioPosition)).scalars().all()
+    summary = get_portfolio_summary()
+    return _compute_period_returns(positions, summary)
 
 
 @app.put("/api/portfolio/agent/config", response_model=PortfolioAgentConfigResponse)

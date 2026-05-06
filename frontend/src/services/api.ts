@@ -204,6 +204,10 @@ export interface PortfolioAgentStatus {
   target_profit?: number | null;
   deadline_ts?: number | null;
   min_buy_quantity: number;
+  managed_capital: number;
+  managed_realized_pnl: number;
+  managed_unrealized_pnl: number;
+  managed_net_pnl: number;
   realized_pnl: number;
   unrealized_pnl: number;
   net_pnl: number;
@@ -213,9 +217,21 @@ export interface PortfolioAgentStatus {
   auto_pick_success_count: number;
   auto_pick_closed_count: number;
   auto_pick_success_rate: number;
+  avg_closed_pick_pnl: number;
+  avg_closed_pick_days: number;
+  max_drawdown_pct: number;
   last_run_at?: number | null;
   last_action?: string | null;
   last_status?: string | null;
+}
+
+export interface PortfolioReturns {
+  today_pnl: number;
+  week_pnl: number;
+  month_pnl: number;
+  total_pnl: number;
+  realized_pnl: number;
+  unrealized_pnl: number;
 }
 
 export interface PortfolioAlert {
@@ -526,6 +542,10 @@ export async function getPortfolioAgentConfig() {
 
 export async function getPortfolioAgentStatus() {
   return fetchAPI<PortfolioAgentStatus>(`/api/portfolio/agent/status`);
+}
+
+export async function getPortfolioReturns() {
+  return fetchAPI<PortfolioReturns>(`/api/portfolio/returns`);
 }
 
 export async function updatePortfolioAgentConfig(req: PortfolioAgentConfig) {

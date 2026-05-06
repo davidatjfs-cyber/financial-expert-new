@@ -2,14 +2,14 @@
 
 import { usePathname } from 'next/navigation';
 import Link from 'next/link';
-import { LayoutDashboard, Search, Upload, FileText, Briefcase } from 'lucide-react';
+import { LayoutDashboard, Search, FileText, Briefcase, PiggyBank } from 'lucide-react';
 
 const mobileNavItems = [
   { href: '/', icon: <LayoutDashboard size={22} />, label: '首页' },
   { href: '/stock', icon: <Search size={22} />, label: '查询' },
-  { href: '/upload', icon: <Upload size={22} />, label: '上传' },
   { href: '/reports', icon: <FileText size={22} />, label: '报告' },
   { href: '/indicators', icon: <Briefcase size={22} />, label: '持仓' },
+  { href: '/returns', icon: <PiggyBank size={22} />, label: '收益' },
 ];
 
 export default function MobileNav() {

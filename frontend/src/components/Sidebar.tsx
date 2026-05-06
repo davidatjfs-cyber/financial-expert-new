@@ -4,9 +4,9 @@ import { usePathname } from 'next/navigation';
 import Link from 'next/link';
 import {
   Activity,
+  PiggyBank,
   LayoutDashboard,
   Search,
-  Upload,
   FileText,
   Briefcase,
   AlertTriangle,
@@ -22,9 +22,9 @@ interface NavItem {
 const navItems: NavItem[] = [
   { href: '/', icon: <LayoutDashboard size={20} />, label: '仪表盘' },
   { href: '/stock', icon: <Search size={20} />, label: '股票' },
-  { href: '/upload', icon: <Upload size={20} />, label: '上传' },
   { href: '/reports', icon: <FileText size={20} />, label: '报告' },
   { href: '/indicators', icon: <Briefcase size={20} />, label: '持仓' },
+  { href: '/returns', icon: <PiggyBank size={20} />, label: '收益' },
   { href: '/risk', icon: <AlertTriangle size={20} />, label: '预警' },
   { href: '/trends', icon: <TrendingUp size={20} />, label: '趋势' },
 ];

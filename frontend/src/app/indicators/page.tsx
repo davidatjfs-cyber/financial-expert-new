@@ -1,30 +1,21 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Search, Plus, Trash2, TrendingUp, TrendingDown, X, Brain, Timer, XCircle, ChevronRight, Wallet, PiggyBank, BarChart3 } from 'lucide-react';
+import { Search, Plus, Trash2, TrendingUp, TrendingDown, X, Brain, Timer, XCircle, ChevronRight, Wallet, BarChart3 } from 'lucide-react';
 import {
   searchStocks,
   getPortfolioPositions,
   createPortfolioPosition,
   deletePortfolioPosition,
   createPortfolioTrade,
-  getPortfolioTrades,
-  getPortfolioSummary,
-  getPortfolioAgentConfig,
-  getPortfolioAgentStatus,
-  updatePortfolioAgentConfig,
-  runPortfolioAgentNow,
   updatePortfolioPosition,
   getPortfolioAlerts,
   getPortfolioAutoTrades,
   createPortfolioAutoTrade,
   cancelPortfolioAutoTrade,
   type PortfolioPosition,
-  type PortfolioTrade,
-  type PortfolioSummary,
-  type PortfolioAgentConfig,
-  type PortfolioAgentStatus,
   type PortfolioAlert,
   type PortfolioAutoTrade,
   type StockSearchResult,
@@ -44,17 +35,9 @@ const HOT_STOCKS = [
 export default function PortfolioPage() {
   const router = useRouter();
   const [positions, setPositions] = useState<PortfolioPosition[]>([]);
-  const [trades, setTrades] = useState<PortfolioTrade[]>([]);
-  const [summary, setSummary] = useState<PortfolioSummary | null>(null);
-  const [agentConfig, setAgentConfig] = useState<PortfolioAgentConfig | null>(null);
-  const [agentStatus, setAgentStatus] = useState<PortfolioAgentStatus | null>(null);
   const [alerts, setAlerts] = useState<PortfolioAlert[]>([]);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState<string | null>(null);
-  const [agentSaving, setAgentSaving] = useState(false);
-  const [agentRunning, setAgentRunning] = useState(false);
-  const [agentTargetProfit, setAgentTargetProfit] = useState('');
-  const [agentDeadline, setAgentDeadline] = useState('');
 
   // Inline search (replaces modal)
   const [searchFocused, setSearchFocused] = useState(false);
@@ -83,26 +66,21 @@ export default function PortfolioPage() {
   const [autoTradePrice, setAutoTradePrice] = useState('');
   const [autoTradeQty, setAutoTradeQty] = useState('');
 
+  const totalCost = positions.reduce((s, p) => s + p.avg_cost * p.quantity, 0);
+  const totalMarketValue = positions.reduce((s, p) => s + (p.market_value ?? 0), 0);
+  const totalPnl = positions.reduce((s, p) => s + (p.unrealized_pnl ?? 0), 0);
+  const totalPnlPct = totalCost > 0 ? (totalPnl / totalCost) * 100 : 0;
+
   const loadData = async () => {
     try {
-      const [ps, al, ats, ts, sm, ac, as] = await Promise.all([
+      const [ps, al, ats] = await Promise.all([
         getPortfolioPositions(),
         getPortfolioAlerts(),
         getPortfolioAutoTrades(),
-        getPortfolioTrades(undefined, 50),
-        getPortfolioSummary(),
-        getPortfolioAgentConfig(),
-        getPortfolioAgentStatus(),
       ]);
       setPositions(ps);
       setAlerts(al);
       setAutoTrades(ats);
-      setTrades(ts);
-      setSummary(sm);
-      setAgentConfig(ac);
-      setAgentStatus(as);
-      setAgentTargetProfit(ac.target_profit != null ? String(ac.target_profit) : '');
-      setAgentDeadline(ac.deadline_ts ? new Date(ac.deadline_ts * 1000).toISOString().slice(0, 16) : '');
     } catch (e) {
       console.error('Failed to load portfolio:', e);
     } finally {
@@ -256,44 +234,6 @@ export default function PortfolioPage() {
     }
   };
 
-  const handleSaveAgent = async () => {
-    try {
-      setAgentSaving(true);
-      const deadlineTs = agentDeadline ? Math.floor(new Date(agentDeadline).getTime() / 1000) : null;
-      const targetProfit = agentTargetProfit.trim() ? Number(agentTargetProfit) : null;
-      await updatePortfolioAgentConfig({
-        enabled: !!agentConfig?.enabled,
-        target_profit: Number.isFinite(targetProfit as number) ? targetProfit : null,
-        deadline_ts: deadlineTs,
-        min_buy_quantity: Math.max(10000, Number(agentConfig?.min_buy_quantity || 10000)),
-        last_run_at: agentConfig?.last_run_at ?? null,
-        last_action: agentConfig?.last_action ?? null,
-        last_status: agentConfig?.last_status ?? null,
-      });
-      await loadData();
-      setMessage('Agent 配置已保存');
-    } catch {
-      setMessage('Agent 配置保存失败');
-    } finally {
-      setAgentSaving(false);
-      setTimeout(() => setMessage(null), 3000);
-    }
-  };
-
-  const handleRunAgent = async () => {
-    try {
-      setAgentRunning(true);
-      const resp = await runPortfolioAgentNow();
-      await loadData();
-      setMessage(`Agent 运行完成：${resp.message}`);
-    } catch {
-      setMessage('Agent 运行失败');
-    } finally {
-      setAgentRunning(false);
-      setTimeout(() => setMessage(null), 3000);
-    }
-  };
-
   const pendingAutoTrades = autoTrades.filter(at => at.status === 'PENDING');
 
   const fmt = (v: number | null | undefined, digits = 2) => (v == null ? '-' : v.toFixed(digits));
@@ -302,7 +242,6 @@ export default function PortfolioPage() {
     const s = v.toFixed(digits);
     return v > 0 ? `+${s}` : s;
   };
-  const fmtTs = (ts?: number | null) => (ts ? new Date(ts * 1000).toLocaleString() : '-');
 
   const showDropdown = searchFocused;
 
@@ -428,109 +367,38 @@ export default function PortfolioPage() {
             <Wallet size={16} className="text-[var(--text-muted)]" />
             <span className="text-[var(--text-secondary)] text-xs font-medium">总资产</span>
           </div>
-          <span className="text-[var(--text-primary)] text-base font-bold">{summary ? summary.total_market_value.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '-'}</span>
+          <span className="text-[var(--text-primary)] text-base font-bold">{totalMarketValue > 0 ? totalMarketValue.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '-'}</span>
         </div>
         <div className="mt-2 h-px bg-[var(--border-color)]" />
-        <div className="grid grid-cols-4 gap-2 mt-2">
+        <div className="grid grid-cols-3 gap-2 mt-2">
           <div>
             <div className="text-[var(--text-muted)] text-[10px]">持仓数</div>
             <div className="text-[var(--text-primary)] text-sm font-bold">{positions.length}</div>
           </div>
           <div>
             <div className="text-[var(--text-muted)] text-[10px]">总成本</div>
-            <div className="text-[var(--text-primary)] text-sm font-bold">{summary ? summary.total_cost.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '-'}</div>
+            <div className="text-[var(--text-primary)] text-sm font-bold">{totalCost > 0 ? totalCost.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '-'}</div>
           </div>
           <div>
-            <div className="text-[var(--text-muted)] text-[10px]">账面盈亏</div>
-            <div className={`text-sm font-bold ${(summary?.unrealized_pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-              {summary ? `${fmtSigned(summary.unrealized_pnl, 0)}` : '-'}
-              {summary && <span className="text-[10px] ml-0.5">({fmtSigned(summary.unrealized_pnl_pct, 1)}%)</span>}
-            </div>
-          </div>
-          <div>
-            <div className="text-[var(--text-muted)] text-[10px]">累计已实现</div>
-            <div className={`text-sm font-bold ${(summary?.realized_pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-              {summary ? fmtSigned(summary.realized_pnl, 0) : '-'}
+            <div className="text-[var(--text-muted)] text-[10px]">总盈亏</div>
+            <div className={`text-sm font-bold ${totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+              {totalCost > 0 ? `${fmtSigned(totalPnl, 0)}` : '-'}
+              {totalCost > 0 && <span className="text-[10px] ml-0.5">({fmtSigned(totalPnlPct, 1)}%)</span>}
             </div>
           </div>
         </div>
       </div>
 
-      <div className="card-surface px-4 py-3">
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-2">
-            <Brain size={16} className="text-[var(--text-muted)]" />
-            <span className="text-[var(--text-primary)] text-sm font-bold">A股 Agent 顾问</span>
+      <Link href="/returns" className="card-surface px-4 py-3 flex items-center justify-between hover:bg-[var(--bg-elevated)] transition-colors">
+        <div className="flex items-center gap-2">
+          <Brain size={16} className="text-[var(--accent-primary)]" />
+          <div>
+            <div className="text-[var(--text-primary)] text-sm font-bold">收益中心</div>
+            <div className="text-[var(--text-secondary)] text-xs">收益、Agent KPI、交易记录都在这里</div>
           </div>
-          <button
-            onClick={handleRunAgent}
-            disabled={agentRunning}
-            className="px-3 py-1.5 rounded-full bg-blue-500/15 text-blue-400 text-xs font-bold disabled:opacity-50"
-          >{agentRunning ? '运行中...' : '立即运行'}</button>
         </div>
-        <div className="grid grid-cols-2 gap-3">
-          <label className="text-xs text-[var(--text-secondary)]">
-            目标盈利
-            <input
-              value={agentTargetProfit}
-              onChange={(e) => setAgentTargetProfit(e.target.value)}
-              placeholder="例如 50000"
-              className="mt-1 w-full bg-[var(--bg-elevated)] border border-[var(--border-color)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)]"
-            />
-          </label>
-          <label className="text-xs text-[var(--text-secondary)]">
-            截止时间
-            <input
-              type="datetime-local"
-              value={agentDeadline}
-              onChange={(e) => setAgentDeadline(e.target.value)}
-              className="mt-1 w-full bg-[var(--bg-elevated)] border border-[var(--border-color)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)]"
-            />
-          </label>
-        </div>
-        <div className="flex items-center gap-3 mt-3">
-          <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
-            <input
-              type="checkbox"
-              checked={!!agentConfig?.enabled}
-              onChange={(e) => setAgentConfig(prev => ({ ...(prev || { enabled: false, min_buy_quantity: 10000 }), enabled: e.target.checked }))}
-            />
-            开启自动操作（仅A股）
-          </label>
-          <button
-            onClick={handleSaveAgent}
-            disabled={agentSaving}
-            className="px-3 py-1.5 rounded-full bg-emerald-500/15 text-emerald-400 text-xs font-bold disabled:opacity-50"
-          >{agentSaving ? '保存中...' : '保存配置'}</button>
-        </div>
-        {agentStatus && (
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mt-3 text-xs">
-            <div className="rounded-lg bg-[var(--bg-elevated)] px-3 py-2">
-              <div className="text-[var(--text-muted)]">目标达成</div>
-              <div className="text-[var(--text-primary)] font-bold">{fmt(agentStatus.target_progress_pct, 1)}%</div>
-            </div>
-            <div className="rounded-lg bg-[var(--bg-elevated)] px-3 py-2">
-              <div className="text-[var(--text-muted)]">选股成功率</div>
-              <div className="text-[var(--text-primary)] font-bold">{fmt(agentStatus.auto_pick_success_rate, 1)}%</div>
-            </div>
-            <div className="rounded-lg bg-[var(--bg-elevated)] px-3 py-2">
-              <div className="text-[var(--text-muted)]">自动交易次数</div>
-              <div className="text-[var(--text-primary)] font-bold">{agentStatus.auto_trade_count}</div>
-            </div>
-            <div className="rounded-lg bg-[var(--bg-elevated)] px-3 py-2">
-              <div className="text-[var(--text-muted)]">已闭环选股</div>
-              <div className="text-[var(--text-primary)] font-bold">{agentStatus.auto_pick_success_count}/{agentStatus.auto_pick_closed_count}</div>
-            </div>
-          </div>
-        )}
-        {agentStatus && (
-          <div className="mt-3 text-xs text-[var(--text-secondary)] flex flex-col gap-1">
-            <div>最近状态：{agentStatus.last_status || '-'}</div>
-            <div>最近动作：{agentStatus.last_action || '-'}</div>
-            <div>最近运行：{fmtTs(agentStatus.last_run_at)}</div>
-          </div>
-        )}
-      </div>
+        <ChevronRight size={16} className="text-[var(--text-muted)]" />
+      </Link>
 
       {/* Alerts — compact strip */}
       {alerts.length > 0 && (
@@ -539,29 +407,6 @@ export default function PortfolioPage() {
             <span className="text-amber-400 text-xs font-semibold shrink-0">提醒 {alerts.length}</span>
             {alerts.slice(0, 3).map((a) => (
               <span key={a.key} className="text-[var(--text-secondary)] text-xs whitespace-nowrap">{a.symbol}：{a.message}</span>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {trades.length > 0 && (
-        <div className="card-surface px-4 py-3">
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-[var(--text-primary)] text-sm font-bold">交易记录</span>
-            <span className="text-[var(--text-muted)] text-xs">最近 {trades.length} 条</span>
-          </div>
-          <div className="flex flex-col gap-2">
-            {trades.slice(0, 12).map((t) => (
-              <div key={t.id} className="flex items-center justify-between rounded-lg bg-[var(--bg-elevated)] px-3 py-2 text-xs">
-                <div className="min-w-0">
-                  <div className="text-[var(--text-primary)] font-bold truncate">{t.name || t.symbol || t.position_id}</div>
-                  <div className="text-[var(--text-muted)]">{t.market || '-'} · {t.source === 'auto_strategy' ? 'Agent策略' : t.source === 'auto_order' ? '委托自动' : '手动'} · {fmtTs(t.created_at)}</div>
-                </div>
-                <div className="text-right shrink-0 ml-3">
-                  <div className={`font-bold ${t.side === 'BUY' ? 'text-emerald-400' : 'text-red-400'}`}>{t.side === 'BUY' ? '买入' : '卖出'} {fmt(t.price)}</div>
-                  <div className="text-[var(--text-secondary)]">{t.quantity.toLocaleString()}股 · {t.amount.toLocaleString(undefined, { maximumFractionDigits: 0 })}</div>
-                </div>
-              </div>
             ))}
           </div>
         </div>
