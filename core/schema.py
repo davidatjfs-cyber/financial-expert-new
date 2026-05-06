@@ -30,5 +30,29 @@ def _ensure_portfolio_schema() -> None:
         if "capital" not in cfg_columns:
             with _engine.begin() as conn:
                 conn.execute(text("ALTER TABLE portfolio_agent_configs ADD COLUMN capital FLOAT DEFAULT 10000000.0"))
+        if "agent_type" not in cfg_columns:
+            with _engine.begin() as conn:
+                conn.execute(text("ALTER TABLE portfolio_agent_configs ADD COLUMN agent_type VARCHAR DEFAULT 'rules'"))
     except Exception:
         pass
+
+    try:
+        with _engine.begin() as conn:
+            conn.execute(text("UPDATE portfolio_agent_configs SET id='a' WHERE id='default'"))
+    except Exception:
+        pass
+
+    try:
+        with _engine.begin() as conn:
+            conn.execute(text("UPDATE portfolio_trades SET source='auto_strategy_a' WHERE source='auto_strategy'"))
+    except Exception:
+        pass
+
+    for aid, atype in [("a", "rules"), ("b", "llm")]:
+        try:
+            with _engine.begin() as conn:
+                existing = conn.execute(text(f"SELECT COUNT(*) FROM portfolio_agent_configs WHERE id='{aid}'")).scalar()
+                if not existing:
+                    conn.execute(text(f"INSERT INTO portfolio_agent_configs(id, enabled, capital, agent_type) VALUES('{aid}', '0', 10000000.0, '{atype}')"))
+        except Exception:
+            pass

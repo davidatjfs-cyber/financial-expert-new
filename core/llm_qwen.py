@@ -21,11 +21,12 @@ def get_api_key() -> str:
 
 def call_llm(system_prompt: str, user_prompt: str,
              temperature: float = 0.3, max_tokens: int = 2000,
-             api_key: Optional[str] = None) -> str:
+             api_key: Optional[str] = None,
+             model: Optional[str] = None) -> str:
     """统一 LLM 调用入口，支持 Qwen 和本地模型(Ollama/vLLM)"""
     if LLM_PROVIDER == "local":
         return _call_local_llm(system_prompt, user_prompt, temperature, max_tokens)
-    return _call_qwen_llm(system_prompt, user_prompt, temperature, max_tokens, api_key)
+    return _call_qwen_llm(system_prompt, user_prompt, temperature, max_tokens, api_key, model)
 
 
 def _call_local_llm(system_prompt: str, user_prompt: str,
@@ -55,10 +56,12 @@ def _call_local_llm(system_prompt: str, user_prompt: str,
 
 def _call_qwen_llm(system_prompt: str, user_prompt: str,
                    temperature: float = 0.3, max_tokens: int = 2000,
-                   api_key: Optional[str] = None) -> str:
+                   api_key: Optional[str] = None,
+                   model: Optional[str] = None) -> str:
     key = api_key or get_api_key()
     if not key:
         raise RuntimeError("missing_api_key")
+    qwen_model = (model or "qwen-turbo").strip() or "qwen-turbo"
     try:
         resp = httpx.post(
             QWEN_API_URL,
@@ -67,7 +70,7 @@ def _call_qwen_llm(system_prompt: str, user_prompt: str,
                 "Content-Type": "application/json",
             },
             json={
-                "model": "qwen-turbo",
+                "model": qwen_model,
                 "input": {
                     "messages": [
                         {"role": "system", "content": system_prompt},

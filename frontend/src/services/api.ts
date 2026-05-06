@@ -160,7 +160,7 @@ export interface PortfolioTradeRequest {
   position_id: string;
   side: 'BUY' | 'SELL';
   quantity: number;
-  source?: 'manual' | 'auto_strategy' | 'auto_order';
+  source?: 'manual' | 'auto_strategy' | 'auto_strategy_a' | 'auto_strategy_b' | 'auto_order';
 }
 
 export interface PortfolioTrade {
@@ -171,7 +171,7 @@ export interface PortfolioTrade {
   quantity: number;
   amount: number;
   fee: number;
-  source: 'manual' | 'auto_strategy' | 'auto_order';
+  source: 'manual' | 'auto_strategy' | 'auto_strategy_a' | 'auto_strategy_b' | 'auto_order';
   symbol?: string | null;
   name?: string | null;
   market?: string | null;
@@ -188,7 +188,8 @@ export interface PortfolioSummary {
   total_buy_amount: number;
   total_hold_amount: number;
   manual: PortfolioSourceSummary;
-  agent: PortfolioSourceSummary;
+  agent_a: PortfolioSourceSummary;
+  agent_b: PortfolioSourceSummary;
 }
 
 export interface PortfolioSourceSummary {
@@ -203,6 +204,7 @@ export interface PortfolioSourceSummary {
 }
 
 export interface PortfolioAgentConfig {
+  agent_id: string;
   enabled: boolean;
   target_profit?: number | null;
   deadline_ts?: number | null;
@@ -214,6 +216,8 @@ export interface PortfolioAgentConfig {
 }
 
 export interface PortfolioAgentStatus {
+  agent_id: string;
+  agent_type: string;
   enabled: boolean;
   market_scope: 'CN' | string;
   target_profit?: number | null;
@@ -234,6 +238,7 @@ export interface PortfolioAgentStatus {
   auto_pick_success_count: number;
   auto_pick_closed_count: number;
   auto_pick_success_rate: number;
+  capital_utilization_pct: number;
   avg_closed_pick_pnl: number;
   avg_closed_pick_days: number;
   max_drawdown_pct: number;
@@ -250,7 +255,8 @@ export interface PortfolioReturns {
   realized_pnl: number;
   unrealized_pnl: number;
   manual: PortfolioSourceReturns;
-  agent: PortfolioSourceReturns;
+  agent_a: PortfolioSourceReturns;
+  agent_b: PortfolioSourceReturns;
 }
 
 export interface PortfolioSourceReturns {
@@ -565,12 +571,12 @@ export async function getPortfolioSummary() {
   return fetchAPI<PortfolioSummary>(`/api/portfolio/summary`);
 }
 
-export async function getPortfolioAgentConfig() {
-  return fetchAPI<PortfolioAgentConfig>(`/api/portfolio/agent/config`);
+export async function getPortfolioAgentConfig(agentId: string = 'a') {
+  return fetchAPI<PortfolioAgentConfig>(`/api/portfolio/agent/config?agent_id=${agentId}`);
 }
 
-export async function getPortfolioAgentStatus() {
-  return fetchAPI<PortfolioAgentStatus>(`/api/portfolio/agent/status`);
+export async function getPortfolioAgentStatus(agentId: string = 'a') {
+  return fetchAPI<PortfolioAgentStatus>(`/api/portfolio/agent/status?agent_id=${agentId}`);
 }
 
 export async function getPortfolioReturns() {
@@ -585,8 +591,8 @@ export async function updatePortfolioAgentConfig(req: PortfolioAgentConfig) {
   });
 }
 
-export async function runPortfolioAgentNow() {
-  return fetchAPI<{ ok: boolean; message: string; trade?: PortfolioTrade }>(`/api/portfolio/agent/run`, {
+export async function runPortfolioAgentNow(agentId: string = 'a') {
+  return fetchAPI<{ ok: boolean; message: string; trade?: PortfolioTrade }>(`/api/portfolio/agent/run?agent_id=${agentId}`, {
     method: 'POST',
   });
 }

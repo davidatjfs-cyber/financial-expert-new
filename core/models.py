@@ -144,8 +144,9 @@ class PortfolioAutoTrade(Base):
 class PortfolioAgentConfig(Base):
     __tablename__ = "portfolio_agent_configs"
 
-    id: Mapped[str] = mapped_column(String, primary_key=True, default="default")
-    enabled: Mapped[str] = mapped_column(String, default="0")  # 0 / 1
+    id: Mapped[str] = mapped_column(String, primary_key=True, default="a")
+    agent_type: Mapped[str] = mapped_column(String, default="rules")
+    enabled: Mapped[str] = mapped_column(String, default="0")
     target_profit: Mapped[float | None] = mapped_column(Float, nullable=True)
     deadline_ts: Mapped[int | None] = mapped_column(Integer, nullable=True)
     capital: Mapped[float] = mapped_column(Float, default=10000000.0)
