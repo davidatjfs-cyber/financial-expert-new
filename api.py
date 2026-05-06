@@ -14,7 +14,7 @@ import html
 from io import BytesIO
 from pathlib import Path
 import datetime as _dt
-from datetime import date
+from datetime import date, datetime, timezone, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo as _ZoneInfo
 from urllib.parse import unquote, urljoin, urlparse, parse_qs
@@ -438,22 +438,24 @@ class PortfolioSummaryResponse(BaseModel):
     realized_pnl: float = 0.0
     total_trades: int = 0
     total_buy_amount: float = 0.0
-    total_sell_amount: float = 0.0
+    total_hold_amount: float = 0.0
     manual: "PortfolioSourceSummaryResponse" = Field(default_factory=lambda: PortfolioSourceSummaryResponse())
     agent: "PortfolioSourceSummaryResponse" = Field(default_factory=lambda: PortfolioSourceSummaryResponse())
 
 
 class PortfolioAgentConfigRequest(BaseModel):
     enabled: bool = False
-    target_profit: Optional[float] = None  # interpreted as target return percentage
+    target_profit: Optional[float] = None
     deadline_ts: Optional[int] = None
+    capital: float = 10000000.0
     min_buy_quantity: float = 10000.0
 
 
 class PortfolioAgentConfigResponse(BaseModel):
     enabled: bool = False
-    target_profit: Optional[float] = None  # target return percentage
+    target_profit: Optional[float] = None
     deadline_ts: Optional[int] = None
+    capital: float = 10000000.0
     min_buy_quantity: float = 10000.0
     last_run_at: Optional[int] = None
     last_action: Optional[str] = None
@@ -465,11 +467,13 @@ class PortfolioAgentStatusResponse(BaseModel):
     market_scope: str = "CN"
     target_profit: Optional[float] = None
     deadline_ts: Optional[int] = None
+    capital: float = 10000000.0
     min_buy_quantity: float = 10000.0
     managed_capital: float = 0.0
     managed_realized_pnl: float = 0.0
     managed_unrealized_pnl: float = 0.0
     managed_net_pnl: float = 0.0
+    managed_net_return_rate: float = 0.0
     realized_pnl: float = 0.0
     unrealized_pnl: float = 0.0
     net_pnl: float = 0.0
@@ -506,7 +510,7 @@ class PortfolioSourceSummaryResponse(BaseModel):
     realized_pnl: float = 0.0
     total_trades: int = 0
     total_buy_amount: float = 0.0
-    total_sell_amount: float = 0.0
+    total_hold_amount: float = 0.0
 
 
 class PortfolioSourceReturnsResponse(BaseModel):
@@ -516,6 +520,7 @@ class PortfolioSourceReturnsResponse(BaseModel):
     total_pnl: float = 0.0
     realized_pnl: float = 0.0
     unrealized_pnl: float = 0.0
+    net_return_rate: float = 0.0
 
 
 def _feishu_env() -> tuple[str, str, str, str]:
@@ -2399,7 +2404,8 @@ def _empty_source_summary() -> dict[str, float]:
         "realized_pnl": 0.0,
         "total_trades": 0.0,
         "total_buy_amount": 0.0,
-        "total_sell_amount": 0.0,
+        "_sell_amount": 0.0,
+        "total_hold_amount": 0.0,
     }
 
 
@@ -2424,7 +2430,7 @@ def _portfolio_source_breakdown(
         info["total_trades"] += 1.0
         amount = float(trade.amount or 0.0)
         if (trade.side or "").strip().upper() == "SELL":
-            info["total_sell_amount"] += amount
+            info["_sell_amount"] += amount
         else:
             info["total_buy_amount"] += amount
         by_position.setdefault(trade.position_id, []).append(trade)
@@ -2474,6 +2480,10 @@ def _portfolio_source_breakdown(
             breakdown[bucket]["unrealized_pnl"] += mv - cost
             holdings[bucket][position_id] = holdings[bucket].get(position_id, 0.0) + qty
 
+    for bucket in breakdown:
+        sell_amt = float(breakdown[bucket].pop("_sell_amount", 0.0))
+        breakdown[bucket]["total_hold_amount"] = sell_amt + float(breakdown[bucket]["total_market_value"])
+
     return breakdown, holdings
 
 
@@ -2488,7 +2498,7 @@ def _source_summary_response(data: dict[str, float]) -> PortfolioSourceSummaryRe
         realized_pnl=float(data.get("realized_pnl", 0.0) or 0.0),
         total_trades=int(data.get("total_trades", 0.0) or 0.0),
         total_buy_amount=float(data.get("total_buy_amount", 0.0) or 0.0),
-        total_sell_amount=float(data.get("total_sell_amount", 0.0) or 0.0),
+        total_hold_amount=float(data.get("total_hold_amount", 0.0) or 0.0),
     )
 
 
@@ -2661,7 +2671,7 @@ def _compute_agent_advanced_kpis(trades: list[PortfolioTrade], positions: list[P
     return avg_closed_pick_pnl, avg_closed_pick_days, max_drawdown_pct
 
 
-def _compute_agent_managed_financials(trades: list[PortfolioTrade], positions: list[PortfolioPosition]) -> tuple[float, float, float, float]:
+def _compute_agent_managed_financials(trades: list[PortfolioTrade], positions: list[PortfolioPosition], capital: float = 10000000.0) -> tuple[float, float, float, float]:
     pos_prices: dict[str, float] = {}
     for pos in positions:
         try:
@@ -2672,7 +2682,7 @@ def _compute_agent_managed_financials(trades: list[PortfolioTrade], positions: l
 
     breakdown, _ = _portfolio_source_breakdown(trades, positions, pos_prices)
     agent = breakdown["agent"]
-    managed_capital = float(agent["total_buy_amount"])
+    managed_capital = capital
     managed_realized_pnl = float(agent["realized_pnl"])
     managed_unrealized_pnl = float(agent["unrealized_pnl"])
     managed_net_pnl = managed_realized_pnl + managed_unrealized_pnl
@@ -2707,15 +2717,66 @@ def _agent_dynamic_buy_quantity(min_buy_quantity: float, target_profit: Optional
     return base * units
 
 
+def _compute_period_realized_pnl(trades: list[PortfolioTrade], today_ts: int, week_ts: int, month_ts: int) -> dict[str, dict[str, float]]:
+    result = {
+        "manual": {"today": 0.0, "week": 0.0, "month": 0.0},
+        "agent": {"today": 0.0, "week": 0.0, "month": 0.0},
+    }
+    by_position: dict[str, list[PortfolioTrade]] = {}
+    for trade in trades:
+        by_position.setdefault(trade.position_id, []).append(trade)
+    for items in by_position.values():
+        items.sort(key=lambda x: (int(x.created_at or 0), x.id or ""))
+        lots: list[dict[str, str | float]] = []
+        for trade in items:
+            side = (trade.side or "").strip().upper()
+            qty = float(trade.quantity or 0.0)
+            price = float(trade.price or 0.0)
+            fee = float(trade.fee or 0.0)
+            if qty <= 0:
+                continue
+            bucket = _trade_source_bucket(getattr(trade, "source", "manual"))
+            ts = int(trade.created_at or 0)
+            if side == "BUY":
+                unit_cost = (qty * price + fee) / qty if qty > 0 else price
+                lots.append({"bucket": bucket, "qty": qty, "price": unit_cost})
+                continue
+            remaining = qty
+            unit_proceeds = (qty * price - fee) / qty if qty > 0 else price
+            while remaining > 1e-9 and lots:
+                lot = lots[0]
+                lot_qty = float(lot["qty"])
+                used = min(remaining, lot_qty)
+                lot_bucket = str(lot["bucket"])
+                pnl = used * (unit_proceeds - float(lot["price"]))
+                if ts >= today_ts:
+                    result[lot_bucket]["today"] += pnl
+                if ts >= week_ts:
+                    result[lot_bucket]["week"] += pnl
+                if ts >= month_ts:
+                    result[lot_bucket]["month"] += pnl
+                lot_qty -= used
+                remaining -= used
+                lot["qty"] = lot_qty
+                if lot_qty <= 1e-9:
+                    lots.pop(0)
+    return result
+
+
 def _compute_period_returns(
     positions: list[PortfolioPosition],
     summary: PortfolioSummaryResponse,
     holdings: dict[str, dict[str, float]],
+    trades: list[PortfolioTrade],
+    capital: float = 10000000.0,
 ) -> PortfolioReturnsResponse:
-    today_pnl = 0.0
-    week_pnl = 0.0
-    month_pnl = 0.0
-    bucket_periods = {
+    tz_cn = timezone(timedelta(hours=8))
+    now_cn = datetime.now(tz_cn)
+    today_ts = int(now_cn.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+    week_ts = int((now_cn.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=now_cn.weekday())).timestamp())
+    month_ts = int(now_cn.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp())
+
+    bucket_holding_delta = {
         "manual": {"today": 0.0, "week": 0.0, "month": 0.0},
         "agent": {"today": 0.0, "week": 0.0, "month": 0.0},
     }
@@ -2735,27 +2796,31 @@ def _compute_period_returns(
             if df is None or df.empty or "close" not in df.columns:
                 continue
             closes = pd.to_numeric(df["close"], errors="coerce").dropna().tolist()
-            if len(closes) >= 2:
-                delta = current - float(closes[-2])
-                today_pnl += qty * delta
-                for bucket in ("manual", "agent"):
-                    bucket_periods[bucket]["today"] += float(holdings.get(bucket, {}).get(p.id, 0.0) or 0.0) * delta
-            if len(closes) >= 6:
-                delta = current - float(closes[-6])
-                week_pnl += qty * delta
-                for bucket in ("manual", "agent"):
-                    bucket_periods[bucket]["week"] += float(holdings.get(bucket, {}).get(p.id, 0.0) or 0.0) * delta
-            if len(closes) >= 21:
-                delta = current - float(closes[-21])
-                month_pnl += qty * delta
-                for bucket in ("manual", "agent"):
-                    bucket_periods[bucket]["month"] += float(holdings.get(bucket, {}).get(p.id, 0.0) or 0.0) * delta
+            for period, idx, key in [("today", 2, "today"), ("week", 6, "week"), ("month", 21, "month")]:
+                if len(closes) >= idx:
+                    delta = current - float(closes[-idx])
+                    for bucket in ("manual", "agent"):
+                        bucket_holding_delta[bucket][key] += float(holdings.get(bucket, {}).get(p.id, 0.0) or 0.0) * delta
         except Exception:
             continue
+
+    bucket_realized = _compute_period_realized_pnl(trades, today_ts, week_ts, month_ts)
+
+    bucket_periods = {}
+    for bucket in ("manual", "agent"):
+        bucket_periods[bucket] = {}
+        for key in ("today", "week", "month"):
+            bucket_periods[bucket][key] = bucket_holding_delta[bucket][key] + bucket_realized[bucket][key]
 
     total_pnl = float(summary.realized_pnl or 0.0) + float(summary.unrealized_pnl or 0.0)
     manual_total = float(summary.manual.realized_pnl or 0.0) + float(summary.manual.unrealized_pnl or 0.0)
     agent_total = float(summary.agent.realized_pnl or 0.0) + float(summary.agent.unrealized_pnl or 0.0)
+    agent_net_return_rate = (agent_total / capital * 100.0) if capital > 0 else 0.0
+
+    today_pnl = bucket_periods["manual"]["today"] + bucket_periods["agent"]["today"]
+    week_pnl = bucket_periods["manual"]["week"] + bucket_periods["agent"]["week"]
+    month_pnl = bucket_periods["manual"]["month"] + bucket_periods["agent"]["month"]
+
     return PortfolioReturnsResponse(
         today_pnl=today_pnl,
         week_pnl=week_pnl,
@@ -2778,6 +2843,7 @@ def _compute_period_returns(
             total_pnl=agent_total,
             realized_pnl=float(summary.agent.realized_pnl or 0.0),
             unrealized_pnl=float(summary.agent.unrealized_pnl or 0.0),
+            net_return_rate=agent_net_return_rate,
         ),
     )
 
@@ -2810,7 +2876,7 @@ def get_portfolio_summary():
     total_mv = float(sum(part["total_market_value"] for part in breakdown.values()))
     realized_pnl = _compute_realized_pnl_from_trades(trades, positions)
     total_buy_amt = float(sum(part["total_buy_amount"] for part in breakdown.values()))
-    total_sell_amt = float(sum(part["total_sell_amount"] for part in breakdown.values()))
+    total_hold_amt = float(sum(part["total_hold_amount"] for part in breakdown.values()))
     unrealized_pnl = total_mv - total_cost
     unrealized_pnl_pct = (unrealized_pnl / total_cost * 100) if total_cost > 0 else 0
 
@@ -2818,7 +2884,7 @@ def get_portfolio_summary():
         total_cost=total_cost, total_market_value=total_mv,
         unrealized_pnl=unrealized_pnl, unrealized_pnl_pct=unrealized_pnl_pct,
         realized_pnl=realized_pnl, total_trades=len(trades),
-        total_buy_amount=total_buy_amt, total_sell_amount=total_sell_amt,
+        total_buy_amount=total_buy_amt, total_hold_amount=total_hold_amt,
         manual=_source_summary_response(breakdown["manual"]),
         agent=_source_summary_response(breakdown["agent"]),
     )
@@ -2889,9 +2955,11 @@ def _run_portfolio_agent_once() -> dict:
     net_pnl = float(summary.realized_pnl or 0.0) + float(summary.unrealized_pnl or 0.0)
     with session_scope() as s:
         cfg = _get_or_create_agent_config(s)
+        capital = float(cfg.capital or 10000000.0)
         managed_capital, _, _, managed_net_pnl = _compute_agent_managed_financials(
             s.execute(select(PortfolioTrade)).scalars().all(),
             s.execute(select(PortfolioPosition)).scalars().all(),
+            capital,
         )
         target_return_pct = float(cfg.target_profit or 0.0)
         if managed_capital > 0 and target_return_pct > 0 and managed_net_pnl >= managed_capital * target_return_pct / 100.0:
@@ -2959,14 +3027,17 @@ def _run_portfolio_agent_once() -> dict:
         managed_capital, _, _, managed_net_pnl = _compute_agent_managed_financials(
             s.execute(select(PortfolioTrade)).scalars().all(),
             s.execute(select(PortfolioPosition)).scalars().all(),
+            capital,
         )
+        agent_holdings_mv = float(summary.agent.total_market_value) if summary.agent else 0.0
+        available_capital = capital - agent_holdings_mv
         dynamic_qty = _agent_dynamic_buy_quantity(
             float(cfg.min_buy_quantity or 10000.0),
             cfg.target_profit,
             cfg.deadline_ts,
             managed_net_pnl,
             action,
-            managed_capital,
+            available_capital,
         )
         trade = _create_trade_at_price(existing.id, "BUY", dynamic_qty, buy_price, "auto_strategy")
         if trade is not None:
@@ -2987,6 +3058,7 @@ def get_portfolio_agent_config():
             enabled=(cfg.enabled or "0") == "1",
             target_profit=cfg.target_profit,
             deadline_ts=cfg.deadline_ts,
+            capital=float(cfg.capital or 10000000.0),
             min_buy_quantity=float(cfg.min_buy_quantity or 10000.0),
             last_run_at=cfg.last_run_at,
             last_action=cfg.last_action,
@@ -3003,10 +3075,12 @@ def get_portfolio_agent_status():
         trades = s.execute(select(PortfolioTrade)).scalars().all()
 
     net_pnl = float(summary.realized_pnl or 0.0) + float(summary.unrealized_pnl or 0.0)
-    managed_capital, managed_realized_pnl, managed_unrealized_pnl, managed_net_pnl = _compute_agent_managed_financials(trades, positions)
+    capital = float(cfg.capital or 10000000.0)
+    managed_capital, managed_realized_pnl, managed_unrealized_pnl, managed_net_pnl = _compute_agent_managed_financials(trades, positions, capital)
     auto_trade_count, auto_pick_count, auto_pick_success_count, auto_pick_closed_count, auto_pick_success_rate = _compute_agent_pick_kpis(trades, positions)
     avg_closed_pick_pnl, avg_closed_pick_days, max_drawdown_pct = _compute_agent_advanced_kpis(trades, positions)
 
+    managed_net_return_rate = (managed_net_pnl / capital * 100.0) if capital > 0 else 0.0
     target_progress_pct = 0.0
     if cfg.target_profit and float(cfg.target_profit) > 0 and managed_capital > 0:
         target_profit_amount = managed_capital * float(cfg.target_profit) / 100.0
@@ -3018,11 +3092,13 @@ def get_portfolio_agent_status():
         market_scope="CN",
         target_profit=cfg.target_profit,
         deadline_ts=cfg.deadline_ts,
+        capital=capital,
         min_buy_quantity=float(cfg.min_buy_quantity or 10000.0),
         managed_capital=managed_capital,
         managed_realized_pnl=managed_realized_pnl,
         managed_unrealized_pnl=managed_unrealized_pnl,
         managed_net_pnl=managed_net_pnl,
+        managed_net_return_rate=managed_net_return_rate,
         realized_pnl=float(summary.realized_pnl or 0.0),
         unrealized_pnl=float(summary.unrealized_pnl or 0.0),
         net_pnl=net_pnl,
@@ -3058,6 +3134,9 @@ def get_portfolio_returns():
     breakdown, holdings = _portfolio_source_breakdown(trades, positions, pos_prices)
     total_cost = float(sum(part["total_cost"] for part in breakdown.values()))
     total_market_value = float(sum(part["total_market_value"] for part in breakdown.values()))
+    with session_scope() as s:
+        cfg = _get_or_create_agent_config(s)
+        capital = float(cfg.capital or 10000000.0)
     summary = PortfolioSummaryResponse(
         total_cost=total_cost,
         total_market_value=total_market_value,
@@ -3066,11 +3145,11 @@ def get_portfolio_returns():
         realized_pnl=_compute_realized_pnl_from_trades(trades, positions),
         total_trades=len(trades),
         total_buy_amount=float(sum(part["total_buy_amount"] for part in breakdown.values())),
-        total_sell_amount=float(sum(part["total_sell_amount"] for part in breakdown.values())),
+        total_hold_amount=float(sum(part["total_hold_amount"] for part in breakdown.values())),
         manual=_source_summary_response(breakdown["manual"]),
         agent=_source_summary_response(breakdown["agent"]),
     )
-    return _compute_period_returns(positions, summary, holdings)
+    return _compute_period_returns(positions, summary, holdings, trades, capital)
 
 
 @app.put("/api/portfolio/agent/config", response_model=PortfolioAgentConfigResponse)
@@ -3081,12 +3160,14 @@ def update_portfolio_agent_config(req: PortfolioAgentConfigRequest):
         cfg.enabled = "1" if req.enabled else "0"
         cfg.target_profit = req.target_profit
         cfg.deadline_ts = req.deadline_ts
+        cfg.capital = max(100000.0, float(req.capital or 10000000.0))
         cfg.min_buy_quantity = max(10000.0, float(req.min_buy_quantity or 10000.0))
         cfg.updated_at = now
         return PortfolioAgentConfigResponse(
             enabled=(cfg.enabled or "0") == "1",
             target_profit=cfg.target_profit,
             deadline_ts=cfg.deadline_ts,
+            capital=float(cfg.capital or 10000000.0),
             min_buy_quantity=float(cfg.min_buy_quantity or 10000.0),
             last_run_at=cfg.last_run_at,
             last_action=cfg.last_action,

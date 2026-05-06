@@ -26,6 +26,7 @@ export default function ReturnsPage() {
   const [returnsData, setReturnsData] = useState<PortfolioReturns | null>(null);
   const [agentConfig, setAgentConfig] = useState<PortfolioAgentConfig | null>(null);
   const [agentStatus, setAgentStatus] = useState<PortfolioAgentStatus | null>(null);
+  const [agentCapital, setAgentCapital] = useState('10000000');
   const [agentTargetProfit, setAgentTargetProfit] = useState('');
   const [agentDeadline, setAgentDeadline] = useState('');
   const [saving, setSaving] = useState(false);
@@ -87,6 +88,7 @@ export default function ReturnsPage() {
       setReturnsData(rt);
       setAgentConfig(ac);
       setAgentStatus(as);
+      setAgentCapital(ac.capital != null ? String(ac.capital) : '10000000');
       setAgentTargetProfit(ac.target_profit != null ? String(ac.target_profit) : '');
       setAgentDeadline(fmtShanghaiInput(ac.deadline_ts));
     } finally {
@@ -107,6 +109,7 @@ export default function ReturnsPage() {
       const targetProfit = agentTargetProfit.trim() ? Number(agentTargetProfit) : null;
       await updatePortfolioAgentConfig({
         enabled: !!agentConfig?.enabled,
+        capital: Number(agentCapital) || 10000000,
         target_profit: Number.isFinite(targetProfit as number) ? targetProfit : null,
         deadline_ts: deadlineTs,
         min_buy_quantity: Math.max(10000, Number(agentConfig?.min_buy_quantity || 10000)),
@@ -211,6 +214,10 @@ export default function ReturnsPage() {
           </div>
           <div className="grid grid-cols-2 gap-3">
             <label className="text-xs text-[var(--text-secondary)]">
+              本金(万)
+              <input value={agentCapital} onChange={(e) => setAgentCapital(e.target.value)} className="mt-1 w-full bg-[var(--bg-elevated)] border border-[var(--border-color)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)]" />
+            </label>
+            <label className="text-xs text-[var(--text-secondary)]">
               目标收益率(%)
               <input value={agentTargetProfit} onChange={(e) => setAgentTargetProfit(e.target.value)} className="mt-1 w-full bg-[var(--bg-elevated)] border border-[var(--border-color)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)]" />
             </label>
@@ -221,7 +228,7 @@ export default function ReturnsPage() {
           </div>
           <div className="flex items-center gap-3 mt-3">
             <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
-              <input type="checkbox" checked={!!agentConfig?.enabled} onChange={(e) => setAgentConfig(prev => ({ ...(prev || { enabled: false, min_buy_quantity: 10000 }), enabled: e.target.checked }))} />
+              <input type="checkbox" checked={!!agentConfig?.enabled} onChange={(e) => setAgentConfig(prev => ({ ...(prev || { enabled: false, capital: 10000000, min_buy_quantity: 10000 }), enabled: e.target.checked }))} />
               开启自动操作（仅A股）
             </label>
             <button onClick={handleSaveAgent} disabled={saving} className="px-3 py-1.5 rounded-full bg-emerald-500/15 text-emerald-400 text-xs font-bold disabled:opacity-50">{saving ? '保存中...' : '保存配置'}</button>
@@ -233,9 +240,10 @@ export default function ReturnsPage() {
               <div className="rounded-lg bg-[var(--bg-elevated)] px-3 py-2"><div className="text-[var(--text-muted)]">目标达成</div><div className="text-[var(--text-primary)] font-bold">{fmt(agentStatus.target_progress_pct, 1)}%</div></div>
               <div className="rounded-lg bg-[var(--bg-elevated)] px-3 py-2"><div className="text-[var(--text-muted)]">选股成功率</div><div className="text-[var(--text-primary)] font-bold">{fmt(agentStatus.auto_pick_success_rate, 1)}%</div></div>
               <div className="rounded-lg bg-[var(--bg-elevated)] px-3 py-2"><div className="text-[var(--text-muted)]">自动交易次数</div><div className="text-[var(--text-primary)] font-bold">{agentStatus.auto_trade_count}</div></div>
-              <div className="rounded-lg bg-[var(--bg-elevated)] px-3 py-2"><div className="text-[var(--text-muted)]">累计投入</div><div className="text-[var(--text-primary)] font-bold">{agentStatus.managed_capital.toLocaleString(undefined, { maximumFractionDigits: 0 })}</div></div>
+              <div className="rounded-lg bg-[var(--bg-elevated)] px-3 py-2"><div className="text-[var(--text-muted)]">本金</div><div className="text-[var(--text-primary)] font-bold">{agentStatus.managed_capital.toLocaleString(undefined, { maximumFractionDigits: 0 })}</div></div>
               <div className="rounded-lg bg-[var(--bg-elevated)] px-3 py-2"><div className="text-[var(--text-muted)]">Agent持仓市值</div><div className="text-[var(--text-primary)] font-bold">{summary?.agent ? summary.agent.total_market_value.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '-'}</div></div>
               <div className="rounded-lg bg-[var(--bg-elevated)] px-3 py-2"><div className="text-[var(--text-muted)]">Agent净收益</div><div className={`font-bold ${agentStatus.managed_net_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmtSigned(agentStatus.managed_net_pnl, 0)}</div></div>
+              <div className="rounded-lg bg-[var(--bg-elevated)] px-3 py-2"><div className="text-[var(--text-muted)]">Agent净收益率</div><div className={`font-bold ${agentStatus.managed_net_return_rate >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmtSigned(agentStatus.managed_net_return_rate, 2)}%</div></div>
               <div className="rounded-lg bg-[var(--bg-elevated)] px-3 py-2"><div className="text-[var(--text-muted)]">平均闭环收益</div><div className={`font-bold ${agentStatus.avg_closed_pick_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmtSigned(agentStatus.avg_closed_pick_pnl, 0)}</div></div>
               <div className="rounded-lg bg-[var(--bg-elevated)] px-3 py-2"><div className="text-[var(--text-muted)]">平均闭环天数</div><div className="text-[var(--text-primary)] font-bold">{fmt(agentStatus.avg_closed_pick_days, 1)}天</div></div>
               <div className="rounded-lg bg-[var(--bg-elevated)] px-3 py-2"><div className="text-[var(--text-muted)]">最大回撤</div><div className="text-red-400 font-bold">{fmt(agentStatus.max_drawdown_pct, 1)}%</div></div>
@@ -266,7 +274,7 @@ export default function ReturnsPage() {
                 <div className="flex items-center justify-between"><span className="text-[var(--text-secondary)]">已实现收益</span><span className={`${(card.data?.realized_pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'} font-bold`}>{fmtSigned(card.data?.realized_pnl, 0)}</span></div>
                 <div className="flex items-center justify-between"><span className="text-[var(--text-secondary)]">未实现收益</span><span className={`${(card.data?.unrealized_pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'} font-bold`}>{fmtSigned(card.data?.unrealized_pnl, 0)}</span></div>
                 <div className="flex items-center justify-between"><span className="text-[var(--text-secondary)]">持仓成本 / 市值</span><span className="text-[var(--text-primary)] font-bold">{card.data ? card.data.total_cost.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '-'} / {card.data ? card.data.total_market_value.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '-'}</span></div>
-                <div className="flex items-center justify-between"><span className="text-[var(--text-secondary)]">买入 / 卖出金额</span><span className="text-[var(--text-primary)] font-bold">{card.data ? card.data.total_buy_amount.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '-'} / {card.data ? card.data.total_sell_amount.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '-'}</span></div>
+                <div className="flex items-center justify-between"><span className="text-[var(--text-secondary)]">买入 / 持有金额</span><span className="text-[var(--text-primary)] font-bold">{card.data ? card.data.total_buy_amount.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '-'} / {card.data ? card.data.total_hold_amount.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '-'}</span></div>
                 <div className="flex items-center justify-between"><span className="text-[var(--text-secondary)]">交易笔数 / 总收益</span><span className="text-[var(--text-primary)] font-bold">{card.data?.total_trades ?? '-'} / {fmtSigned(card.returns?.total_pnl, 0)}</span></div>
               </div>
             ))}

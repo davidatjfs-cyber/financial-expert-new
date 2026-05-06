@@ -24,3 +24,11 @@ def _ensure_portfolio_schema() -> None:
                 conn.execute(text("ALTER TABLE portfolio_trades ADD COLUMN fee FLOAT DEFAULT 0"))
     except Exception:
         pass
+
+    try:
+        cfg_columns = {c["name"] for c in inspector.get_columns("portfolio_agent_configs")}
+        if "capital" not in cfg_columns:
+            with _engine.begin() as conn:
+                conn.execute(text("ALTER TABLE portfolio_agent_configs ADD COLUMN capital FLOAT DEFAULT 10000000.0"))
+    except Exception:
+        pass

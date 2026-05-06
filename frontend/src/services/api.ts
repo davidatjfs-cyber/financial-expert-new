@@ -186,7 +186,7 @@ export interface PortfolioSummary {
   realized_pnl: number;
   total_trades: number;
   total_buy_amount: number;
-  total_sell_amount: number;
+  total_hold_amount: number;
   manual: PortfolioSourceSummary;
   agent: PortfolioSourceSummary;
 }
@@ -199,13 +199,14 @@ export interface PortfolioSourceSummary {
   realized_pnl: number;
   total_trades: number;
   total_buy_amount: number;
-  total_sell_amount: number;
+  total_hold_amount: number;
 }
 
 export interface PortfolioAgentConfig {
   enabled: boolean;
   target_profit?: number | null;
   deadline_ts?: number | null;
+  capital: number;
   min_buy_quantity: number;
   last_run_at?: number | null;
   last_action?: string | null;
@@ -217,11 +218,13 @@ export interface PortfolioAgentStatus {
   market_scope: 'CN' | string;
   target_profit?: number | null;
   deadline_ts?: number | null;
+  capital: number;
   min_buy_quantity: number;
   managed_capital: number;
   managed_realized_pnl: number;
   managed_unrealized_pnl: number;
   managed_net_pnl: number;
+  managed_net_return_rate: number;
   realized_pnl: number;
   unrealized_pnl: number;
   net_pnl: number;
@@ -257,6 +260,7 @@ export interface PortfolioSourceReturns {
   total_pnl: number;
   realized_pnl: number;
   unrealized_pnl: number;
+  net_return_rate?: number;
 }
 
 export interface PortfolioAlert {

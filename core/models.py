@@ -148,6 +148,7 @@ class PortfolioAgentConfig(Base):
     enabled: Mapped[str] = mapped_column(String, default="0")  # 0 / 1
     target_profit: Mapped[float | None] = mapped_column(Float, nullable=True)
     deadline_ts: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    capital: Mapped[float] = mapped_column(Float, default=10000000.0)
     min_buy_quantity: Mapped[float] = mapped_column(Float, default=10000.0)
     last_run_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_action: Mapped[str | None] = mapped_column(String, nullable=True)
