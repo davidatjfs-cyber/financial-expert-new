@@ -3899,14 +3899,10 @@ def _run_llm_agent_once(
                     _log_agent_pick_event(agent_id, slot_key, "llm_buy_rejected", symbol=symbol, detail=buy_rejection)
                     last_status = f"llm_buy_rejected:{buy_rejection}:{symbol}"
                     continue
-                name = (pos.name or "").strip() if pos is not None else ""
                 if pos is None:
-                    pos = PortfolioPosition(
-                        market="CN", symbol=symbol, name=name or symbol,
-                        quantity=0.0, avg_cost=0.0, created_at=now, updated_at=now,
-                    )
-                    s.add(pos)
-                    s.flush()
+                    _log_agent_pick_event(agent_id, slot_key, "llm_buy_no_position", symbol=symbol, detail="user has not added this stock to portfolio")
+                    last_status = f"llm_buy_no_position:{symbol}"
+                    continue
                 qty = _agent_dynamic_buy_quantity(
                     min_qty,
                     cfg.target_profit,
@@ -4110,17 +4106,7 @@ def _run_portfolio_agent_once(
                     PortfolioPosition.symbol == symbol,
                 )).scalars().first()
                 if existing is None:
-                    existing = PortfolioPosition(
-                        market=market,
-                        symbol=symbol,
-                        name=name,
-                        quantity=0.0,
-                        avg_cost=0.0,
-                        created_at=now,
-                        updated_at=now,
-                    )
-                    s.add(existing)
-                    s.flush()
+                    continue
                 managed_capital, _, _, managed_net_pnl = _compute_agent_managed_financials(
                     s.execute(select(PortfolioTrade)).scalars().all(),
                     s.execute(select(PortfolioPosition)).scalars().all(),
