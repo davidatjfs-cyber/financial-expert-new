@@ -10,6 +10,8 @@
 """
 from __future__ import annotations
 
+
+from core.net import disable_proxies_for_process
 import os
 import time
 import json
@@ -36,14 +38,6 @@ _STATIC_SECTOR_MAP: Optional[dict[str, str]] = None
 _CN_MARKET_STATE_CACHE: tuple[float, str] = (0.0, "unknown")
 
 
-def _disable_proxies():
-    try:
-        from core.net import disable_proxies_for_process
-        disable_proxies_for_process()
-    except Exception:
-        pass
-
-
 def _cn_index_market_state() -> str:
     """Classify HS300 market regime for the A-share reversal strategy.
 
@@ -55,7 +49,7 @@ def _cn_index_market_state() -> str:
     if _CN_MARKET_STATE_CACHE[0] and (now - _CN_MARKET_STATE_CACHE[0]) < 1800:
         return _CN_MARKET_STATE_CACHE[1]
     try:
-        _disable_proxies()
+        disable_proxies_for_process()
         import httpx
 
         q = "sh000300"
@@ -171,7 +165,7 @@ def get_sectors() -> list[dict]:
         _SECTOR_LIST_CACHE = (now, sectors)
         return sectors
 
-    _disable_proxies()
+    disable_proxies_for_process()
     try:
         import akshare as ak
         df = ak.stock_board_industry_name_ths()
@@ -265,7 +259,7 @@ def get_hs300_stocks() -> list[dict]:
         if cached and (now - cached[0]) < _UNIVERSE_TTL:
             return cached[1]
 
-    _disable_proxies()
+    disable_proxies_for_process()
     try:
         import akshare as ak
         df = ak.index_stock_cons_csindex(symbol="000300")
@@ -743,7 +737,7 @@ def _rank_neutralize(scores: list[StockScore]) -> list[StockScore]:
 # ==================== Data Fetching ====================
 
 def _fetch_batch_pe_pb_ps(stocks: list[dict]) -> dict[str, dict]:
-    _disable_proxies()
+    disable_proxies_for_process()
     result = {}
     try:
         import httpx
@@ -832,7 +826,7 @@ def _fetch_batch_pe_pb_ps(stocks: list[dict]) -> dict[str, dict]:
 
 
 def _fetch_batch_financials(stocks: list[dict]) -> dict[str, dict]:
-    _disable_proxies()
+    disable_proxies_for_process()
     result = {}
     import akshare as ak
 
@@ -954,7 +948,7 @@ def _fetch_batch_financials(stocks: list[dict]) -> dict[str, dict]:
 
 
 def _fetch_north_flow() -> dict[str, float]:
-    _disable_proxies()
+    disable_proxies_for_process()
     result = {}
     try:
         import akshare as ak
@@ -974,7 +968,7 @@ def _fetch_north_flow() -> dict[str, float]:
 
 
 def _fetch_kline_close_batch(stocks: list[dict]) -> dict[str, list[float]]:
-    _disable_proxies()
+    disable_proxies_for_process()
     result = {}
     try:
         import httpx

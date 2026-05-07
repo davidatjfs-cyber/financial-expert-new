@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+
+from core.net import disable_proxies_for_process
 import os
 import json
 import time
@@ -24,14 +26,6 @@ _FEATURE_COLS = [
     "momentum_20d", "momentum_60d", "volatility_20d",
     "turnover_rate",
 ]
-
-
-def _disable_proxies():
-    try:
-        from core.net import disable_proxies_for_process
-        disable_proxies_for_process()
-    except Exception:
-        pass
 
 
 def _get_feature_vector(stock_data: dict) -> list[float]:
@@ -56,7 +50,7 @@ def build_training_dataset(
     构建训练数据集
     返回: (X, y) - 特征矩阵和标签(是否跑赢指数)
     """
-    _disable_proxies()
+    disable_proxies_for_process()
     from core.recommend import get_hs300_stocks, _STOCK_SECTOR_MAP
     from core.backtest import fetch_history_close, fetch_index_close
 

@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+
+from core.net import disable_proxies_for_process
 import os
 import json
 import time
@@ -21,19 +23,11 @@ _DEFAULT_WEIGHTS = {
 }
 
 
-def _disable_proxies():
-    try:
-        from core.net import disable_proxies_for_process
-        disable_proxies_for_process()
-    except Exception:
-        pass
-
-
 def optimize_weights(progress_cb=None) -> dict:
     """
     基于历史数据滚动回归优化因子权重
     """
-    _disable_proxies()
+    disable_proxies_for_process()
     from core.recommend import get_hs300_stocks
     from core.backtest import fetch_history_close, fetch_index_close
 

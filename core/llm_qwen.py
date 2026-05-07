@@ -61,7 +61,7 @@ def _call_qwen_llm(system_prompt: str, user_prompt: str,
     key = api_key or get_api_key()
     if not key:
         raise RuntimeError("missing_api_key")
-    qwen_model = (model or "qwen-turbo").strip() or "qwen-turbo"
+    qwen_model = (model or "qwen-turbo").strip()
     try:
         resp = httpx.post(
             QWEN_API_URL,

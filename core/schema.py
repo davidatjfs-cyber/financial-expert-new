@@ -59,8 +59,14 @@ def _ensure_portfolio_schema() -> None:
     for aid, atype in [("a", "rules"), ("b", "llm")]:
         try:
             with _engine.begin() as conn:
-                existing = conn.execute(text(f"SELECT COUNT(*) FROM portfolio_agent_configs WHERE id='{aid}'")).scalar()
+                existing = conn.execute(
+                    text("SELECT COUNT(*) FROM portfolio_agent_configs WHERE id = :aid"),
+                    {"aid": aid},
+                ).scalar()
                 if not existing:
-                    conn.execute(text(f"INSERT INTO portfolio_agent_configs(id, enabled, capital, agent_type) VALUES('{aid}', '0', 10000000.0, '{atype}')"))
+                    conn.execute(
+                        text("INSERT INTO portfolio_agent_configs(id, enabled, capital, agent_type) VALUES(:aid, '0', 10000000.0, :atype)"),
+                        {"aid": aid, "atype": atype},
+                    )
         except Exception:
             pass

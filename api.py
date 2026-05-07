@@ -73,6 +73,7 @@ _AGENT_NEW_PICK_SCHEDULE: dict[str, tuple[tuple[int, int], ...]] = {
     "b": ((9, 15), (12, 15), (0, 15)),
 }
 _AGENT_NEW_PICK_CHECKED: dict[tuple[str, str], bool] = {}
+_AGENT_NEW_PICK_LOCK = threading.Lock()
 
 
 def _cn_market_closed() -> bool:
@@ -127,13 +128,14 @@ def _claim_agent_new_pick_slot(agent_id: str) -> Optional[str]:
             continue
         slot_key = f"{now_bj.date().isoformat()}:{hour:02d}:{minute:02d}"
         cache_key = (agent_id, slot_key)
-        if _AGENT_NEW_PICK_CHECKED.get(cache_key):
-            return None
-        _AGENT_NEW_PICK_CHECKED[cache_key] = True
-        cutoff = (now_bj.date() - _dt.timedelta(days=7)).isoformat()
-        stale = [k for k in _AGENT_NEW_PICK_CHECKED if k[1][:10] < cutoff]
-        for k in stale:
-            del _AGENT_NEW_PICK_CHECKED[k]
+        with _AGENT_NEW_PICK_LOCK:
+            if _AGENT_NEW_PICK_CHECKED.get(cache_key):
+                return None
+            _AGENT_NEW_PICK_CHECKED[cache_key] = True
+            cutoff = (now_bj.date() - _dt.timedelta(days=7)).isoformat()
+            stale = [k for k in _AGENT_NEW_PICK_CHECKED if k[1][:10] < cutoff]
+            for k in stale:
+                del _AGENT_NEW_PICK_CHECKED[k]
         return slot_key
     return None
 
@@ -2581,8 +2583,8 @@ def _get_or_create_position_for_symbol(session, market: str, symbol: str, name: 
 
 
 def _portfolio_fee_rate(market: Optional[str], side: Optional[str]) -> float:
-    mkt = (market or "CN").strip().upper() or "CN"
-    txn_side = (side or "BUY").strip().upper() or "BUY"
+    mkt = (market or "CN").strip().upper()
+    txn_side = (side or "BUY").strip().upper()
     specific = os.environ.get(f"PORTFOLIO_FEE_RATE_{mkt}_{txn_side}")
     if specific not in (None, ""):
         try:

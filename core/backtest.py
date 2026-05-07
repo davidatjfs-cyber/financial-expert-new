@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+
+from core.net import disable_proxies_for_process
 import os
 import json
 import time
@@ -38,16 +40,8 @@ class BacktestResult:
             self.period_details = []
 
 
-def _disable_proxies():
-    try:
-        from core.net import disable_proxies_for_process
-        disable_proxies_for_process()
-    except Exception:
-        pass
-
-
 def fetch_history_close(symbol: str, days: int = 500) -> list[tuple[str, float]]:
-    _disable_proxies()
+    disable_proxies_for_process()
     try:
         import httpx
         code = symbol.split(".")[0]
@@ -84,7 +78,7 @@ def fetch_history_close(symbol: str, days: int = 500) -> list[tuple[str, float]]
 
 
 def fetch_index_close(index_code: str = "000300", days: int = 500) -> list[tuple[str, float]]:
-    _disable_proxies()
+    disable_proxies_for_process()
     try:
         import httpx
         prefix = "sh"
@@ -166,7 +160,7 @@ def run_backtest(
     """
     result = BacktestResult()
 
-    _disable_proxies()
+    disable_proxies_for_process()
 
     from core.recommend import get_hs300_stocks
     stocks = get_hs300_stocks()
