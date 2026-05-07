@@ -743,6 +743,66 @@ _AUTO_STRATEGY_EXEC_CACHE: dict[str, float] = {}
 _AUTO_STRATEGY_EXEC_TTL = 12 * 3600
 
 
+def _sell_trade_pnl(position_id: str, side: str, sell_quantity: float, sell_price: float,
+                     sell_source: str) -> tuple[Optional[float], Optional[float]]:
+    """Return (cost_price, realized_pnl) for this sell trade."""
+    if side != "SELL":
+        return None, None
+    with session_scope() as s:
+        trades = s.execute(
+            select(PortfolioTrade)
+            .where(PortfolioTrade.position_id == position_id)
+            .order_by(PortfolioTrade.created_at, PortfolioTrade.id)
+        ).scalars().all()
+    avg_cost = 0.0
+    qty = 0.0
+    for t in trades:
+        ts = (t.side or "").strip().upper()
+        tq = float(t.quantity or 0.0)
+        tp = float(t.price or 0.0)
+        tf = float(getattr(t, "fee", 0.0) or 0.0)
+        if tq <= 0:
+            continue
+        if ts == "BUY":
+            new_qty = qty + tq
+            avg_cost = ((qty * avg_cost) + (tq * tp) + tf) / new_qty if new_qty > 0 else 0.0
+            qty = new_qty
+        elif ts == "SELL":
+            sq = min(qty, tq)
+            qty = max(0.0, qty - sq)
+    sell_qty = min(qty, sell_quantity)
+    if sell_qty <= 0:
+        return None, None
+    net_price = sell_price * (1 - 0.0015)
+    pnl = sell_qty * (net_price - avg_cost)
+    return avg_cost, pnl
+
+
+def _buy_is_add_position(position_id: str, source: str, buy_quantity: float) -> tuple[bool, Optional[float]]:
+    """Return (is_add, prev_cost)."""
+    source_prefix = _trade_source_bucket(source) if source != "manual" else "manual"
+    with session_scope() as s:
+        trades = s.execute(
+            select(PortfolioTrade)
+            .where(PortfolioTrade.position_id == position_id)
+            .order_by(PortfolioTrade.created_at, PortfolioTrade.id)
+        ).scalars().all()
+    prior_buys = [t for t in trades
+                  if (t.side or "").strip().upper() == "BUY"
+                  and _trade_source_bucket(getattr(t, "source", "manual") or "manual") == source_prefix]
+    if not prior_buys:
+        return False, None
+    total = sum(float(t.quantity or 0.0) for t in prior_buys)
+    if total <= 0:
+        return False, None
+    total_cost = sum(
+        (float(t.quantity or 0.0) * float(t.price or 0.0)) + float(getattr(t, "fee", 0.0) or 0.0)
+        for t in prior_buys
+    )
+    prev_cost = total_cost / total
+    return True, prev_cost
+
+
 def _send_feishu_trade_notify(position_id: str, side: str, price: float, quantity: float,
                                symbol: str, name: str | None, market: str, source: str):
     mkt = (market or "").strip().upper()
@@ -784,19 +844,35 @@ def _send_feishu_trade_notify(position_id: str, side: str, price: float, quantit
     tz = _ZoneInfo('America/New_York') if mkt == 'US' else _ZoneInfo('Asia/Hong_Kong') if mkt == 'HK' else _ZoneInfo('Asia/Shanghai')
     time_str = _dt.datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')
 
+    elements = [
+        {"tag": "div", "text": {"tag": "lark_md", "content": f"**股票**：{name or symbol} ({market}:{symbol})"}},
+        {"tag": "div", "text": {"tag": "lark_md", "content": f"**价格**：{price:.2f} {currency}    **数量**：{int(quantity)}股"}},
+        {"tag": "div", "text": {"tag": "lark_md", "content": f"**金额**：{amount:,.0f} {currency}"}},
+        {"tag": "div", "text": {"tag": "lark_md", "content": f"**时间**：{time_str}"}},
+    ]
+
+    if side == "SELL":
+        cost_price, pnl = _sell_trade_pnl(position_id, side, quantity, price, source)
+        if cost_price is not None:
+            elements.insert(2, {"tag": "div", "text": {"tag": "lark_md", "content": f"**成本价格**：{cost_price:.2f} {currency}"}})
+        if pnl is not None:
+            pnl_label = "盈利" if pnl >= 0 else "亏损"
+            pnl_color = "green" if pnl >= 0 else "red"
+            elements.insert(3, {"tag": "div", "text": {"tag": "lark_md", "content": f"**此次{pnl_label}**：{pnl:+.0f} {currency}"}})
+    elif side == "BUY":
+        is_add, prev_cost = _buy_is_add_position(position_id, source, quantity)
+        if is_add and prev_cost is not None:
+            elements.insert(2, {"tag": "div", "text": {"tag": "lark_md", "content": f"**是否补仓**：是    **之前成本**：{prev_cost:.2f} {currency}"}})
+        else:
+            elements.insert(2, {"tag": "div", "text": {"tag": "lark_md", "content": f"**是否补仓**：否    **买入成本**：{price:.2f} {currency}"}})
+
     card = {
         "config": {"wide_screen_mode": True},
         "header": {
             "template": "green" if side == "BUY" else "red",
-            "title": {"tag": "plain_text", "content": f"[{mkt_tag}] 执行{side_label}"},
+            "title": {"tag": "plain_text", "content": f"[{mkt_tag}] {source_label}执行{side_label}"},
         },
-        "elements": [
-            {"tag": "div", "text": {"tag": "lark_md", "content": f"**股票**：{name or symbol} ({market}:{symbol})"}},
-            {"tag": "div", "text": {"tag": "lark_md", "content": f"**方向**：{side_label}    **来源**：{source_label}"}},
-            {"tag": "div", "text": {"tag": "lark_md", "content": f"**价格**：{price:.2f} {currency}    **数量**：{int(quantity)}股"}},
-            {"tag": "div", "text": {"tag": "lark_md", "content": f"**金额**：{amount:,.0f} {currency}"}},
-            {"tag": "div", "text": {"tag": "lark_md", "content": f"**时间**：{time_str}"}},
-        ],
+        "elements": elements,
     }
     try:
         resp = requests.post(
