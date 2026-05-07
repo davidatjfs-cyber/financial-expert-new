@@ -123,7 +123,7 @@ def _claim_agent_new_pick_slot(agent_id: str) -> Optional[str]:
     for hour, minute in _AGENT_NEW_PICK_SCHEDULE.get(agent_id, ()):
         slot_dt = now_bj.replace(hour=hour, minute=minute, second=0, microsecond=0)
         delta = (now_bj - slot_dt).total_seconds()
-        if delta < 0 or delta >= 300:
+        if delta < 0 or delta >= 600:
             continue
         slot_key = f"{now_bj.date().isoformat()}:{hour:02d}:{minute:02d}"
         cache_key = (agent_id, slot_key)
@@ -3393,7 +3393,8 @@ def _run_llm_agent_once(
         action = (item.get("action") or "").strip()
         if market != "CN" or not symbol or action not in {"强买信号", "积极建仓", "轻仓试探", "关注等买点"}:
             continue
-        if any((h.get("symbol") or "").upper() == symbol for h in holdings_info):
+        in_holdings = any((h.get("symbol") or "").split(".")[0].upper() == symbol.split(".")[0].upper() for h in holdings_info)
+        if in_holdings and len(candidates) >= 3:
             continue
         candidates.append({
             "symbol": symbol,
@@ -3416,6 +3417,9 @@ def _run_llm_agent_once(
             break
     candidate_symbols = {str(item.get("symbol") or "").upper() for item in candidates}
     held_symbols = {(h.get("symbol") or "").upper() for h in holdings_info}
+    held_symbols_base = {s.split(".")[0] for s in held_symbols}
+    candidate_symbols_base = {s.split(".")[0] for s in candidate_symbols}
+    all_buyable_symbols = candidate_symbols | held_symbols | candidate_symbols_base | held_symbols_base
 
     system_prompt = """你是一个专业的A股交易决策AI。你与规则驱动的Agent A不同，你的核心价值是综合分析多维信息做出更优决策。
 
@@ -3510,6 +3514,8 @@ def _run_llm_agent_once(
         return {"ok": True, "message": "llm_hold"}
 
     if action == "sell" and symbol:
+        symbol_base = symbol.split(".")[0].upper()
+        symbol = next((s for s in held_symbols if s.split(".")[0].upper() == symbol_base), symbol)
         if allow_new_pick:
             _log_agent_pick_event(agent_id, pick_slot_key or "unknown", "llm_sell", symbol=symbol, detail=reason[:50] if reason else None)
         with session_scope() as s:
@@ -3554,19 +3560,21 @@ def _run_llm_agent_once(
 
     if action == "buy" and symbol:
         slot_key = pick_slot_key or "unknown"
-        if symbol not in candidate_symbols and symbol not in held_symbols:
+        symbol_base = symbol.split(".")[0].upper()
+        if symbol_base not in candidate_symbols_base and symbol_base not in held_symbols_base:
             _log_agent_pick_event(agent_id, slot_key, "llm_buy_not_in_candidates", symbol=symbol)
             with session_scope() as s:
                 c = _get_or_create_agent_config(s, agent_id)
                 c.last_status = f"llm_buy_symbol_not_in_candidates:{symbol}"
                 c.updated_at = now
             return {"ok": True, "message": f"symbol_not_in_candidates:{symbol}"}
+        symbol = next((s for s in held_symbols if s.split(".")[0].upper() == symbol_base), symbol)
         with session_scope() as s:
             pos = s.execute(select(PortfolioPosition).where(
                 PortfolioPosition.market == "CN",
                 PortfolioPosition.symbol == symbol,
             )).scalars().first()
-            candidate = next((item for item in candidates if (item.get("symbol") or "").upper() == symbol), None)
+            candidate = next((item for item in candidates if (item.get("symbol") or "").split(".")[0].upper() == symbol_base), None)
             sp = get_stock_price(symbol=symbol, market="CN")
             buy_price = float(getattr(sp, "price", 0) or 0)
             candidate_action = str((candidate or {}).get("action") or "轻仓试探")
