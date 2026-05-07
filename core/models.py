@@ -135,6 +135,7 @@ class PortfolioAutoTrade(Base):
     trigger_price: Mapped[float] = mapped_column(Float)
     quantity: Mapped[float] = mapped_column(Float)
     status: Mapped[str] = mapped_column(String, index=True, default="PENDING")  # PENDING / EXECUTED / CANCELLED
+    source: Mapped[str] = mapped_column(String, default="auto_order")
 
     created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
     executed_at: Mapped[int | None] = mapped_column(Integer, nullable=True)

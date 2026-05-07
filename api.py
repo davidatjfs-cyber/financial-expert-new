@@ -69,8 +69,8 @@ _FEISHU_SENT_ALERTS: dict[str, tuple[float, str]] = {}
 _FEISHU_SENT_TTL = 6 * 3600
 _CN_MARKET_STATE_CACHE: tuple[float, str] = (0.0, "unknown")
 _AGENT_NEW_PICK_SCHEDULE: dict[str, tuple[tuple[int, int], ...]] = {
-    "a": ((9, 30), (12, 0)),
-    "b": ((9, 50), (12, 30)),
+    "a": ((9, 30), (12, 0), (16, 0)),
+    "b": ((9, 50), (12, 30), (16, 20)),
 }
 _AGENT_NEW_PICK_CHECKED: dict[tuple[str, str], bool] = {}
 
@@ -140,17 +140,20 @@ def _claim_agent_new_pick_slot(agent_id: str) -> Optional[str]:
 
 def _log_agent_pick_event(agent_id: str, slot_key: str, event: str, symbol: str | None = None, detail: str | None = None):
     now = int(time.time())
-    with session_scope() as s:
-        s.add(PortfolioAgentPickLog(
-            agent_id=agent_id,
-            slot_key=slot_key,
-            event=event,
-            symbol=symbol,
-            detail=detail,
-            created_at=now,
-        ))
     name_or_sym = symbol or ""
     det = f" detail={detail}" if detail else ""
+    try:
+        with session_scope() as s:
+            s.add(PortfolioAgentPickLog(
+                agent_id=agent_id,
+                slot_key=slot_key,
+                event=event,
+                symbol=symbol,
+                detail=detail,
+                created_at=now,
+            ))
+    except Exception as e:
+        print(f"[AGENT_PICK] persist_failed agent={agent_id} slot={slot_key} event={event} error={e}")
     print(f"[AGENT_PICK] agent={agent_id} slot={slot_key} event={event} symbol={name_or_sym}{det}")
 
 HK_HOLIDAYS_2025 = {
@@ -455,6 +458,7 @@ class PortfolioAutoTradeResponse(BaseModel):
     trigger_price: float
     quantity: float
     status: str
+    source: str = "auto_order"
     created_at: int
     executed_at: Optional[int] = None
     executed_price: Optional[float] = None
@@ -774,7 +778,7 @@ def _send_feishu_trade_notify(position_id: str, side: str, price: float, quantit
         print(f"[FEISHU] trade notify error: {e}")
 
 
-def _create_trade_at_price(position_id: str, side: str, quantity: float, price: float, source: str) -> Optional[PortfolioTradeResponse]:
+def _create_trade_at_price(position_id: str, side: str, quantity: float, price: float, source: str, session=None) -> Optional[PortfolioTradeResponse]:
     side = (side or "").strip().upper()
     if side not in {"BUY", "SELL"}:
         return None
@@ -784,76 +788,75 @@ def _create_trade_at_price(position_id: str, side: str, quantity: float, price: 
         return None
 
     now = int(time.time())
-    with session_scope() as s:
-        p = s.get(PortfolioPosition, position_id)
-        if not p:
+    owns_session = session is None
+    if owns_session:
+        with session_scope() as s:
+            trade = _create_trade_at_price(position_id, side, quantity, price, source, session=s)
+        if trade is not None:
+            _send_feishu_trade_notify(trade.position_id, trade.side, trade.price, trade.quantity, trade.symbol, trade.name, trade.market, trade.source)
+        return trade
+
+    p = session.get(PortfolioPosition, position_id)
+    if not p:
+        return None
+
+    market = (p.market or "CN").strip().upper()
+    symbol = (p.symbol or "").strip().upper()
+    pos_name = (p.name or "").strip() or None
+    old_qty = float(p.quantity or 0.0)
+    old_avg = float(p.avg_cost or 0.0)
+    fee = px * qty * _portfolio_fee_rate(market, side)
+
+    if side == "BUY":
+        new_qty = old_qty + qty
+        new_avg = ((old_qty * old_avg) + (qty * px) + fee) / new_qty if new_qty > 0 else 0.0
+        p.quantity = new_qty
+        p.avg_cost = new_avg
+        exec_qty = qty
+    else:
+        if old_qty <= 0:
             return None
+        exec_qty = min(qty, old_qty)
+        new_qty = max(0.0, old_qty - exec_qty)
+        p.quantity = new_qty
+        if new_qty <= 0:
+            p.avg_cost = 0.0
 
-        market = (p.market or "CN").strip().upper()
-        symbol = (p.symbol or "").strip().upper()
-        pos_name = (p.name or "").strip() or None
-        old_qty = float(p.quantity or 0.0)
-        old_avg = float(p.avg_cost or 0.0)
-        fee = px * qty * _portfolio_fee_rate(market, side)
+    p.updated_at = now
 
-        if side == "BUY":
-            new_qty = old_qty + qty
-            new_avg = ((old_qty * old_avg) + (qty * px) + fee) / new_qty if new_qty > 0 else 0.0
-            p.quantity = new_qty
-            p.avg_cost = new_avg
-            exec_qty = qty
-        else:
-            if old_qty <= 0:
-                return None
-            exec_qty = min(qty, old_qty)
-            new_qty = max(0.0, old_qty - exec_qty)
-            p.quantity = new_qty
-            if new_qty <= 0:
-                p.avg_cost = 0.0
+    trade = PortfolioTrade(
+        position_id=p.id,
+        side=side,
+        price=px,
+        quantity=exec_qty,
+        amount=px * exec_qty,
+        fee=fee * (exec_qty / qty) if qty > 0 else 0.0,
+        source=source,
+        created_at=now,
+    )
+    session.add(trade)
+    session.flush()
 
-        p.updated_at = now
+    if side == "SELL" and float(p.quantity or 0.0) <= 0:
+        session.query(PortfolioAutoTrade).filter(PortfolioAutoTrade.position_id == p.id).update({"status": "CANCELLED"})
 
-        trade = PortfolioTrade(
-            position_id=p.id,
-            side=side,
-            price=px,
-            quantity=exec_qty,
-            amount=px * exec_qty,
-            fee=fee * (exec_qty / qty) if qty > 0 else 0.0,
-            source=source,
-            created_at=now,
-        )
-        s.add(trade)
-        s.flush()
-
-        if side == "SELL" and float(p.quantity or 0.0) <= 0:
-            s.query(PortfolioAutoTrade).filter(PortfolioAutoTrade.position_id == p.id).update({"status": "CANCELLED"})
-
-        _send_feishu_trade_notify(p.id, side, px, exec_qty, symbol, pos_name, market, source)
-        return PortfolioTradeResponse(
-            id=trade.id,
-            position_id=p.id,
-            side=side,
-            price=px,
-            quantity=exec_qty,
-            amount=px * exec_qty,
-            fee=float(trade.fee or 0.0),
-            source=source,
-            symbol=symbol,
-            name=pos_name,
-            market=market,
-            created_at=now,
-        )
+    return PortfolioTradeResponse(
+        id=trade.id,
+        position_id=p.id,
+        side=side,
+        price=px,
+        quantity=exec_qty,
+        amount=px * exec_qty,
+        fee=float(trade.fee or 0.0),
+        source=source,
+        symbol=symbol,
+        name=pos_name,
+        market=market,
+        created_at=now,
+    )
 
 
 def _should_skip_strategy_exec(exec_key: str) -> bool:
-    now = time.time()
-    for key in list(_AUTO_STRATEGY_EXEC_CACHE):
-        if now - _AUTO_STRATEGY_EXEC_CACHE[key] > _AUTO_STRATEGY_EXEC_TTL:
-            del _AUTO_STRATEGY_EXEC_CACHE[key]
-    if exec_key in _AUTO_STRATEGY_EXEC_CACHE:
-        return True
-    _AUTO_STRATEGY_EXEC_CACHE[exec_key] = now
     return False
 
 
@@ -877,8 +880,6 @@ def _execute_strategy_alert_trade(alert: PortfolioAlertResponse, agent_id: str =
         return None
 
     if alert.alert_type in {"target_buy", "strategy_buy_zone", "signal_buy"}:
-        if held_qty > 0:
-            return None
         return _create_trade_at_price(alert.position_id, "BUY", 10000.0, trade_price, _agent_id_to_source(agent_id))
     if held_qty <= 0:
         return None
@@ -2449,6 +2450,93 @@ def _agent_id_to_source(agent_id: str) -> str:
     return f"auto_strategy_{agent_id}"
 
 
+def _queue_auto_trade(session, position_id: str, side: str, trigger_price: float, quantity: float, source: str) -> Optional[PortfolioAutoTradeResponse]:
+    side = (side or "").strip().upper()
+    if side not in {"BUY", "SELL"}:
+        return None
+    trigger = float(trigger_price or 0.0)
+    qty = float(quantity or 0.0)
+    if trigger <= 0 or qty <= 0:
+        return None
+    p = session.get(PortfolioPosition, position_id)
+    if not p:
+        return None
+    existing = session.execute(select(PortfolioAutoTrade).where(
+        PortfolioAutoTrade.position_id == position_id,
+        PortfolioAutoTrade.side == side,
+        PortfolioAutoTrade.status == "PENDING",
+        PortfolioAutoTrade.source == source,
+    )).scalars().first()
+    now = int(time.time())
+    if existing is not None:
+        existing.trigger_price = trigger
+        existing.quantity = qty
+        return PortfolioAutoTradeResponse(
+            id=existing.id,
+            position_id=position_id,
+            side=side,
+            trigger_price=existing.trigger_price,
+            quantity=existing.quantity,
+            status=existing.status,
+            source=existing.source,
+            created_at=existing.created_at,
+            executed_at=existing.executed_at,
+            executed_price=existing.executed_price,
+            symbol=p.symbol,
+            name=p.name,
+            market=p.market,
+        )
+    at = PortfolioAutoTrade(
+        position_id=position_id,
+        side=side,
+        trigger_price=trigger,
+        quantity=qty,
+        status="PENDING",
+        source=source,
+        created_at=now,
+    )
+    session.add(at)
+    session.flush()
+    return PortfolioAutoTradeResponse(
+        id=at.id,
+        position_id=position_id,
+        side=side,
+        trigger_price=at.trigger_price,
+        quantity=at.quantity,
+        status=at.status,
+        source=at.source,
+        created_at=at.created_at,
+        executed_at=at.executed_at,
+        executed_price=at.executed_price,
+        symbol=p.symbol,
+        name=p.name,
+        market=p.market,
+    )
+
+
+def _get_or_create_position_for_symbol(session, market: str, symbol: str, name: str, now: int) -> PortfolioPosition:
+    existing = session.execute(select(PortfolioPosition).where(
+        PortfolioPosition.market == market,
+        PortfolioPosition.symbol == symbol,
+    )).scalars().first()
+    if existing is not None:
+        if name and not (existing.name or "").strip():
+            existing.name = name
+        return existing
+    existing = PortfolioPosition(
+        market=market,
+        symbol=symbol,
+        name=name or symbol,
+        quantity=0.0,
+        avg_cost=0.0,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(existing)
+    session.flush()
+    return existing
+
+
 def _portfolio_fee_rate(market: Optional[str], side: Optional[str]) -> float:
     mkt = (market or "CN").strip().upper() or "CN"
     txn_side = (side or "BUY").strip().upper() or "BUY"
@@ -2947,7 +3035,7 @@ def _compute_agent_period_returns(
     position_map = {p.id: p for p in positions}
     by_position: dict[str, list[PortfolioTrade]] = {}
     for trade in trades:
-        if trade.position_id in managed_position_ids:
+        if trade.position_id in managed_position_ids and (trade.source or "").strip() == agent_source:
             by_position.setdefault(trade.position_id, []).append(trade)
     realized = {"today": 0.0, "week": 0.0, "month": 0.0}
     unrealized = 0.0
@@ -2984,19 +3072,14 @@ def _compute_agent_period_returns(
                 lot["qty"] = lot_qty
                 if lot_qty <= 1e-9:
                     lots.pop(0)
-        live_qty = float(getattr(position_map.get(position_id), "quantity", 0.0) or 0.0)
         current_price = float(pos_prices.get(position_id, 0.0) or 0.0)
-        remaining_cap = live_qty
         for lot in lots:
-            if remaining_cap <= 1e-9:
-                break
             lot_qty = float(lot["qty"])
-            used = min(lot_qty, remaining_cap)
-            if used > 1e-9:
-                cost = used * float(lot["price"])
-                mv = used * current_price
-                unrealized += mv - cost
-                remaining_cap -= used
+            if lot_qty <= 1e-9:
+                continue
+            cost = lot_qty * float(lot["price"])
+            mv = lot_qty * current_price
+            unrealized += mv - cost
     return {
         "today": realized["today"] + unrealized,
         "week": realized["week"] + unrealized,
@@ -3073,18 +3156,31 @@ def _compute_period_returns(
     month_ts = int(now_cn.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp())
 
     bucket_realized = _compute_period_realized_pnl(trades, today_ts, week_ts, month_ts, positions)
+    agent_periods = {
+        "a": _compute_agent_period_returns(trades, positions, pos_prices or {}, "a", today_ts, week_ts, month_ts),
+        "b": _compute_agent_period_returns(trades, positions, pos_prices or {}, "b", today_ts, week_ts, month_ts),
+    }
     unrealized_pnl_by_bucket = {
         "manual": float(summary.manual.unrealized_pnl or 0.0),
-        "a": _compute_agent_position_unrealized_pnl(positions, holdings, pos_prices, "a"),
-        "b": _compute_agent_position_unrealized_pnl(positions, holdings, pos_prices, "b"),
+        "a": float(agent_periods["a"]["unrealized"]),
+        "b": float(agent_periods["b"]["unrealized"]),
     }
     bucket_periods = {
-        bucket: {
-            "today": bucket_realized[bucket]["today"] + unrealized_pnl_by_bucket[bucket],
-            "week": bucket_realized[bucket]["week"] + unrealized_pnl_by_bucket[bucket],
-            "month": bucket_realized[bucket]["month"] + unrealized_pnl_by_bucket[bucket],
-        }
-        for bucket in ("manual", "a", "b")
+        "manual": {
+            "today": bucket_realized["manual"]["today"] + unrealized_pnl_by_bucket["manual"],
+            "week": bucket_realized["manual"]["week"] + unrealized_pnl_by_bucket["manual"],
+            "month": bucket_realized["manual"]["month"] + unrealized_pnl_by_bucket["manual"],
+        },
+        "a": {
+            "today": float(agent_periods["a"]["today"]),
+            "week": float(agent_periods["a"]["week"]),
+            "month": float(agent_periods["a"]["month"]),
+        },
+        "b": {
+            "today": float(agent_periods["b"]["today"]),
+            "week": float(agent_periods["b"]["week"]),
+            "month": float(agent_periods["b"]["month"]),
+        },
     }
     orphan_b_today = _orphan_agent_sell_realized_adjustment(trades, positions, "b", today_ts)
     orphan_b_week = _orphan_agent_sell_realized_adjustment(trades, positions, "b", week_ts)
@@ -3244,7 +3340,7 @@ def _portfolio_agent_candidate_score(item: dict) -> tuple[float, float, float, f
     return action_score, total_score, buy_score, trend_score, rsi_score - rank / 10000.0
 
 
-def _portfolio_agent_pick_candidate(min_buy_quantity: float) -> Optional[tuple[str, str, str, float, str]]:
+def _portfolio_agent_pick_candidates(min_buy_quantity: float, limit: int = 5) -> list[tuple[str, str, str, float, str]]:
     from core.recommend import get_latest_scan, run_scan, save_scan_result
 
     latest = get_latest_scan() or []
@@ -3279,9 +3375,14 @@ def _portfolio_agent_pick_candidate(min_buy_quantity: float) -> Optional[tuple[s
             (market, symbol, name, buy_price, action),
         ))
     if not candidates:
-        return None
+        return []
     candidates.sort(key=lambda item: item[0], reverse=True)
-    return candidates[0][1]
+    return [item[1] for item in candidates[: max(1, min(int(limit or 1), 5))]]
+
+
+def _portfolio_agent_pick_candidate(min_buy_quantity: float) -> Optional[tuple[str, str, str, float, str]]:
+    items = _portfolio_agent_pick_candidates(min_buy_quantity, limit=1)
+    return items[0] if items else None
 
 
 def _agent_b_buy_rejection_reason(candidate: Optional[dict], buy_price: float, available_capital: float, min_qty: float) -> Optional[str]:
@@ -3296,6 +3397,27 @@ def _agent_b_sell_rejection_reason(position_info: Optional[dict], current_price:
     return None
 
 
+def _normalize_llm_actions(decision: dict) -> list[dict]:
+    actions = decision.get("actions")
+    if isinstance(actions, list):
+        result = []
+        for item in actions[:5]:
+            if not isinstance(item, dict):
+                continue
+            result.append({
+                "action": str(item.get("action") or "").strip().lower(),
+                "symbol": str(item.get("symbol") or "").strip().upper(),
+                "reason": str(item.get("reason") or "")[:50],
+            })
+        if result:
+            return result
+    return [{
+        "action": str(decision.get("action") or "").strip().lower(),
+        "symbol": str(decision.get("symbol") or "").strip().upper(),
+        "reason": str(decision.get("reason") or "")[:50],
+    }]
+
+
 def _run_llm_agent_once(
     agent_id: str,
     cfg: "PortfolioAgentConfig",
@@ -3306,6 +3428,7 @@ def _run_llm_agent_once(
     from core.llm_qwen import call_llm
     from core.recommend import get_latest_scan, run_scan, save_scan_result
     now = int(time.time())
+    trading_now = _cn_market_trading_now()
     capital = float(cfg.capital or 10000000.0)
     target_return_pct = float(cfg.target_profit or 0.0)
 
@@ -3393,9 +3516,6 @@ def _run_llm_agent_once(
         action = (item.get("action") or "").strip()
         if market != "CN" or not symbol or action not in {"强买信号", "积极建仓", "轻仓试探", "关注等买点"}:
             continue
-        in_holdings = any((h.get("symbol") or "").split(".")[0].upper() == symbol.split(".")[0].upper() for h in holdings_info)
-        if in_holdings and len(candidates) >= 3:
-            continue
         candidates.append({
             "symbol": symbol,
             "name": (item.get("name") or symbol).strip(),
@@ -3418,13 +3538,11 @@ def _run_llm_agent_once(
     candidate_symbols = {str(item.get("symbol") or "").upper() for item in candidates}
     held_symbols = {(h.get("symbol") or "").upper() for h in holdings_info}
     held_symbols_base = {s.split(".")[0] for s in held_symbols}
-    candidate_symbols_base = {s.split(".")[0] for s in candidate_symbols}
-    all_buyable_symbols = candidate_symbols | held_symbols | candidate_symbols_base | held_symbols_base
 
     system_prompt = """你是一个专业的A股交易决策AI。你与规则驱动的Agent A不同，你的核心价值是综合分析多维信息做出更优决策。
 
-你的决策框架：
-1. 只能操作A股(CN市场)，每次只做一个决策
+    你的决策框架：
+    1. 只能操作A股(CN市场)，每次最多做5个决策
 2. 卖出优先于买入
 3. 买入新股票时，symbol必须来自候选股列表
 4. 已持有股票可以加仓
@@ -3436,10 +3554,11 @@ def _run_llm_agent_once(
 - 时机判断：综合考虑多指标共振情况（如MACD金叉+RSI低位+价格在买入区=强买点），而非看单一指标
 - 仓位管理：考虑当前持仓集中度，避免过度集中单一股票；考虑资金使用效率，避免资金长期闲置
 
-决策输出格式（严格遵守）：
-{"action": "sell"|"buy"|"hold", "symbol": "股票代码(如600036)", "reason": "简短理由(20字内)"}
+    决策输出格式（严格遵守）：
+    单个动作：{"action": "sell"|"buy"|"hold", "symbol": "股票代码(如600036)", "reason": "简短理由(20字内)"}
+    多个动作：{"actions": [{"action": "sell"|"buy"|"hold", "symbol": "股票代码(如600036)", "reason": "简短理由(20字内)"}]}
 
-如果action是hold，symbol填null。"""
+    如果action是hold，symbol填null。动作总数最多5个。"""
 
     user_prompt = f"""当前时间：{time.strftime('%Y-%m-%d %H:%M', time.localtime(now))} 北京时间
 
@@ -3499,140 +3618,164 @@ def _run_llm_agent_once(
             c.updated_at = now
         return {"ok": True, "message": f"llm_parse_error"}
 
-    action = (decision.get("action") or "").strip().lower()
-    symbol = (decision.get("symbol") or "").strip().upper()
-    reason = (decision.get("reason") or "")[:50]
+    actions = _normalize_llm_actions(decision)
+    executed_trades: list[dict] = []
+    committed_trades: list[PortfolioTradeResponse] = []
+    queued_orders: list[dict] = []
+    post_commit_events: list[tuple[str, str, str | None]] = []
+    last_status = "llm_hold"
+    last_action = "hold"
+    for item in actions[:5]:
+        action = item.get("action") or ""
+        symbol = item.get("symbol") or ""
+        reason = item.get("reason") or ""
 
-    if action == "hold" or not action:
-        if allow_new_pick:
-            _log_agent_pick_event(agent_id, pick_slot_key or "unknown", "llm_hold", symbol=None, detail=reason[:50] if reason else None)
-        with session_scope() as s:
-            c = _get_or_create_agent_config(s, agent_id)
-            c.last_action = "hold"
-            c.last_status = f"llm_hold:{reason}"
-            c.updated_at = now
-        return {"ok": True, "message": "llm_hold"}
+        if action == "hold" or not action:
+            last_status = f"llm_hold:{reason}"
+            last_action = "hold"
+            continue
 
-    if action == "sell" and symbol:
-        symbol_base = symbol.split(".")[0].upper()
-        symbol = next((s for s in held_symbols if s.split(".")[0].upper() == symbol_base), symbol)
-        if allow_new_pick:
-            _log_agent_pick_event(agent_id, pick_slot_key or "unknown", "llm_sell", symbol=symbol, detail=reason[:50] if reason else None)
-        with session_scope() as s:
-            pos = next((
-                p for p in s.execute(select(PortfolioPosition).where(
+        if action == "sell" and symbol:
+            if not trading_now:
+                last_status = f"llm_sell_market_closed:{symbol}"
+                continue
+            symbol_base = symbol.split(".")[0].upper()
+            symbol = next((s for s in held_symbols if s.split(".")[0].upper() == symbol_base), symbol)
+            if allow_new_pick:
+                _log_agent_pick_event(agent_id, pick_slot_key or "unknown", "llm_sell", symbol=symbol, detail=reason[:50] if reason else None)
+            committed_trade: Optional[PortfolioTradeResponse] = None
+            with session_scope() as s:
+                pos = next((
+                    p for p in s.execute(select(PortfolioPosition).where(
+                        PortfolioPosition.market == "CN",
+                        PortfolioPosition.symbol == symbol,
+                    )).scalars().all()
+                    if float(agent_position_qty.get(p.id, 0.0) or 0.0) > 0
+                ), None)
+                if pos is None:
+                    last_status = f"llm_sell_no_position:{symbol}"
+                    continue
+                qty = float(agent_position_qty.get(pos.id, 0.0) or 0.0)
+                sp = get_stock_price(symbol=symbol, market="CN")
+                sell_price = float(getattr(sp, "price", 0) or 0)
+                if sell_price <= 0:
+                    last_status = f"llm_sell_no_price:{symbol}"
+                    continue
+                trade = _create_trade_at_price(pos.id, "SELL", qty, sell_price, _agent_id_to_source(agent_id), session=s)
+                committed_trade = trade
+                if trade is not None:
+                    executed_trades.append(trade.model_dump())
+                    last_action = f"SELL:{symbol}:{qty}@{sell_price:.2f}"
+                    last_status = f"llm_executed_sell:{reason}"
+                    agent_position_qty[pos.id] = 0.0
+                else:
+                    last_status = f"llm_sell_trade_failed:{symbol}"
+            if committed_trade is not None:
+                committed_trades.append(committed_trade)
+                continue
+            last_status = f"llm_sell_trade_failed:{symbol}"
+            continue
+
+        if action == "buy" and symbol:
+            if not allow_new_pick:
+                last_status = f"llm_buy_outside_pick_slot:{symbol}"
+                continue
+            slot_key = pick_slot_key or "unknown"
+            symbol_base = symbol.split(".")[0].upper()
+            held_symbol = next((s for s in held_symbols if s.split(".")[0].upper() == symbol_base), None)
+            if held_symbol is not None:
+                symbol = held_symbol
+            committed_trade: Optional[PortfolioTradeResponse] = None
+            queued_order: Optional[PortfolioAutoTradeResponse] = None
+            with session_scope() as s:
+                candidate = next((cand for cand in candidates if (cand.get("symbol") or "").split(".")[0].upper() == symbol_base), None)
+                if candidate is not None:
+                    symbol = str(candidate.get("symbol") or symbol).strip().upper() or symbol
+                pos = s.execute(select(PortfolioPosition).where(
                     PortfolioPosition.market == "CN",
                     PortfolioPosition.symbol == symbol,
-                )).scalars().all()
-                if float(agent_position_qty.get(p.id, 0.0) or 0.0) > 0
-            ), None)
-            if pos is None:
-                c = _get_or_create_agent_config(s, agent_id)
-                c.last_status = f"llm_sell_no_position:{symbol}"
-                c.updated_at = now
-                return {"ok": True, "message": f"no_position:{symbol}"}
-            qty = float(agent_position_qty.get(pos.id, 0.0) or 0.0)
-            sp = get_stock_price(symbol=symbol, market="CN")
-            sell_price = float(getattr(sp, "price", 0) or 0)
-            if sell_price <= 0:
-                c = _get_or_create_agent_config(s, agent_id)
-                c.last_status = f"llm_sell_no_price:{symbol}"
-                c.updated_at = now
-                return {"ok": True, "message": f"no_price:{symbol}"}
-            position_info = next((item for item in holdings_info if (item.get("symbol") or "").upper() == symbol), None)
-            sell_rejection = _agent_b_sell_rejection_reason(position_info, sell_price, sell_alert_types_by_symbol.get(symbol, set()))
-            if sell_rejection is not None:
-                c = _get_or_create_agent_config(s, agent_id)
-                c.last_status = f"llm_sell_rejected:{sell_rejection}:{symbol}"
-                c.updated_at = now
-                return {"ok": True, "message": f"sell_rejected:{sell_rejection}"}
-            trade = _create_trade_at_price(pos.id, "SELL", qty, sell_price, _agent_id_to_source(agent_id))
-            if trade is not None:
-                c = _get_or_create_agent_config(s, agent_id)
-                c.last_action = f"SELL:{symbol}:{qty}@{sell_price:.2f}"
-                c.last_status = f"llm_executed_sell:{reason}"
-                c.updated_at = now
-                return {"ok": True, "message": "llm_trade_executed", "trade": trade.model_dump()}
-            c = _get_or_create_agent_config(s, agent_id)
-            c.last_status = f"llm_sell_trade_failed:{symbol}"
-            c.updated_at = now
-            return {"ok": True, "message": "trade_failed"}
-
-    if action == "buy" and symbol:
-        slot_key = pick_slot_key or "unknown"
-        symbol_base = symbol.split(".")[0].upper()
-        if symbol_base not in candidate_symbols_base and symbol_base not in held_symbols_base:
-            _log_agent_pick_event(agent_id, slot_key, "llm_buy_not_in_candidates", symbol=symbol)
-            with session_scope() as s:
-                c = _get_or_create_agent_config(s, agent_id)
-                c.last_status = f"llm_buy_symbol_not_in_candidates:{symbol}"
-                c.updated_at = now
-            return {"ok": True, "message": f"symbol_not_in_candidates:{symbol}"}
-        symbol = next((s for s in held_symbols if s.split(".")[0].upper() == symbol_base), symbol)
-        with session_scope() as s:
-            pos = s.execute(select(PortfolioPosition).where(
-                PortfolioPosition.market == "CN",
-                PortfolioPosition.symbol == symbol,
-            )).scalars().first()
-            candidate = next((item for item in candidates if (item.get("symbol") or "").split(".")[0].upper() == symbol_base), None)
-            sp = get_stock_price(symbol=symbol, market="CN")
-            buy_price = float(getattr(sp, "price", 0) or 0)
-            candidate_action = str((candidate or {}).get("action") or "轻仓试探")
-            if buy_price <= 0:
-                c = _get_or_create_agent_config(s, agent_id)
-                c.last_status = f"llm_buy_no_price:{symbol}"
-                c.updated_at = now
-                if pos is not None and float(pos.quantity or 0) <= 0 and float(agent_position_qty.get(pos.id, 0.0) or 0.0) <= 0:
-                    s.delete(pos)
-                return {"ok": True, "message": f"no_price:{symbol}"}
-            min_qty = float(cfg.min_buy_quantity or 10000.0)
-            buy_rejection = _agent_b_buy_rejection_reason(candidate, buy_price, available_capital, min_qty)
-            if buy_rejection is not None:
-                _log_agent_pick_event(agent_id, slot_key, "llm_buy_rejected", symbol=symbol, detail=buy_rejection)
-                c = _get_or_create_agent_config(s, agent_id)
-                c.last_status = f"llm_buy_rejected:{buy_rejection}:{symbol}"
-                c.updated_at = now
-                if pos is not None and float(pos.quantity or 0) <= 0 and float(agent_position_qty.get(pos.id, 0.0) or 0.0) <= 0:
-                    s.delete(pos)
-                return {"ok": True, "message": f"buy_rejected:{buy_rejection}"}
-            name = ""
-            if pos is not None:
-                name = (pos.name or "").strip()
-            if pos is None:
-                pos = PortfolioPosition(
-                    market="CN", symbol=symbol, name=name or symbol,
-                    quantity=0.0, avg_cost=0.0, created_at=now, updated_at=now,
+                )).scalars().first()
+                sp = get_stock_price(symbol=symbol, market="CN")
+                buy_price = float(getattr(sp, "price", 0) or 0)
+                candidate_action = str((candidate or {}).get("action") or "轻仓试探")
+                if buy_price <= 0:
+                    last_status = f"llm_buy_no_price:{symbol}"
+                    continue
+                min_qty = float(cfg.min_buy_quantity or 10000.0)
+                buy_rejection = _agent_b_buy_rejection_reason(candidate, buy_price, available_capital, min_qty)
+                if buy_rejection is not None:
+                    _log_agent_pick_event(agent_id, slot_key, "llm_buy_rejected", symbol=symbol, detail=buy_rejection)
+                    last_status = f"llm_buy_rejected:{buy_rejection}:{symbol}"
+                    continue
+                name = (pos.name or "").strip() if pos is not None else ""
+                if pos is None:
+                    pos = PortfolioPosition(
+                        market="CN", symbol=symbol, name=name or symbol,
+                        quantity=0.0, avg_cost=0.0, created_at=now, updated_at=now,
+                    )
+                    s.add(pos)
+                    s.flush()
+                qty = _agent_dynamic_buy_quantity(
+                    min_qty,
+                    cfg.target_profit,
+                    cfg.deadline_ts,
+                    managed_net_pnl,
+                    candidate_action,
+                    available_capital,
                 )
-                s.add(pos)
-                s.flush()
-            qty = _agent_dynamic_buy_quantity(
-                min_qty,
-                cfg.target_profit,
-                cfg.deadline_ts,
-                managed_net_pnl,
-                candidate_action,
-                available_capital,
-            )
-            trade = _create_trade_at_price(pos.id, "BUY", qty, buy_price, _agent_id_to_source(agent_id))
-            if trade is not None:
-                _log_agent_pick_event(agent_id, slot_key, "llm_buy_executed", symbol=symbol,
-                                       detail=f"qty={qty}@{buy_price:.2f} reason={reason}")
-                c = _get_or_create_agent_config(s, agent_id)
-                c.last_action = f"BUY:{symbol}:{qty}@{buy_price:.2f}"
-                c.last_status = f"llm_executed_buy:{reason}"
-                c.updated_at = now
-                return {"ok": True, "message": "llm_trade_executed", "trade": trade.model_dump()}
-            c = _get_or_create_agent_config(s, agent_id)
-            c.last_status = f"llm_buy_trade_failed:{symbol}"
-            _log_agent_pick_event(agent_id, slot_key, "llm_buy_trade_failed", symbol=symbol)
-            c.updated_at = now
-            return {"ok": True, "message": "trade_failed"}
+                if trading_now:
+                    trade = _create_trade_at_price(pos.id, "BUY", qty, buy_price, _agent_id_to_source(agent_id), session=s)
+                    committed_trade = trade
+                    if trade is not None:
+                        post_commit_events.append(("llm_buy_executed", symbol, f"qty={qty}@{buy_price:.2f} reason={reason}"))
+                        executed_trades.append(trade.model_dump())
+                        last_action = f"BUY:{symbol}:{qty}@{buy_price:.2f}"
+                        last_status = f"llm_executed_buy:{reason}"
+                        available_capital = max(0.0, available_capital - qty * buy_price)
+                        held_symbols.add(symbol)
+                        held_symbols_base.add(symbol_base)
+                    else:
+                        post_commit_events.append(("llm_buy_trade_failed", symbol, None))
+                        last_status = f"llm_buy_trade_failed:{symbol}"
+                else:
+                    pos = pos or _get_or_create_position_for_symbol(s, "CN", symbol, str((candidate or {}).get("name") or symbol), now)
+                    queued_order = _queue_auto_trade(s, pos.id, "BUY", buy_price, qty, _agent_id_to_source(agent_id))
+                    if queued_order is not None:
+                        post_commit_events.append(("llm_buy_queued", symbol, f"qty={qty}@<= {buy_price:.2f} reason={reason}"))
+                        queued_orders.append(queued_order.model_dump())
+                        last_action = f"QUEUE_BUY:{symbol}:{qty}@{buy_price:.2f}"
+                        last_status = f"llm_queued_buy:{reason}"
+                        available_capital = max(0.0, available_capital - qty * buy_price)
+                        held_symbols.add(symbol)
+                        held_symbols_base.add(symbol_base)
+                    else:
+                        post_commit_events.append(("llm_buy_queue_failed", symbol, None))
+                        last_status = f"llm_buy_queue_failed:{symbol}"
+            if committed_trade is not None:
+                committed_trades.append(committed_trade)
+                continue
+            if queued_order is not None:
+                continue
+            last_status = f"llm_buy_trade_failed:{symbol}"
+            continue
 
+        last_status = f"llm_unknown_action:{action}"
+
+    result_message = last_status.split(":", 1)[0] if last_status else "llm_hold"
     with session_scope() as s:
         c = _get_or_create_agent_config(s, agent_id)
-        c.last_status = f"llm_unknown_action:{action}"
+        c.last_action = last_action
+        c.last_status = last_status
         c.updated_at = now
-    return {"ok": True, "message": f"unknown_action:{action}"}
+    for event, symbol, detail in post_commit_events:
+        _log_agent_pick_event(agent_id, pick_slot_key or "unknown", event, symbol=symbol, detail=detail)
+    for trade in committed_trades:
+        _send_feishu_trade_notify(trade.position_id, trade.side, trade.price, trade.quantity, trade.symbol, trade.name, trade.market, trade.source)
+    if executed_trades:
+        return {"ok": True, "message": "llm_trade_executed", "trades": executed_trades}
+    if queued_orders:
+        return {"ok": True, "message": "llm_trade_queued", "orders": queued_orders}
+    return {"ok": True, "message": result_message}
 
 
 def _agent_id_to_bucket(agent_id: str) -> str:
@@ -3671,6 +3814,7 @@ def _run_portfolio_agent_once(
         return _run_llm_agent_once(agent_id, cfg, allow_new_pick=allow_new_pick, pick_slot_key=pick_slot_key, precomputed_alerts=precomputed_alerts)
 
     summary = get_portfolio_summary()
+    capital = 10000000.0
     with session_scope() as s:
         cfg = _get_or_create_agent_config(s, agent_id)
         capital = float(cfg.capital or 10000000.0)
@@ -3742,77 +3886,105 @@ def _run_portfolio_agent_once(
             cfg.updated_at = now
         return {"ok": True, "message": "no_action"}
 
+    queued_orders: list[dict] = []
+    candidates = []
     slot_key = pick_slot_key or "unknown"
-    _log_agent_pick_event(agent_id, slot_key, "slot_entered")
     with session_scope() as s:
         cfg = _get_or_create_agent_config(s, agent_id)
-        candidate = _portfolio_agent_pick_candidate(float(cfg.min_buy_quantity or 10000.0))
-        if not candidate:
+        min_buy_quantity = float(cfg.min_buy_quantity or 10000.0)
+    _log_agent_pick_event(agent_id, slot_key, "slot_entered")
+    candidates = _portfolio_agent_pick_candidates(min_buy_quantity, limit=5)
+    committed_trades: list[PortfolioTradeResponse] = []
+    post_commit_events: list[tuple[str, str | None, str | None]] = []
+    result: Optional[dict] = None
+    with session_scope() as s:
+        cfg = _get_or_create_agent_config(s, agent_id)
+        if not candidates:
             if executed_trade is not None:
                 _log_agent_pick_event(agent_id, slot_key, "no_candidate", detail="alert_trade_executed")
-                return {"ok": True, "message": "trade_executed", "trade": executed_trade.model_dump()}
-            _log_agent_pick_event(agent_id, slot_key, "no_candidate")
-            cfg.last_status = "no_candidate"
-            cfg.updated_at = now
-            return {"ok": True, "message": "no_candidate"}
-        market, symbol, name, buy_price, action = candidate
-        existing = s.execute(select(PortfolioPosition).where(
-            PortfolioPosition.market == market,
-            PortfolioPosition.symbol == symbol,
-        )).scalars().first()
-        if existing is not None and float(existing.quantity or 0.0) > 0:
-            if executed_trade is not None:
-                _log_agent_pick_event(agent_id, slot_key, "candidate_already_held", symbol=symbol, detail="alert_trade_executed")
-                return {"ok": True, "message": "trade_executed", "trade": executed_trade.model_dump()}
-            _log_agent_pick_event(agent_id, slot_key, "candidate_already_held", symbol=symbol)
-            cfg.last_status = "candidate_already_held"
-            cfg.updated_at = now
-            return {"ok": True, "message": "candidate_already_held"}
-        if existing is None:
-            existing = PortfolioPosition(
-                market=market,
-                symbol=symbol,
-                name=name,
-                quantity=0.0,
-                avg_cost=0.0,
-                created_at=now,
-                updated_at=now,
-            )
-            s.add(existing)
-            s.flush()
-        managed_capital, _, _, managed_net_pnl = _compute_agent_managed_financials(
-            s.execute(select(PortfolioTrade)).scalars().all(),
-            s.execute(select(PortfolioPosition)).scalars().all(),
-            agent_id,
-            capital,
-        )
-        agent_holdings_mv = float(summary.agent_a.total_market_value or 0) + float(summary.agent_b.total_market_value or 0)
-        available_capital = capital - agent_holdings_mv
-        dynamic_qty = _agent_dynamic_buy_quantity(
-            float(cfg.min_buy_quantity or 10000.0),
-            cfg.target_profit,
-            cfg.deadline_ts,
-            managed_net_pnl,
-            action,
-            available_capital,
-        )
-        trade = _create_trade_at_price(existing.id, "BUY", dynamic_qty, buy_price, _agent_id_to_source(agent_id))
-        if trade is not None:
-            _log_agent_pick_event(agent_id, slot_key, "picked_new_stock", symbol=symbol,
-                                   detail=f"qty={trade.quantity}@{trade.price:.2f} action={action}")
-            cfg.last_action = f"BUY:{symbol}:{trade.quantity}@{trade.price:.2f}"
-            cfg.last_status = "picked_new_stock"
-            cfg.updated_at = now
-            return {"ok": True, "message": "picked_new_stock", "trade": trade.model_dump()}
-        if existing is not None and float(existing.quantity or 0.0) <= 0:
-            s.delete(existing)
-        if executed_trade is not None:
-            return {"ok": True, "message": "trade_executed", "trade": executed_trade.model_dump()}
-        _log_agent_pick_event(agent_id, slot_key, "candidate_trade_failed", symbol=symbol,
-                               detail=f"qty={dynamic_qty} buy_price={buy_price:.2f}")
-        cfg.last_status = "candidate_trade_skipped"
-        cfg.updated_at = now
-        return {"ok": True, "message": "candidate_trade_skipped"}
+                result = {"ok": True, "message": "trade_executed", "trade": executed_trade.model_dump()}
+            else:
+                _log_agent_pick_event(agent_id, slot_key, "no_candidate")
+                cfg.last_status = "no_candidate"
+                cfg.updated_at = now
+                result = {"ok": True, "message": "no_candidate"}
+        else:
+            picked_trades: list[dict] = []
+            agent_holdings_mv = float(summary.agent_a.total_market_value or 0) + float(summary.agent_b.total_market_value or 0)
+            available_capital = capital - agent_holdings_mv
+            for market, symbol, name, buy_price, action in candidates[:5]:
+                existing = s.execute(select(PortfolioPosition).where(
+                    PortfolioPosition.market == market,
+                    PortfolioPosition.symbol == symbol,
+                )).scalars().first()
+                if existing is None:
+                    existing = PortfolioPosition(
+                        market=market,
+                        symbol=symbol,
+                        name=name,
+                        quantity=0.0,
+                        avg_cost=0.0,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    s.add(existing)
+                    s.flush()
+                managed_capital, _, _, managed_net_pnl = _compute_agent_managed_financials(
+                    s.execute(select(PortfolioTrade)).scalars().all(),
+                    s.execute(select(PortfolioPosition)).scalars().all(),
+                    agent_id,
+                    capital,
+                )
+                dynamic_qty = _agent_dynamic_buy_quantity(
+                    float(cfg.min_buy_quantity or 10000.0),
+                    cfg.target_profit,
+                    cfg.deadline_ts,
+                    managed_net_pnl,
+                    action,
+                    available_capital,
+                )
+                if trading_now:
+                    trade = _create_trade_at_price(existing.id, "BUY", dynamic_qty, buy_price, _agent_id_to_source(agent_id), session=s)
+                    if trade is None:
+                        if existing is not None and float(existing.quantity or 0.0) <= 0:
+                            s.delete(existing)
+                        continue
+                    committed_trades.append(trade)
+                    picked_trades.append(trade.model_dump())
+                    available_capital = max(0.0, available_capital - float(trade.amount or 0.0))
+                    post_commit_events.append(("picked_new_stock", symbol, f"qty={trade.quantity}@{trade.price:.2f} action={action}"))
+                else:
+                    queued = _queue_auto_trade(s, existing.id, "BUY", buy_price, dynamic_qty, _agent_id_to_source(agent_id))
+                    if queued is None:
+                        if existing is not None and float(existing.quantity or 0.0) <= 0:
+                            s.delete(existing)
+                        continue
+                    queued_orders.append(queued.model_dump())
+                    available_capital = max(0.0, available_capital - dynamic_qty * buy_price)
+                    post_commit_events.append(("queued_new_stock", symbol, f"qty={dynamic_qty}@<= {buy_price:.2f} action={action}"))
+            if picked_trades:
+                last_trade = picked_trades[-1]
+                cfg.last_action = f"BUY:{last_trade['symbol']}:{last_trade['quantity']}@{last_trade['price']:.2f}"
+                cfg.last_status = f"picked_new_stock:{len(picked_trades)}"
+                cfg.updated_at = now
+                result = {"ok": True, "message": "picked_new_stock", "trades": picked_trades}
+            elif queued_orders:
+                cfg.last_action = f"QUEUE_BUY:{queued_orders[-1]['symbol']}:{queued_orders[-1]['quantity']}@{queued_orders[-1]['trigger_price']:.2f}"
+                cfg.last_status = f"queued_new_stock:{len(queued_orders)}"
+                cfg.updated_at = now
+                result = {"ok": True, "message": "queued_new_stock", "orders": queued_orders}
+            elif executed_trade is not None:
+                result = {"ok": True, "message": "trade_executed", "trade": executed_trade.model_dump()}
+            else:
+                post_commit_events.append(("candidate_trade_failed", None, None))
+                cfg.last_status = "candidate_trade_skipped"
+                cfg.updated_at = now
+                result = {"ok": True, "message": "candidate_trade_skipped"}
+    for event, symbol, detail in post_commit_events:
+        _log_agent_pick_event(agent_id, slot_key, event, symbol=symbol, detail=detail)
+    for trade in committed_trades:
+        _send_feishu_trade_notify(trade.position_id, trade.side, trade.price, trade.quantity, trade.symbol, trade.name, trade.market, trade.source)
+    return result or {"ok": True, "message": "candidate_trade_skipped"}
 
 
 @app.get("/api/portfolio/agent/config", response_model=PortfolioAgentConfigResponse)
@@ -4004,6 +4176,7 @@ def create_auto_trade(req: PortfolioAutoTradeRequest):
             trigger_price=req.trigger_price,
             quantity=req.quantity,
             status="PENDING",
+            source="auto_order",
             created_at=now,
         )
         s.add(at)
@@ -4011,7 +4184,7 @@ def create_auto_trade(req: PortfolioAutoTradeRequest):
         return PortfolioAutoTradeResponse(
             id=at.id, position_id=p.id, side=side,
             trigger_price=req.trigger_price, quantity=req.quantity,
-            status="PENDING", created_at=now,
+            status="PENDING", source=at.source, created_at=now,
             symbol=p.symbol, name=p.name, market=p.market,
         )
 
@@ -4029,7 +4202,7 @@ def list_auto_trades():
             result.append(PortfolioAutoTradeResponse(
                 id=at.id, position_id=at.position_id, side=at.side,
                 trigger_price=at.trigger_price, quantity=at.quantity,
-                status=at.status, created_at=at.created_at,
+                status=at.status, source=(at.source or "auto_order"), created_at=at.created_at,
                 executed_at=at.executed_at, executed_price=at.executed_price,
                 symbol=p.symbol, name=p.name, market=p.market,
             ))
@@ -4132,7 +4305,7 @@ def _execute_auto_trade(at_id: str):
                 quantity=actual_qty if at.side == "SELL" else qty,
                 amount=exec_price * (actual_qty if at.side == "SELL" else qty),
                 fee=trade_fee * ((actual_qty if at.side == "SELL" else qty) / qty) if qty > 0 else 0.0,
-                source="auto_order",
+                source=(at.source or "auto_order"),
                 created_at=now,
             )
             s.add(trade)
@@ -4144,7 +4317,7 @@ def _execute_auto_trade(at_id: str):
             pos_name = (p.name or "").strip() or None
             _send_feishu_trade_notify(p.id, at.side, exec_price,
                 actual_qty if at.side == "SELL" else qty,
-                symbol, pos_name, market, "auto_order")
+                symbol, pos_name, market, (at.source or "auto_order"))
 
             # Mark position as closed (quantity=0) instead of deleting — preserves trade history
             if at.side == "SELL" and new_qty <= 0:
@@ -4157,6 +4330,64 @@ def _execute_auto_trade(at_id: str):
     except Exception as e:
         import logging
         logging.getLogger("auto_trade").error(f"Auto-trade error: {e}")
+
+
+def _execute_live_auto_trade(at_id: str):
+    import logging
+    log = logging.getLogger("auto_trade")
+    committed_trade: Optional[PortfolioTradeResponse] = None
+    try:
+        with session_scope() as s:
+            at = s.get(PortfolioAutoTrade, at_id)
+            if not at or at.status != "PENDING":
+                return
+            p = s.get(PortfolioPosition, at.position_id)
+            if not p:
+                at.status = "CANCELLED"
+                return
+            market = (p.market or "CN").strip().upper()
+            symbol = (p.symbol or "").strip().upper()
+            sp = get_stock_price(symbol=symbol, market=market)
+            current_price = float(getattr(sp, "price", 0) or 0.0)
+            trigger_price = float(at.trigger_price or 0.0)
+            if current_price <= 0 or trigger_price <= 0:
+                return
+            triggered = False
+            if (at.side or "").strip().upper() == "BUY":
+                triggered = current_price <= trigger_price
+            elif (at.side or "").strip().upper() == "SELL":
+                triggered = current_price >= trigger_price
+            if not triggered:
+                return
+            qty = float(at.quantity or 0.0)
+            committed_trade = _create_trade_at_price(p.id, at.side, qty, current_price, at.source or "auto_order", session=s)
+            if committed_trade is None:
+                return
+            now = int(time.time())
+            at.status = "EXECUTED"
+            at.executed_at = now
+            at.executed_price = current_price
+        if committed_trade is not None:
+            _send_feishu_trade_notify(committed_trade.position_id, committed_trade.side, committed_trade.price, committed_trade.quantity, committed_trade.symbol, committed_trade.name, committed_trade.market, committed_trade.source)
+            log.info(f"Live auto-trade executed: {committed_trade.side} {committed_trade.quantity} of {committed_trade.symbol} @ {committed_trade.price}")
+    except Exception as e:
+        log.error(f"Live auto-trade error: {e}")
+
+
+def _process_live_auto_trades(market: str = "CN"):
+    if market == "CN" and not _cn_market_trading_now():
+        return
+    with session_scope() as s:
+        pending = s.execute(
+            select(PortfolioAutoTrade)
+            .join(PortfolioPosition, PortfolioAutoTrade.position_id == PortfolioPosition.id)
+            .where(PortfolioAutoTrade.status == "PENDING")
+            .where(PortfolioPosition.market == market)
+            .where(PortfolioAutoTrade.source.like("auto_strategy_%"))
+        ).scalars().all()
+        pending_ids = [at.id for at in pending]
+    for at_id in pending_ids:
+        _execute_live_auto_trade(at_id)
 
 
 # ── Market-aware auto-trade scheduler ──────────────────────────────────
@@ -4235,6 +4466,7 @@ def _auto_trade_checker():
                         .join(PortfolioPosition, PortfolioAutoTrade.position_id == PortfolioPosition.id)
                         .where(PortfolioAutoTrade.status == "PENDING")
                         .where(PortfolioPosition.market == mkt)
+                        .where(~PortfolioAutoTrade.source.like("auto_strategy_%"))
                     ).scalars().all()
                     at_ids = [at.id for at in pending]
 
@@ -4324,6 +4556,7 @@ def _portfolio_feishu_notifier():
         try:
             print(f"[FEISHU] checking portfolio alerts and agents...")
             alerts = get_portfolio_alerts()
+            _process_live_auto_trades("CN")
             slot_a = _claim_agent_new_pick_slot("a")
             slot_b = _claim_agent_new_pick_slot("b")
             _run_portfolio_agent_once("a", allow_new_pick=slot_a is not None, pick_slot_key=slot_a, precomputed_alerts=alerts)

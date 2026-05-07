@@ -30,10 +30,17 @@ if _db_url:
         _db_url = "postgresql://" + _db_url[len("postgres://"):]
     _engine = create_engine(_db_url)
 else:
+    def _set_sqlite_pragma(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=10000")
+        cursor.close()
     _engine = create_engine(
         f"sqlite:///{get_db_path().as_posix()}",
         connect_args={"check_same_thread": False},
     )
+    from sqlalchemy import event
+    event.listen(_engine, "connect", _set_sqlite_pragma)
 _SessionLocal = sessionmaker(bind=_engine, autocommit=False, autoflush=False, expire_on_commit=False)
 
 

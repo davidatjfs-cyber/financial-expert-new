@@ -26,6 +26,14 @@ def _ensure_portfolio_schema() -> None:
         pass
 
     try:
+        auto_trade_columns = {c["name"] for c in inspector.get_columns("portfolio_auto_trades")}
+        if "source" not in auto_trade_columns:
+            with _engine.begin() as conn:
+                conn.execute(text("ALTER TABLE portfolio_auto_trades ADD COLUMN source VARCHAR DEFAULT 'auto_order'"))
+    except Exception:
+        pass
+
+    try:
         cfg_columns = {c["name"] for c in inspector.get_columns("portfolio_agent_configs")}
         if "capital" not in cfg_columns:
             with _engine.begin() as conn:
