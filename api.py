@@ -67,6 +67,11 @@ _SPOT_CACHE: dict[str, tuple[float, "pd.DataFrame"]] = {}
 _FEISHU_SENT_ALERTS: dict[str, tuple[float, str]] = {}
 _FEISHU_SENT_TTL = 6 * 3600
 _CN_MARKET_STATE_CACHE: tuple[float, str] = (0.0, "unknown")
+_AGENT_NEW_PICK_SCHEDULE: dict[str, tuple[tuple[int, int], ...]] = {
+    "a": ((9, 30), (12, 0)),
+    "b": ((9, 50), (12, 30)),
+}
+_AGENT_NEW_PICK_CHECKED: dict[tuple[str, str], bool] = {}
 
 
 def _cn_market_closed() -> bool:
@@ -108,6 +113,28 @@ def _cn_market_trading_now() -> bool:
     morning = _dt.time(9, 30) <= now_bj <= _dt.time(11, 30)
     afternoon = _dt.time(13, 0) <= now_bj <= _dt.time(15, 0)
     return morning or afternoon
+
+
+def _claim_agent_new_pick_slot(agent_id: str) -> Optional[str]:
+    if _cn_market_closed():
+        return None
+    now_bj = _dt.datetime.now(_ZoneInfo("Asia/Shanghai"))
+    for hour, minute in _AGENT_NEW_PICK_SCHEDULE.get(agent_id, ()):
+        slot_dt = now_bj.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        delta = (now_bj - slot_dt).total_seconds()
+        if delta < 0 or delta >= 300:
+            continue
+        slot_key = f"{now_bj.date().isoformat()}:{hour:02d}:{minute:02d}"
+        cache_key = (agent_id, slot_key)
+        if _AGENT_NEW_PICK_CHECKED.get(cache_key):
+            return None
+        _AGENT_NEW_PICK_CHECKED[cache_key] = True
+        cutoff = (now_bj.date() - _dt.timedelta(days=7)).isoformat()
+        stale = [k for k in _AGENT_NEW_PICK_CHECKED if k[1][:10] < cutoff]
+        for k in stale:
+            del _AGENT_NEW_PICK_CHECKED[k]
+        return slot_key
+    return None
 
 HK_HOLIDAYS_2025 = {
     _dt.date(2025, 1, 1),
@@ -394,6 +421,7 @@ class PortfolioTradeResponse(BaseModel):
     name: Optional[str] = None
     market: Optional[str] = None
     created_at: int
+    realized_pnl: Optional[float] = None
 
 
 class PortfolioAutoTradeRequest(BaseModel):
@@ -820,7 +848,9 @@ def _execute_strategy_alert_trade(alert: PortfolioAlertResponse, agent_id: str =
         p = s.get(PortfolioPosition, alert.position_id)
         if not p:
             return None
-        held_qty = float(p.quantity or 0.0)
+        positions = s.execute(select(PortfolioPosition)).scalars().all()
+        trades = s.execute(select(PortfolioTrade)).scalars().all()
+        held_qty = float(_agent_live_position_quantities(agent_id, trades, positions).get(alert.position_id, 0.0) or 0.0)
 
     trigger_price = float(alert.trigger_price or 0.0)
     if trigger_price <= 0:
@@ -830,6 +860,8 @@ def _execute_strategy_alert_trade(alert: PortfolioAlertResponse, agent_id: str =
 
     if alert.alert_type in {"target_buy", "strategy_buy_zone", "signal_buy"}:
         return _create_trade_at_price(alert.position_id, "BUY", 10000.0, trigger_price, _agent_id_to_source(agent_id))
+    if held_qty <= 0:
+        return None
     if alert.alert_type == "strategy_take_profit_1":
         return _create_trade_at_price(alert.position_id, "SELL", max(1.0, held_qty / 2.0), trigger_price, _agent_id_to_source(agent_id))
     if alert.alert_type in {"target_sell", "signal_sell", "strategy_take_profit_2", "strategy_stop_loss"}:
@@ -2360,6 +2392,13 @@ def list_portfolio_trades(position_id: Optional[str] = None, limit: int = 100):
         if position_id:
             q = q.filter(PortfolioTrade.position_id == position_id)
         trades = q.limit(min(limit, 500)).all()
+        positions = s.execute(select(PortfolioPosition)).scalars().all()
+        trade_position_ids = {t.position_id for t in trades}
+        history_trades = []
+        if trade_position_ids:
+            history_trades = s.query(PortfolioTrade).filter(PortfolioTrade.position_id.in_(trade_position_ids)).all()
+        realized_pnl_map = _trade_realized_pnl_map(history_trades, positions)
+        cumulative_realized_pnl_map = _trade_cumulative_realized_pnl_map(s.query(PortfolioTrade).all(), positions)
         out = []
         for t in trades:
             p = s.get(PortfolioPosition, t.position_id)
@@ -2369,6 +2408,7 @@ def list_portfolio_trades(position_id: Optional[str] = None, limit: int = 100):
                 amount=float(t.amount or 0), fee=float(getattr(t, "fee", 0.0) or 0.0), source=getattr(t, "source", "manual") or "manual",
                 symbol=p.symbol if p else None, name=p.name if p else None,
                 market=p.market if p else None, created_at=int(t.created_at or 0),
+                realized_pnl=realized_pnl_map.get(t.id), cumulative_realized_pnl=cumulative_realized_pnl_map.get(t.id),
             ))
         return out
 
@@ -2727,6 +2767,72 @@ def _compute_agent_managed_financials(trades: list[PortfolioTrade], positions: l
     return managed_capital, managed_realized_pnl, managed_unrealized_pnl, managed_net_pnl
 
 
+def _agent_live_position_quantities(
+    agent_id: str,
+    trades: Optional[list[PortfolioTrade]] = None,
+    positions: Optional[list[PortfolioPosition]] = None,
+) -> dict[str, float]:
+    if trades is None or positions is None:
+        with session_scope() as s:
+            if trades is None:
+                trades = s.execute(select(PortfolioTrade)).scalars().all()
+            if positions is None:
+                positions = s.execute(select(PortfolioPosition)).scalars().all()
+    _, holdings = _portfolio_source_breakdown(
+        trades or [],
+        positions or [],
+        {p.id: 0.0 for p in (positions or [])},
+    )
+    return {
+        position_id: float(qty or 0.0)
+        for position_id, qty in holdings.get(agent_id, {}).items()
+        if float(qty or 0.0) > 1e-9
+    }
+
+
+def _trade_realized_pnl_map(
+    trades: list[PortfolioTrade],
+    positions: Optional[list[PortfolioPosition]] = None,
+) -> dict[str, Optional[float]]:
+    position_map = {p.id: p for p in (positions or [])}
+    by_position: dict[str, list[PortfolioTrade]] = {}
+    for trade in trades:
+        by_position.setdefault(trade.position_id, []).append(trade)
+
+    realized_by_trade: dict[str, Optional[float]] = {}
+    for items in by_position.values():
+        items.sort(key=lambda x: (int(x.created_at or 0), x.id or ""))
+        lots: list[dict[str, float]] = []
+        for trade in items:
+            side = (trade.side or "").strip().upper()
+            qty = float(trade.quantity or 0.0)
+            price = float(trade.price or 0.0)
+            fee = _trade_fee_value(trade, position_map)
+            if qty <= 0:
+                realized_by_trade[trade.id] = None
+                continue
+            if side == "BUY":
+                unit_cost = (qty * price + fee) / qty if qty > 0 else price
+                lots.append({"qty": qty, "price": unit_cost})
+                realized_by_trade[trade.id] = None
+                continue
+            remaining = qty
+            unit_proceeds = (qty * price - fee) / qty if qty > 0 else price
+            realized = 0.0
+            while remaining > 1e-9 and lots:
+                lot = lots[0]
+                lot_qty = float(lot["qty"])
+                used = min(remaining, lot_qty)
+                realized += used * (unit_proceeds - float(lot["price"]))
+                lot_qty -= used
+                remaining -= used
+                lot["qty"] = lot_qty
+                if lot_qty <= 1e-9:
+                    lots.pop(0)
+            realized_by_trade[trade.id] = realized
+    return realized_by_trade
+
+
 def _agent_dynamic_buy_quantity(min_buy_quantity: float, target_profit: Optional[float], deadline_ts: Optional[int], net_pnl: float, action: str, managed_capital: float) -> float:
     base = max(10000.0, float(min_buy_quantity or 10000.0))
     units = 1.0
@@ -2947,18 +3053,53 @@ def _get_or_create_agent_config(session, agent_id: str = "a") -> PortfolioAgentC
     return cfg
 
 
+def _portfolio_agent_candidate_score(item: dict) -> tuple[float, float, float, float, float]:
+    action = str(item.get("action") or "").strip()
+    trend = str(item.get("trend") or "").strip()
+    try:
+        total_score = float(item.get("total_score") or 0.0)
+    except Exception:
+        total_score = 0.0
+    try:
+        buy_score = float(item.get("buy_score") or 0.0)
+    except Exception:
+        buy_score = 0.0
+    try:
+        rank = float(item.get("rank") or 9999.0)
+    except Exception:
+        rank = 9999.0
+    try:
+        rsi14 = float(item.get("rsi14") or 50.0)
+    except Exception:
+        rsi14 = 50.0
+    action_score = {
+        "强买信号": 4.0,
+        "积极建仓": 3.0,
+        "轻仓试探": 2.0,
+        "关注等买点": 1.0,
+    }.get(action, 0.0)
+    trend_score = {
+        "上涨": 2.0,
+        "震荡偏强": 1.0,
+        "震荡": 0.5,
+    }.get(trend, 0.0)
+    rsi_score = -abs(rsi14 - 42.0)
+    return action_score, total_score, buy_score, trend_score, rsi_score - rank / 10000.0
+
+
 def _portfolio_agent_pick_candidate(min_buy_quantity: float) -> Optional[tuple[str, str, str, float, str]]:
     from core.recommend import get_latest_scan, run_scan, save_scan_result
 
     latest = get_latest_scan() or []
     if not latest:
         try:
-            latest = run_scan(top_n=10, get_indicators_fn=get_stock_indicators)
+            latest = run_scan(top_n=20, get_indicators_fn=get_stock_indicators)
             if latest:
                 save_scan_result(latest)
         except Exception:
             latest = []
 
+    candidates: list[tuple[tuple[float, float, float, float, float], tuple[str, str, str, float, str]]] = []
     for item in latest:
         market = (item.get("market") or "CN").strip().upper()
         symbol = (item.get("symbol") or "").strip().upper()
@@ -2976,8 +3117,14 @@ def _portfolio_agent_pick_candidate(min_buy_quantity: float) -> Optional[tuple[s
             buy_price = 0.0
         if buy_price <= 0:
             continue
-        return market, symbol, name, buy_price, action
-    return None
+        candidates.append((
+            _portfolio_agent_candidate_score(item),
+            (market, symbol, name, buy_price, action),
+        ))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
 
 
 def _agent_b_buy_rejection_reason(candidate: Optional[dict], buy_price: float, available_capital: float, min_qty: float) -> Optional[str]:
@@ -3049,7 +3196,12 @@ def _agent_b_sell_rejection_reason(position_info: Optional[dict], current_price:
     return "no_hard_sell_signal"
 
 
-def _run_llm_agent_once(agent_id: str, cfg: "PortfolioAgentConfig") -> dict:
+def _run_llm_agent_once(
+    agent_id: str,
+    cfg: "PortfolioAgentConfig",
+    allow_new_pick: bool = True,
+    precomputed_alerts: Optional[list[PortfolioAlertResponse]] = None,
+) -> dict:
     from core.llm_qwen import call_llm
     from core.recommend import get_latest_scan, run_scan, save_scan_result
     now = int(time.time())
@@ -3058,6 +3210,8 @@ def _run_llm_agent_once(agent_id: str, cfg: "PortfolioAgentConfig") -> dict:
     with session_scope() as s:
         positions = s.execute(select(PortfolioPosition)).scalars().all()
         all_trades = s.execute(select(PortfolioTrade)).scalars().all()
+
+    agent_position_qty = _agent_live_position_quantities(agent_id, all_trades, positions)
 
     managed_capital, managed_realized, managed_unrealized, managed_net_pnl = _compute_agent_managed_financials(
         all_trades, positions, agent_id, capital,
@@ -3068,7 +3222,8 @@ def _run_llm_agent_once(agent_id: str, cfg: "PortfolioAgentConfig") -> dict:
 
     holdings_info = []
     for pos in positions:
-        if float(pos.quantity or 0) <= 0:
+        agent_qty = float(agent_position_qty.get(pos.id, 0.0) or 0.0)
+        if agent_qty <= 0:
             continue
         market = (pos.market or "CN").strip().upper()
         symbol = (pos.symbol or "").strip()
@@ -3084,7 +3239,7 @@ def _run_llm_agent_once(agent_id: str, cfg: "PortfolioAgentConfig") -> dict:
             indicators = get_stock_indicators(symbol=symbol, market=market)
         except Exception:
             indicators = None
-        qty = float(pos.quantity or 0)
+        qty = agent_qty
         avg_cost = float(pos.avg_cost or 0)
         pnl_pct = ((current_price - avg_cost) / avg_cost * 100) if avg_cost > 0 else 0
         holdings_info.append({
@@ -3102,7 +3257,8 @@ def _run_llm_agent_once(agent_id: str, cfg: "PortfolioAgentConfig") -> dict:
             "take_profit_2": getattr(indicators, "strategy_take_profit_2", None),
         })
 
-    alerts = [a for a in get_portfolio_alerts() if (a.market or "").strip().upper() == "CN"]
+    alert_source = precomputed_alerts if precomputed_alerts is not None else get_portfolio_alerts()
+    alerts = [a for a in alert_source if (a.market or "").strip().upper() == "CN"]
     alert_lines = []
     for a in alerts[:15]:
         alert_lines.append(f"- {a.name or a.symbol} ({a.symbol}): [{a.alert_type}] {a.message} 当前价={a.current_price}")
@@ -3118,14 +3274,16 @@ def _run_llm_agent_once(agent_id: str, cfg: "PortfolioAgentConfig") -> dict:
     for t in sorted(recent_agent_trades, key=lambda x: getattr(x, "created_at", 0), reverse=True)[:10]:
         recent_lines.append(f"- {getattr(t, 'side', '')} {getattr(t, 'symbol', '')} qty={getattr(t, 'quantity', 0)} price={getattr(t, 'price', 0):.2f} @ {time.strftime('%Y-%m-%d %H:%M', time.localtime(getattr(t, 'created_at', 0)))}")
 
-    latest = get_latest_scan() or []
-    if not latest:
-        try:
-            latest = run_scan(top_n=10, get_indicators_fn=get_stock_indicators)
-            if latest:
-                save_scan_result(latest)
-        except Exception:
-            latest = []
+    latest = []
+    if allow_new_pick:
+        latest = get_latest_scan() or []
+        if not latest:
+            try:
+                latest = run_scan(top_n=10, get_indicators_fn=get_stock_indicators)
+                if latest:
+                    save_scan_result(latest)
+            except Exception:
+                latest = []
     candidates = []
     for item in latest:
         market = (item.get("market") or "CN").strip().upper()
@@ -3238,16 +3396,19 @@ def _run_llm_agent_once(agent_id: str, cfg: "PortfolioAgentConfig") -> dict:
 
     if action == "sell" and symbol:
         with session_scope() as s:
-            pos = s.execute(select(PortfolioPosition).where(
-                PortfolioPosition.market == "CN",
-                PortfolioPosition.symbol == symbol,
-            )).scalars().first()
-            if pos is None or float(pos.quantity or 0) <= 0:
+            pos = next((
+                p for p in s.execute(select(PortfolioPosition).where(
+                    PortfolioPosition.market == "CN",
+                    PortfolioPosition.symbol == symbol,
+                )).scalars().all()
+                if float(agent_position_qty.get(p.id, 0.0) or 0.0) > 0
+            ), None)
+            if pos is None:
                 c = _get_or_create_agent_config(s, agent_id)
                 c.last_status = f"llm_sell_no_position:{symbol}"
                 c.updated_at = now
                 return {"ok": True, "message": f"no_position:{symbol}"}
-            qty = float(pos.quantity or 0)
+            qty = float(agent_position_qty.get(pos.id, 0.0) or 0.0)
             sp = get_stock_price(symbol=symbol, market="CN")
             sell_price = float(getattr(sp, "price", 0) or 0)
             if sell_price <= 0:
@@ -3286,7 +3447,7 @@ def _run_llm_agent_once(agent_id: str, cfg: "PortfolioAgentConfig") -> dict:
                 PortfolioPosition.market == "CN",
                 PortfolioPosition.symbol == symbol,
             )).scalars().first()
-            if pos is not None and float(pos.quantity or 0) > 0:
+            if pos is not None and float(agent_position_qty.get(pos.id, 0.0) or 0.0) > 0:
                 c = _get_or_create_agent_config(s, agent_id)
                 c.last_status = f"llm_buy_already_held:{symbol}"
                 c.updated_at = now
@@ -3348,8 +3509,13 @@ def _agent_id_to_bucket(agent_id: str) -> str:
     return "b" if agent_id == "b" else "a"
 
 
-def _run_portfolio_agent_once(agent_id: str = "a") -> dict:
+def _run_portfolio_agent_once(
+    agent_id: str = "a",
+    allow_new_pick: bool = True,
+    precomputed_alerts: Optional[list[PortfolioAlertResponse]] = None,
+) -> dict:
     now = int(time.time())
+    trading_now = _cn_market_trading_now()
     with session_scope() as s:
         cfg = _get_or_create_agent_config(s, agent_id)
         cfg.last_run_at = now
@@ -3357,7 +3523,7 @@ def _run_portfolio_agent_once(agent_id: str = "a") -> dict:
         if (cfg.enabled or "0") != "1":
             cfg.last_status = "agent_disabled"
             return {"ok": True, "message": "agent_disabled"}
-        if not _cn_market_trading_now():
+        if not trading_now and not allow_new_pick:
             cfg.last_status = "cn_market_closed"
             return {"ok": True, "message": "cn_market_closed"}
         if cfg.deadline_ts is not None and now > int(cfg.deadline_ts):
@@ -3371,10 +3537,9 @@ def _run_portfolio_agent_once(agent_id: str = "a") -> dict:
     if agent_id == "b" or agent_type == "llm":
         with session_scope() as s:
             cfg = _get_or_create_agent_config(s, agent_id)
-        return _run_llm_agent_once(agent_id, cfg)
+        return _run_llm_agent_once(agent_id, cfg, allow_new_pick=allow_new_pick, precomputed_alerts=precomputed_alerts)
 
     summary = get_portfolio_summary()
-    net_pnl = float(summary.realized_pnl or 0.0) + float(summary.unrealized_pnl or 0.0)
     with session_scope() as s:
         cfg = _get_or_create_agent_config(s, agent_id)
         capital = float(cfg.capital or 10000000.0)
@@ -3391,38 +3556,67 @@ def _run_portfolio_agent_once(agent_id: str = "a") -> dict:
             cfg.updated_at = now
             return {"ok": True, "message": "target_reached", "net_pnl": managed_net_pnl}
 
-    alerts = [a for a in get_portfolio_alerts() if (a.market or "").strip().upper() == "CN"]
+    alert_source = precomputed_alerts if precomputed_alerts is not None else get_portfolio_alerts()
+    alerts = [a for a in alert_source if (a.market or "").strip().upper() == "CN"]
     sell_priority = ["strategy_stop_loss", "strategy_take_profit_2", "target_sell", "signal_sell", "strategy_take_profit_1"]
     buy_priority = ["strategy_buy_zone", "target_buy", "signal_buy"]
+    executed_trade: Optional[PortfolioTradeResponse] = None
 
-    for alert_type in sell_priority:
-        for alert in alerts:
-            if alert.alert_type == alert_type:
+    if trading_now:
+        for alert_type in sell_priority:
+            for alert in alerts:
+                if alert.alert_type != alert_type:
+                    continue
                 trade = _execute_strategy_alert_trade(alert, agent_id)
-                if trade is not None:
+                if trade is None:
+                    continue
+                executed_trade = trade
+                with session_scope() as s:
+                    cfg = _get_or_create_agent_config(s, agent_id)
+                    cfg.last_action = f"{trade.side}:{trade.symbol}:{trade.quantity}@{trade.price:.2f}"
+                    cfg.last_status = f"executed:{alert_type}"
+                    cfg.updated_at = now
+                if not allow_new_pick:
+                    return {"ok": True, "message": "trade_executed", "trade": trade.model_dump()}
+                break
+            if executed_trade is not None:
+                break
+
+        if executed_trade is None:
+            for alert_type in buy_priority:
+                for alert in alerts:
+                    if alert.alert_type != alert_type:
+                        continue
+                    trade = _execute_strategy_alert_trade(alert, agent_id)
+                    if trade is None:
+                        continue
+                    executed_trade = trade
                     with session_scope() as s:
                         cfg = _get_or_create_agent_config(s, agent_id)
                         cfg.last_action = f"{trade.side}:{trade.symbol}:{trade.quantity}@{trade.price:.2f}"
                         cfg.last_status = f"executed:{alert_type}"
                         cfg.updated_at = now
-                    return {"ok": True, "message": "trade_executed", "trade": trade.model_dump()}
+                    if not allow_new_pick:
+                        return {"ok": True, "message": "trade_executed", "trade": trade.model_dump()}
+                    break
+                if executed_trade is not None:
+                    break
 
-    for alert_type in buy_priority:
-        for alert in alerts:
-            if alert.alert_type == alert_type:
-                trade = _execute_strategy_alert_trade(alert, agent_id)
-                if trade is not None:
-                    with session_scope() as s:
-                        cfg = _get_or_create_agent_config(s, agent_id)
-                        cfg.last_action = f"{trade.side}:{trade.symbol}:{trade.quantity}@{trade.price:.2f}"
-                        cfg.last_status = f"executed:{alert_type}"
-                        cfg.updated_at = now
-                    return {"ok": True, "message": "trade_executed", "trade": trade.model_dump()}
+    if not allow_new_pick:
+        if executed_trade is not None:
+            return {"ok": True, "message": "trade_executed", "trade": executed_trade.model_dump()}
+        with session_scope() as s:
+            cfg = _get_or_create_agent_config(s, agent_id)
+            cfg.last_status = "no_action"
+            cfg.updated_at = now
+        return {"ok": True, "message": "no_action"}
 
     with session_scope() as s:
         cfg = _get_or_create_agent_config(s, agent_id)
         candidate = _portfolio_agent_pick_candidate(float(cfg.min_buy_quantity or 10000.0))
         if not candidate:
+            if executed_trade is not None:
+                return {"ok": True, "message": "trade_executed", "trade": executed_trade.model_dump()}
             cfg.last_status = "no_candidate"
             cfg.updated_at = now
             return {"ok": True, "message": "no_candidate"}
@@ -3432,6 +3626,8 @@ def _run_portfolio_agent_once(agent_id: str = "a") -> dict:
             PortfolioPosition.symbol == symbol,
         )).scalars().first()
         if existing is not None and float(existing.quantity or 0.0) > 0:
+            if executed_trade is not None:
+                return {"ok": True, "message": "trade_executed", "trade": executed_trade.model_dump()}
             cfg.last_status = "candidate_already_held"
             cfg.updated_at = now
             return {"ok": True, "message": "candidate_already_held"}
@@ -3469,6 +3665,8 @@ def _run_portfolio_agent_once(agent_id: str = "a") -> dict:
             cfg.last_status = "picked_new_stock"
             cfg.updated_at = now
             return {"ok": True, "message": "picked_new_stock", "trade": trade.model_dump()}
+        if executed_trade is not None:
+            return {"ok": True, "message": "trade_executed", "trade": executed_trade.model_dump()}
         cfg.last_status = "candidate_trade_skipped"
         cfg.updated_at = now
         return {"ok": True, "message": "candidate_trade_skipped"}
@@ -3948,15 +4146,15 @@ if (os.environ.get("ENABLE_INDICATOR_WARMER") or "").strip() == "1":
 
 
 def _portfolio_feishu_notifier():
-    interval = int((os.environ.get("FEISHU_PORTFOLIO_ALERT_INTERVAL") or "300").strip() or "300")
+    interval = int((os.environ.get("FEISHU_PORTFOLIO_ALERT_INTERVAL") or "150").strip() or "150")
     print(f"[FEISHU] trade/agent worker started, interval={interval}s, receive_id={os.environ.get('FEISHU_RECEIVE_ID','')[:8]}...")
     time.sleep(20)
     while True:
         try:
             print(f"[FEISHU] checking portfolio alerts and agents...")
-            get_portfolio_alerts()
-            _run_portfolio_agent_once("a")
-            _run_portfolio_agent_once("b")
+            alerts = get_portfolio_alerts()
+            _run_portfolio_agent_once("a", allow_new_pick=_claim_agent_new_pick_slot("a") is not None, precomputed_alerts=alerts)
+            _run_portfolio_agent_once("b", allow_new_pick=_claim_agent_new_pick_slot("b") is not None, precomputed_alerts=alerts)
         except Exception as e:
             print(f"[FEISHU] trade/agent worker error: {e}")
         time.sleep(interval)

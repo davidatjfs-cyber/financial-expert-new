@@ -176,6 +176,8 @@ export interface PortfolioTrade {
   name?: string | null;
   market?: string | null;
   created_at: number;
+   realized_pnl?: number | null;
+  cumulative_realized_pnl?: number | null;
 }
 
 export interface PortfolioSummary {

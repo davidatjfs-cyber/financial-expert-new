@@ -43,6 +43,7 @@ export default function ReturnsPage() {
     const s = v.toFixed(digits);
     return v > 0 ? `+${s}` : s;
   };
+  const pnlColor = (v: number | null | undefined) => (v == null ? 'text-[var(--text-secondary)]' : v >= 0 ? 'text-emerald-400' : 'text-red-400');
   const fmtTs = (ts?: number | null) => {
     if (!ts) return '-';
     return new Intl.DateTimeFormat('zh-CN', {
@@ -368,6 +369,8 @@ export default function ReturnsPage() {
                   <div className="text-right shrink-0 ml-3">
                     <div className={`font-bold ${t.side === 'BUY' ? 'text-emerald-400' : 'text-red-400'}`}>{t.side === 'BUY' ? '买入' : '卖出'} {fmt(t.price)}</div>
                     <div className="text-[var(--text-secondary)]">{t.quantity.toLocaleString()}股 · {t.amount.toLocaleString(undefined, { maximumFractionDigits: 0 })} · 手续费 {t.fee.toLocaleString(undefined, { maximumFractionDigits: 0 })}</div>
+                    <div className={`${pnlColor(t.realized_pnl)} text-[11px]`}>单笔盈亏 {t.realized_pnl == null ? '-' : fmtSigned(t.realized_pnl, 0)}</div>
+                    <div className={`${pnlColor(t.cumulative_realized_pnl)} text-[11px]`}>累计已实现 {t.cumulative_realized_pnl == null ? '-' : fmtSigned(t.cumulative_realized_pnl, 0)}</div>
                   </div>
                 </div>
               ))}
