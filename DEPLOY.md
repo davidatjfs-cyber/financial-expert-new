@@ -56,7 +56,7 @@ nohup uvicorn api:app &
 ```bash
 # ✅ 正确
 rsync -az ... ./ root@8.153.95.62:/opt/financial-expert/
-ssh root@8.153.95.62 "cd /opt/financial-expert && docker compose build --no-cache frontend && docker compose up -d"
+ssh root@8.153.95.62 "cd /opt/financial-expert && docker compose build --no-cache frontend && docker compose up -d frontend"
 
 # ❌ 错误：只同步文件不重建
 rsync ...  # 文件同步了但 docker 还是旧代码
@@ -94,7 +94,27 @@ location /api/ {
 
 **原因**: `docker compose up -d` 重建容器时 IP 会变。没有 resolver + 变量，nginx 不会重新解析 DNS，请求会发送到旧容器。
 
-### 规则 5：修改前端代码后必须强制刷新本地浏览器
+### 规则 5：只改前端就不要重建 API
+
+```bash
+# ✅ 只改 frontend/src/ 时
+docker compose build --no-cache frontend
+docker compose up -d frontend    # 只重建 frontend 容器，API 不动
+
+# ❌ 错误：用 docker compose up -d 会重建所有 changed 容器
+docker compose up -d             # 可能连带重建 API，导致 5 秒 + 停机
+```
+
+**原因**: 每次重建 API 容器 → 数据库重新连接 → 约 5 秒内 API 无响应 → 前端显示"无数据"。如果 api.py 没改，只重建 frontend 即可。
+
+小改 api.py（如调整时间）可以只 build api 然后 `docker compose up -d api`：
+
+```bash
+docker compose build --no-cache api
+docker compose up -d api          # 只重建 API，frontend/nginx 运行
+```
+
+### 规则 6：修改前端代码后必须强制刷新本地浏览器
 
 Next.js Turbopack 的 JS chunk hash 可能在代码修改后不变（基于模块图而非内容）。部署后须告知用户按 **Cmd+Shift+R（Mac）或 Ctrl+Shift+R（Windows）** 强制刷新。或者修改一个运行时字符串（如 cache-buster 常量）确保 hash 变化。
 
@@ -185,8 +205,8 @@ for p in d[:2]:
 # 4. 前端页面 200
 curl -s -o /dev/null -w 'indicators: %{http_code}\n' http://127.0.0.1/indicators
 
-# 5. JS chunk 可访问（hash 是新的，不是旧的）
-curl -s -o /dev/null -w 'chunk: %{http_code}\n' http://127.0.0.1/_next/static/chunks/a9a9853813a8f3cc.js
+# 5. JS chunk 可访问
+curl -s -o /dev/null -w 'chunk: %{http_code}\n' http://127.0.0.1/_next/static/chunks/$(curl -s http://127.0.0.1/indicators | grep -oE 'chunks/[a-f0-9]{16}\.js' | tail -1 | cut -d/ -f2)
 
 # 6. Nginx DNS 解析正常
 docker exec financial-expert-nginx-1 nslookup api
@@ -204,6 +224,7 @@ docker exec financial-expert-nginx-1 nslookup frontend
 | 前端请求 API 返回旧数据格式 | nginx DNS 缓存在旧容器 | 检查 nginx resolver 配置，重启 nginx: `docker compose restart nginx` |
 | `docker compose build` 后 hash 没变 | Turbopack 的 chunk hash 基于模块图 | 改一个运行时字符串（如 cache-buster 常量）让 JS 内容不同 |
 | API 报 "no such table: portfolio_position" | 查的是单数 `portfolio_position`，真实表名是复数 `portfolio_positions` | 检查 SQL 查询中的表名 |
+| `docker compose up -d` 重建 API 后页面短暂"无数据" | API 容器重启需 3-5 秒，期间请求失败 | 只改前端时用 `docker compose up -d frontend` 避免重建 API |
 
 ---
 
