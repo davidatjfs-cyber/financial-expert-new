@@ -866,9 +866,9 @@ def _execute_strategy_alert_trade(alert: PortfolioAlertResponse, agent_id: str =
     if held_qty <= 0:
         return None
     if alert.alert_type == "strategy_take_profit_1":
-        return _create_trade_at_price(alert.position_id, "SELL", max(1.0, held_qty / 2.0), trigger_price, _agent_id_to_source(agent_id))
+        return _create_trade_at_price(alert.position_id, "SELL", max(1.0, held_qty / 2.0), trade_price, _agent_id_to_source(agent_id))
     if alert.alert_type in {"target_sell", "signal_sell", "strategy_take_profit_2", "strategy_stop_loss"}:
-        return _create_trade_at_price(alert.position_id, "SELL", held_qty, trigger_price, _agent_id_to_source(agent_id))
+        return _create_trade_at_price(alert.position_id, "SELL", held_qty, trade_price, _agent_id_to_source(agent_id))
     return None
 
 
@@ -3112,7 +3112,7 @@ def _portfolio_agent_pick_candidate(min_buy_quantity: float) -> Optional[tuple[s
         action = (item.get("action") or "").strip()
         if action not in {"强买信号", "积极建仓", "轻仓试探", "关注等买点"}:
             continue
-        buy_price = item.get("strategy_buy_zone_high") or item.get("buy_price_aggressive") or item.get("current_price")
+        buy_price = item.get("current_price") or item.get("buy_price_aggressive")
         try:
             buy_price = float(buy_price)
         except Exception:
