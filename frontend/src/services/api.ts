@@ -140,7 +140,11 @@ export interface PortfolioPosition {
   strategy_sell_reason?: string | null;
   strategy_sell_desc?: string | null;
   updated_at: number;
-  holdings_breakdown?: { manual: number; agent_a: number; agent_b: number } | null;
+  holdings_breakdown?: {
+    manual?: { quantity: number; avg_cost: number; market_value: number; unrealized_pnl: number; unrealized_pnl_pct: number } | null;
+    agent_a?: { quantity: number; avg_cost: number; market_value: number; unrealized_pnl: number; unrealized_pnl_pct: number } | null;
+    agent_b?: { quantity: number; avg_cost: number; market_value: number; unrealized_pnl: number; unrealized_pnl_pct: number } | null;
+  } | null;
 }
 
 export interface PortfolioCreatePositionRequest {

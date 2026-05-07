@@ -69,8 +69,8 @@ _FEISHU_SENT_ALERTS: dict[str, tuple[float, str]] = {}
 _FEISHU_SENT_TTL = 6 * 3600
 _CN_MARKET_STATE_CACHE: tuple[float, str] = (0.0, "unknown")
 _AGENT_NEW_PICK_SCHEDULE: dict[str, tuple[tuple[int, int], ...]] = {
-    "a": ((9, 30), (12, 0), (16, 0)),
-    "b": ((9, 50), (12, 30), (16, 20)),
+    "a": ((9, 0), (12, 0), (0, 0)),
+    "b": ((9, 15), (12, 15), (0, 15)),
 }
 _AGENT_NEW_PICK_CHECKED: dict[tuple[str, str], bool] = {}
 
@@ -383,10 +383,36 @@ class StockSearchResult(BaseModel):
     market: str
 
 
+class PositionSourceHolding(BaseModel):
+    quantity: float = 0.0
+    avg_cost: float = 0.0
+    market_value: float = 0.0
+    unrealized_pnl: float = 0.0
+    unrealized_pnl_pct: float = 0.0
+
+
 class PositionHoldingsBreakdown(BaseModel):
-    manual: float = 0.0
-    agent_a: float = 0.0
-    agent_b: float = 0.0
+    manual: Optional[PositionSourceHolding] = None
+    agent_a: Optional[PositionSourceHolding] = None
+    agent_b: Optional[PositionSourceHolding] = None
+
+
+def _build_source_holding(d: Optional[dict]) -> Optional[PositionSourceHolding]:
+    if d is None:
+        return None
+    qty = float(d.get("quantity", 0.0) or 0.0)
+    total_cost = float(d.get("total_cost", 0.0) or 0.0)
+    avg_cost = (total_cost / qty) if qty > 0 else 0.0
+    market_value = float(d.get("market_value", 0.0) or 0.0)
+    unrealized_pnl = float(d.get("unrealized_pnl", 0.0) or 0.0)
+    unrealized_pnl_pct = (unrealized_pnl / total_cost * 100.0) if total_cost > 0 else 0.0
+    return PositionSourceHolding(
+        quantity=qty,
+        avg_cost=avg_cost,
+        market_value=market_value,
+        unrealized_pnl=unrealized_pnl,
+        unrealized_pnl_pct=unrealized_pnl_pct,
+    )
 
 
 class PortfolioPositionResponse(BaseModel):
@@ -2175,7 +2201,7 @@ def list_portfolio_positions():
     # Fetch trades for holdings breakdown
     with session_scope() as s:
         all_trades = s.execute(select(PortfolioTrade)).scalars().all()
-    _, holdings_map = _portfolio_source_breakdown(all_trades, [p for p, _, _, _ in positions_raw], {p.id: prices_map.get((m, s)) or 0.0 for p, m, s, _ in positions_raw})
+    source_holdings = _position_source_holdings(all_trades, [p for p, _, _, _ in positions_raw], {p.id: (prices_map.get((m, s)) or 0.0) for p, m, s, _ in positions_raw})
 
     out: list[PortfolioPositionResponse] = []
     for p, market, symbol, name in positions_raw:
@@ -2252,9 +2278,9 @@ def list_portfolio_positions():
                 strategy_sell_desc=strategy_sell_desc,
                 updated_at=int(p.updated_at or 0),
                 holdings_breakdown=PositionHoldingsBreakdown(
-                    manual=float(holdings_map.get("manual", {}).get(p.id, 0.0) or 0.0),
-                    agent_a=float(holdings_map.get("a", {}).get(p.id, 0.0) or 0.0),
-                    agent_b=float(holdings_map.get("b", {}).get(p.id, 0.0) or 0.0),
+                    manual=_build_source_holding(source_holdings.get("manual", {}).get(p.id)),
+                    agent_a=_build_source_holding(source_holdings.get("a", {}).get(p.id)),
+                    agent_b=_build_source_holding(source_holdings.get("b", {}).get(p.id)),
                 ),
             )
         )
@@ -3030,6 +3056,63 @@ def _compute_period_realized_pnl(trades: list[PortfolioTrade], today_ts: int, we
                 lot["qty"] = lot_qty
                 if lot_qty <= 1e-9:
                     lots.pop(0)
+    return result
+
+
+def _position_source_holdings(
+    trades: list[PortfolioTrade],
+    positions: list[PortfolioPosition],
+    pos_prices: dict[str, float],
+) -> dict[str, dict[str, dict]]:
+    position_map = {p.id: p for p in positions}
+    by_position: dict[str, list[PortfolioTrade]] = {}
+    for trade in trades:
+        by_position.setdefault(trade.position_id, []).append(trade)
+    result: dict[str, dict[str, dict]] = {"manual": {}, "a": {}, "b": {}}
+    for position_id, items in by_position.items():
+        items.sort(key=lambda x: (int(x.created_at or 0), x.id or ""))
+        lots: list[dict[str, float | str]] = []
+        for trade in items:
+            side = (trade.side or "").strip().upper()
+            qty = float(trade.quantity or 0.0)
+            price = float(trade.price or 0.0)
+            fee = _trade_fee_value(trade, position_map)
+            if qty <= 0:
+                continue
+            if side == "BUY":
+                unit_cost = (qty * price + fee) / qty if qty > 0 else price
+                lots.append({"bucket": _trade_source_bucket(getattr(trade, "source", "manual")), "qty": qty, "price": unit_cost})
+                continue
+            remaining = qty
+            while remaining > 1e-9 and lots:
+                lot = lots[0]
+                lot_qty = float(lot["qty"])
+                used = min(remaining, lot_qty)
+                lot_qty -= used
+                remaining -= used
+                lot["qty"] = lot_qty
+                if lot_qty <= 1e-9:
+                    lots.pop(0)
+        current_price = float(pos_prices.get(position_id, 0.0) or 0.0)
+        live_qty = float(getattr(position_map.get(position_id), "quantity", 0.0) or 0.0)
+        remaining_cap = live_qty
+        for lot in lots:
+            qty = min(float(lot["qty"]), remaining_cap)
+            if qty <= 0:
+                continue
+            remaining_cap -= qty
+            bucket = str(lot["bucket"])
+            lot_price = float(lot["price"])
+            cost = qty * lot_price
+            mv = qty * current_price
+            entry = result[bucket].get(position_id)
+            if entry is None:
+                entry = {"quantity": 0.0, "total_cost": 0.0, "market_value": 0.0, "unrealized_pnl": 0.0}
+                result[bucket][position_id] = entry
+            entry["quantity"] += qty
+            entry["total_cost"] += cost
+            entry["market_value"] += mv
+            entry["unrealized_pnl"] += mv - cost
     return result
 
 

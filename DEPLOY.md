@@ -1,280 +1,218 @@
-# 财务分析专家 — 部署指南
+# Financial Expert 部署指南
+
+**服务器**: 8.153.95.62  
+**SSH Key**: `~/.ssh/aliyun_ecs`  
+**项目路径**: `/opt/financial-expert`  
+**架构**: Docker Compose（API + Frontend + Nginx）
+
+---
+
+## 第一原则：所有代码跑在 Docker 里
+
+> **宿主机上绝对没有我们的任何服务进程。**  
+> 不要 kill 宿主机进程、不要手动起 uvicorn、不要手动 `docker run`。  
+> 所有操作必须通过 `docker compose`。
+
+---
 
 ## 架构概览
 
 ```
-用户浏览器
-    │
-    ▼
-┌─────────────────────────────────────────────┐
-│  nginx (Docker, 端口 80)                     │
-│  ┌─────────┐  ┌──────────┐  ┌───────────┐   │
-│  │ /       │  │ /api/    │  │ /brain/   │   │
-│  │→frontend│  │→api:8000 │  │→宿主:9000 │   │
-│  └─────────┘  └──────────┘  └───────────┘   │
-└──────┬──────────────┬────────────────────────┘
-       │              │
-┌──────▼──────┐ ┌─────▼──────┐
-│  frontend   │ │    api     │
-│  Next.js    │ │  FastAPI   │
-│  端口 3000   │ │  端口 8000  │
-│             │ │  Python 3.11│
-└─────────────┘ │  + OCR引擎  │
-                └─────┬──────┘
-                      │
-                ┌─────▼──────┐
-                │ /data 卷    │
-                │ SQLite数据库│
-                │ 上传的PDF   │
-                └────────────┘
+用户 -> Nginx(:80) -> Frontend(:3000)  [Next.js SSR Turbopack]
+                    -> API(:8000)       [FastAPI/uvicorn]
+                       └── /data/financial_reports.db  [SQLite, 宿主机 volume 挂载]
 ```
 
-**三个 Docker 容器：**
+### 数据库路径
 
-| 容器 | 镜像 | 端口 | 作用 |
-|------|------|------|------|
-| `financial-expert-nginx-1` | nginx:1.27-alpine | 80→80 | 反向代理、路由分发 |
-| `financial-expert-frontend-1` | financial-expert-frontend:latest | 3000 (内部) | Next.js 前端，SSR 渲染 |
-| `financial-expert-api-1` | financial-expert-api:latest | 8000 (内部) | FastAPI 后端，AI分析/OCR |
+- 容器内: `/data/financial_reports.db`（通过 `APP_DATA_DIR=/data` 环境变量指定）
+- 宿主机: `/opt/financial-expert/data/financial_reports.db`
+- **不要创建 `/app/.data/ → /data` 的软链接**，代码已通过环境变量正确处理
+- 表名是 **`portfolio_positions`**（复数！），不是 `portfolio_position`
 
-**路由规则：**
-- `/` → Next.js 前端（仪表盘、股票查询、上传、报告等页面）
-- `/api/` → FastAPI 后端（数据分析、PDF处理、AI接口）
-- `/brain/` → 宿主机 9000 端口（其他应用，非本项目）
+---
 
-## 代码仓库
+## 死规则（必须严格遵守）
 
-- **GitHub**: https://github.com/davidatjfs-cyber/financial-expert-new
-- **SSH Clone**: `git@github.com:davidatjfs-cyber/financial-expert-new.git`
-
-## 服务器信息
-
-- **IP:** 8.153.95.62
-- **系统:** Ubuntu 22.04
-- **项目路径:** `/opt/financial-expert`
-- **数据卷:** `/opt/financial-expert/data`（SQLite数据库 + 上传文件）
-- **SSH:** root 无密码登录已配置
-
-## 关键文件清单
-
-```
-/opt/financial-expert/
-├── docker-compose.yml          # Docker 编排（核心部署文件）
-├── Dockerfile.api              # API 后端镜像构建
-├── .env                        # 环境变量（DASHSCOPE_API_KEY）
-├── deploy/
-│   ├── deploy.sh               # 一键部署脚本
-│   ├── sync_to_server.sh       # 本地→服务器同步脚本
-│   └── nginx.conf              # Nginx 配置（挂载到容器）
-├── api.py                      # FastAPI 入口
-├── core/                       # 后端核心逻辑
-│   ├── db.py                   # 数据库连接
-│   ├── models.py               # ORM 模型
-│   ├── llm_qwen.py             # 通义千问 AI 接口
-│   ├── pdf_analyzer.py         # PDF 解析
-│   └── styles.py               # Streamlit 样式（仅旧版使用）
-├── pages/                      # Streamlit 页面（仅旧版，生产不用）
-├── frontend/                   # Next.js 前端（生产使用）
-│   ├── Dockerfile
-│   ├── package.json
-│   └── src/
-│       ├── app/                # Next.js App Router 页面
-│       │   ├── page.tsx        # 仪表盘首页
-│       │   ├── stock/          # 股票查询
-│       │   ├── upload/         # 上传报表
-│       │   ├── reports/        # 分析报告
-│       │   ├── indicators/     # 财务指标
-│       │   ├── risk/           # 风险预警
-│       │   ├── trends/         # 趋势分析
-│       │   └── compare/        # 公司对比
-│       ├── components/         # React 组件
-│       └── services/           # API 调用层
-├── requirements.txt             # Python 依赖（全部）
-├── requirements-api.txt        # Python 依赖（仅 API 后端）
-└── data/                       # 持久化数据（不随部署覆盖）
-    ├── financial.db
-    ├── financial_reports.db
-    └── uploads/
-```
-
-## 部署方式
-
-### 方式一：服务器直接部署（推荐）
-
-适合：服务器上有 git 仓库，代码已推送到 main 分支。
+### 规则 1：必须用 `docker compose`
 
 ```bash
-ssh root@8.153.95.62
-cd /opt/financial-expert
-./deploy/deploy.sh
-```
-
-`deploy.sh` 会自动执行：
-1. 读取 `.env` 环境变量
-2. `git pull` 拉取最新代码
-3. `docker compose down` 停止旧容器
-4. `docker compose build --no-cache api frontend` 重新构建镜像
-5. `docker compose up -d` 启动新容器
-6. 健康检查：等待 `/api/version` 可用（最多30秒）
-
-### 方式二：本地同步后部署
-
-适合：本地有修改但未推送到 git，或无法使用 git 同步。
-
-```bash
-# 在本地项目根目录执行
-./deploy/sync_to_server.sh
-```
-
-然后 SSH 到服务器手动部署：
-
-```bash
-ssh root@8.153.95.62
-cd /opt/financial-expert
-DEPLOY_SKIP_GIT=1 ./deploy/deploy.sh
-```
-
-`sync_to_server.sh` 使用 rsync 同步，**安全规则：**
-- ✅ 同步代码文件
-- ❌ 不删除服务器上多余文件
-- ❌ 不覆盖 `.env`
-- ❌ 不覆盖 `data/` 持久化数据
-
-### 方式三：手动步骤
-
-```bash
-ssh root@8.153.95.62
-cd /opt/financial-expert
-
-# 1. 拉取代码（如果用 git）
-git fetch --all && git reset --hard origin/main
-
-# 2. 重新构建并启动
-docker compose down
-docker compose build --no-cache api frontend
-docker compose up -d
-
-# 3. 验证
-curl -fsS http://127.0.0.1/api/version
-curl -s http://127.0.0.1/ | grep '<title>'
-```
-
-## 验证部署成功
-
-```bash
-# 1. 所有容器运行中
-docker ps --format 'table {{.Names}}\t{{.Status}}'
-# 期望输出：3个容器都是 Up
-
-# 2. API 健康
-curl -fsS http://127.0.0.1/api/version
-# 期望：返回版本 JSON
-
-# 3. 前端可访问
-curl -s http://127.0.0.1/ | grep '<title>'
-# 期望：<title>财务分析专家</title>
-
-# 4. 浏览器访问
-# http://8.153.95.62 → Next.js 前端
-```
-
-## 常见问题排查
-
-### 容器启动失败
-
-```bash
-# 查看容器日志
-docker compose logs --tail 50 api
-docker compose logs --tail 50 frontend
-docker compose logs --tail 50 nginx
-
-# 查看容器状态
+# ✅ 正确
 docker compose ps
+docker compose logs api
+docker compose build --no-cache frontend
+docker compose up -d
+
+# ❌ 绝对禁止
+docker run -d --name financial-expert-api-1 financial-expert-api:latest
+kill <pid>
+nohup uvicorn api:app &
 ```
 
-### API 不可用
+**原因**: 手动创建的容器没有 Docker Compose 的 DNS service name，Nginx 的 `proxy_pass http://api:8000` 会解析失败。
+
+### 规则 2：更新代码必须重建镜像
 
 ```bash
-# 检查 API 容器日志
-docker logs financial-expert-api-1 --tail 100
+# ✅ 正确
+rsync -az ... ./ root@8.153.95.62:/opt/financial-expert/
+ssh root@8.153.95.62 "cd /opt/financial-expert && docker compose build --no-cache frontend && docker compose up -d"
 
-# 进入 API 容器调试
-docker exec -it financial-expert-api-1 bash
+# ❌ 错误：只同步文件不重建
+rsync ...  # 文件同步了但 docker 还是旧代码
 ```
 
-### 前端白屏或 502
+**原因**: Docker 将代码 `COPY` 到镜像中，不是挂载宿主目录（除了 `data/`）。只 rsync 不 build 等于没更新。
+
+### 规则 3：build 必须加 `--no-cache`
 
 ```bash
-# 检查前端容器
-docker logs financial-expert-frontend-1 --tail 50
+# ✅ 正确
+docker compose build --no-cache frontend
 
-# 检查 nginx 配置是否正确加载
-docker exec financial-expert-nginx-1 cat /etc/nginx/conf.d/default.conf
-docker exec financial-expert-nginx-1 nginx -t
+# ❌ 错误：可能用缓存
+docker compose build frontend
 ```
 
-### 需要回滚
+### 规则 4：nginx 必须用 resolver + 变量
+
+修改 `deploy/nginx.conf` 时，proxy_pass 必须用变量：
+
+```nginx
+# ✅ 正确
+resolver 127.0.0.11 valid=10s;
+location /api/ {
+    set $api_backend api:8000;
+    proxy_pass http://$api_backend;
+}
+
+# ❌ 错误：nginx 会缓存 DNS 到永远
+location /api/ {
+    proxy_pass http://api:8000;
+}
+```
+
+**原因**: `docker compose up -d` 重建容器时 IP 会变。没有 resolver + 变量，nginx 不会重新解析 DNS，请求会发送到旧容器。
+
+### 规则 5：修改前端代码后必须强制刷新本地浏览器
+
+Next.js Turbopack 的 JS chunk hash 可能在代码修改后不变（基于模块图而非内容）。部署后须告知用户按 **Cmd+Shift+R（Mac）或 Ctrl+Shift+R（Windows）** 强制刷新。或者修改一个运行时字符串（如 cache-buster 常量）确保 hash 变化。
+
+---
+
+## 完整部署流程
+
+### 方式一：本地推送到生产（推荐）
 
 ```bash
-# 回滚到上一个 git 版本
+# 1. 同步源码到服务器
+rsync -az \
+  --exclude ".git/" --exclude ".env" --exclude "data/" --exclude ".data/" \
+  --exclude "hr-management-system/" --exclude "*.tar.gz" \
+  --exclude ".agent-reach-venv/" --exclude "node_modules/" --exclude "__pycache__" \
+  -e "ssh -i ~/.ssh/aliyun_ecs" \
+  /Users/xieding/financial-expert-new/ root@8.153.95.62:/opt/financial-expert/
+
+# 2. SSH 到服务器重建并重启
+ssh -i ~/.ssh/aliyun_ecs root@8.153.95.62 << 'SSH'
 cd /opt/financial-expert
-git log --oneline -5           # 找到上一个版本
-git checkout <commit-hash>     # 切换版本
+
+# 只重建改动的服务（一般只需 frontend，api 不常变）
+docker compose build --no-cache frontend
+
+# 重建所有（如果 api.py 也改了）
+# docker compose build --no-cache api frontend
+
+# 重启（会 recreate 容器）
+docker compose up -d
+
+# 等待就绪
+for i in $(seq 1 30); do
+  if curl -fsS http://127.0.0.1/api/portfolio/positions >/dev/null 2>&1; then
+    echo "API healthy"
+    break
+  fi
+  sleep 1
+done
+
+# 验证
+echo === Services ===
+docker compose ps
+echo === API ===
+curl -s http://127.0.0.1/api/portfolio/positions | python3 -c "import sys,json; print(len(json.load(sys.stdin)), 'positions')"
+echo === Frontend ===
+curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1/
+SSH
+```
+
+### 方式二：服务器端 Git 部署
+
+```bash
+ssh -i ~/.ssh/aliyun_ecs root@8.153.95.62
+cd /opt/financial-expert
+git fetch --all && git reset --hard origin/main
 docker compose build --no-cache api frontend
 docker compose up -d
 ```
 
-## 环境变量
+---
 
-| 变量 | 位置 | 说明 |
-|------|------|------|
-| `DASHSCOPE_API_KEY` | `.env` | 通义千问 API 密钥，AI 分析必需 |
-| `APP_DATA_DIR` | docker-compose.yml | 数据目录，容器内为 `/data` |
-| `FORCE_PDF_AI` | docker-compose.yml | 强制使用 AI 解析 PDF（默认 0） |
-| `ENABLE_OCR` | docker-compose.yml | 启用 OCR 识别（默认 0） |
-| `AUTO_OCR_FALLBACK` | docker-compose.yml | PDF 解析失败自动降级 OCR（默认 1） |
+## 部署后验证清单
 
-## ⚠️ 重要注意事项
-
-1. **不要在宿主机上运行 Streamlit 进程**。生产环境只用 Docker 容器中的 Next.js 前端 + FastAPI 后端。Streamlit 是旧版方案，已弃用。
-
-2. **不要修改 `/app/` 路由**。`/app/` 不属于本项目架构，不要在 nginx 中添加 `/app/` location 块。
-
-3. **不要直接修改容器内的文件**。容器重启后修改会丢失。所有配置变更都应该修改宿主机上的源文件（特别是 `deploy/nginx.conf`），然后通过 `docker compose restart nginx` 生效。
-
-4. **`data/` 目录是持久化的**。`deploy.sh` 和 `sync_to_server.sh` 都不会覆盖此目录。数据库和用户上传的 PDF 都在这里。
-
-5. **修改前端代码后必须重新构建镜像**。Next.js 是编译型框架，生产模式使用 `.next` 构建产物，修改 `src/` 后需要：
-   ```bash
-   docker compose build --no-cache frontend
-   docker compose up -d
-   ```
-
-6. **修改后端代码后同理**：
-   ```bash
-   docker compose build --no-cache api
-   docker compose up -d
-   ```
-
-7. **修改 nginx 配置后**，只需重启 nginx 容器：
-   ```bash
-   docker compose restart nginx
-   ```
-
-## 数据备份
+逐项检查，缺一不可：
 
 ```bash
-# 备份 SQLite 数据库和上传文件
-ssh root@8.153.95.62 "cd /opt/financial-expert && tar czf /tmp/financial-backup-$(date +%Y%m%d).tar.gz data/"
-scp root@8.153.95.62:/tmp/financial-backup-*.tar.gz ./
+# 1. 所有容器运行
+docker compose ps
+# 输出必须是所有服务 "Up"
+
+# 2. API 返回持仓数据
+curl -s http://127.0.0.1/api/portfolio/positions | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d),'positions')"
+# 必须 > 0
+
+# 3. API 返回新格式的 holdings_breakdown
+curl -s http://127.0.0.1/api/portfolio/positions | python3 -c "
+import sys,json; d=json.load(sys.stdin)
+for p in d[:2]:
+    bd = p.get('holdings_breakdown',{})
+    for k in ['manual','agent_a','agent_b']:
+        v = bd.get(k)
+        if v and v.get('quantity',0) > 0:
+            print(f'{p[\"name\"]} {k}: qty={v[\"quantity\"]} cost={v[\"avg_cost\"]} pnl={v[\"unrealized_pnl\"]}')
+"
+# 必须显示每个来源的独立 qty/cost/pnl
+
+# 4. 前端页面 200
+curl -s -o /dev/null -w 'indicators: %{http_code}\n' http://127.0.0.1/indicators
+
+# 5. JS chunk 可访问（hash 是新的，不是旧的）
+curl -s -o /dev/null -w 'chunk: %{http_code}\n' http://127.0.0.1/_next/static/chunks/a9a9853813a8f3cc.js
+
+# 6. Nginx DNS 解析正常
+docker exec financial-expert-nginx-1 nslookup api
+docker exec financial-expert-nginx-1 nslookup frontend
 ```
 
-## 端口占用参考
+---
 
-| 端口 | 用途 | 备注 |
+## 常见坑
+
+| 症状 | 原因 | 修复 |
 |------|------|------|
-| 80 | nginx (Docker) | 对外提供 Web 服务 |
-| 3000 | Next.js 前端 | 仅 Docker 内部 |
-| 8000 | FastAPI 后端 | 仅 Docker 内部 |
-| 8080 | ai-tutor 应用 | 非本项目 |
-| 9000 | brain 应用 | 非本项目 |
+| 前端显示"加载中..."不动 | 浏览器缓存了旧 JS chunk | Cmd+Shift+R 强制刷新 |
+| API 返回 `[]` 空数组 | 数据库路径错误 | `docker compose exec api python3 -c 'from core.db import get_db_path; print(get_db_path())'` 确认是 `/data/financial_reports.db` |
+| 前端请求 API 返回旧数据格式 | nginx DNS 缓存在旧容器 | 检查 nginx resolver 配置，重启 nginx: `docker compose restart nginx` |
+| `docker compose build` 后 hash 没变 | Turbopack 的 chunk hash 基于模块图 | 改一个运行时字符串（如 cache-buster 常量）让 JS 内容不同 |
+| API 报 "no such table: portfolio_position" | 查的是单数 `portfolio_position`，真实表名是复数 `portfolio_positions` | 检查 SQL 查询中的表名 |
+
+---
+
+## 文件说明
+
+| 文件 | 用途 |
+|------|------|
+| `deploy/nginx.conf` | Nginx 反向代理 + resolver 动态 DNS |
+| `Dockerfile.api` | API Python 3.11 镜像，COPY api.py + core/ |
+| `frontend/Dockerfile` | 前端 Node 20 镜像，npm run build |
+| `docker-compose.yml` | 服务编排，设 `APP_DATA_DIR=/data` |
+| `frontend/.env.local` | 本地开发环境变量（不同步到服务器） |
