@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Brain, PiggyBank, Wallet, RefreshCw, CircleHelp } from 'lucide-react';
+import { Brain, PiggyBank, Wallet, RefreshCw, CircleHelp, ChevronDown, ChevronRight } from 'lucide-react';
 import {
   getPortfolioTrades,
   getPortfolioSummary,
@@ -33,6 +33,7 @@ export default function ReturnsPage() {
   const [openMetricTip, setOpenMetricTip] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [running, setRunning] = useState(false);
+  const [tradesCollapsed, setTradesCollapsed] = useState(true);
 
   const agentConfig = agentConfigs[activeAgent] ?? null;
   const agentStatus = agentStatuses[activeAgent] ?? null;
@@ -222,7 +223,7 @@ export default function ReturnsPage() {
   ];
 
   return (
-    <div className="p-4 md:p-8 flex flex-col gap-5 max-w-5xl mx-auto animate-fade-in pb-24 md:pb-8">
+    <div className="p-4 md:p-8 flex flex-col gap-5 max-w-5xl mx-auto animate-fade-in min-h-screen">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-[var(--text-primary)] text-xl md:text-2xl font-bold tracking-tight">收益中心</h1>
@@ -305,6 +306,7 @@ export default function ReturnsPage() {
               <div className="rounded-lg bg-[var(--bg-elevated)] px-3 py-2"><div>{renderMetricLabel('选股成功率', '已完成闭环的选股中，盈利次数占闭环总次数的比例。')}</div><div className="text-[var(--text-primary)] font-bold">{fmt(agentStatus.auto_pick_success_rate, 1)}%</div></div>
               <div className="rounded-lg bg-[var(--bg-elevated)] px-3 py-2"><div>{renderMetricLabel('自动交易次数', '该 Agent 已执行的自动买入和卖出总笔数。')}</div><div className="text-[var(--text-primary)] font-bold">{agentStatus.auto_trade_count}</div></div>
               <div className="rounded-lg bg-[var(--bg-elevated)] px-3 py-2"><div>{renderMetricLabel('本金', '分配给该 Agent 的虚拟管理本金。当前默认按1000万计算。')}</div><div className="text-[var(--text-primary)] font-bold">{agentStatus.managed_capital.toLocaleString(undefined, { maximumFractionDigits: 0 })}</div></div>
+              <div className="rounded-lg bg-[var(--bg-elevated)] px-3 py-2"><div>{renderMetricLabel('剩余资金', '本金 + 已实现收益 - 持仓市值。即可用于新买入的资金。')}</div><div className="text-[var(--text-primary)] font-bold">{(agentStatus.managed_remaining_capital ?? 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}</div></div>
               <div className="rounded-lg bg-[var(--bg-elevated)] px-3 py-2"><div>{renderMetricLabel('资金使用效率', '最近一个月累计买入金额 / 1000万。用于衡量资金周转和使用强度。')}</div><div className="text-[var(--text-primary)] font-bold">{fmt(agentStatus.capital_utilization_pct, 1)}%</div></div>
               <div className="rounded-lg bg-[var(--bg-elevated)] px-3 py-2"><div>{renderMetricLabel('持仓市值', '当前仍由该 Agent 管理的持仓市值。')}</div><div className="text-[var(--text-primary)] font-bold">{agentStatus.managed_unrealized_pnl !== 0 ? (agentStatus.managed_capital + agentStatus.managed_unrealized_pnl).toLocaleString(undefined, { maximumFractionDigits: 0 }) : '-'}</div></div>
               <div className="rounded-lg bg-[var(--bg-elevated)] px-3 py-2"><div>{renderMetricLabel('净收益', '该 Agent 的已实现收益 + 未实现收益，已扣手续费。')}</div><div className={`font-bold ${agentStatus.managed_net_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmtSigned(agentStatus.managed_net_pnl, 0)}</div></div>
@@ -347,11 +349,14 @@ export default function ReturnsPage() {
       </div>
 
       <div className="card-surface p-4">
-        <div className="flex items-center gap-2 mb-3">
+        <div className="flex items-center gap-2 mb-3 cursor-pointer select-none" onClick={() => setTradesCollapsed(!tradesCollapsed)}>
+            {tradesCollapsed ? <ChevronRight size={16} className="text-[var(--text-muted)]" /> : <ChevronDown size={16} className="text-[var(--text-muted)]" />}
             <PiggyBank size={16} className="text-[var(--text-muted)]" />
             <span className="text-[var(--text-primary)] text-sm font-bold">交易记录</span>
+            <span className="text-[var(--text-muted)] text-xs">({trades.length})</span>
           </div>
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        {!tradesCollapsed && (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 max-h-[60vh] overflow-y-auto">
           {[
             { label: '手动交易', items: manualTrades },
             { label: 'Agent A 交易', items: trades.filter((t) => sourceGroup(t.source) === 'agent_a') },
@@ -369,15 +374,16 @@ export default function ReturnsPage() {
                   <div className="text-right shrink-0 ml-3">
                     <div className={`font-bold ${t.side === 'BUY' ? 'text-emerald-400' : 'text-red-400'}`}>{t.side === 'BUY' ? '买入' : '卖出'} {fmt(t.price)}</div>
                     <div className="text-[var(--text-secondary)]">{t.quantity.toLocaleString()}股 · {t.amount.toLocaleString(undefined, { maximumFractionDigits: 0 })} · 手续费 {t.fee.toLocaleString(undefined, { maximumFractionDigits: 0 })}</div>
-                    <div className={`${pnlColor(t.realized_pnl)} text-[11px]`}>单笔盈亏 {t.realized_pnl == null ? '-' : fmtSigned(t.realized_pnl, 0)}</div>
-                    <div className={`${pnlColor(t.cumulative_realized_pnl)} text-[11px]`}>累计已实现 {t.cumulative_realized_pnl == null ? '-' : fmtSigned(t.cumulative_realized_pnl, 0)}</div>
+                    {t.realized_pnl != null && <div className={`${pnlColor(t.realized_pnl)} text-[11px]`}>单笔盈亏 {fmtSigned(t.realized_pnl, 0)}</div>}
                   </div>
                 </div>
               ))}
             </div>
           ))}
         </div>
+        )}
       </div>
+      <div className="h-20 md:h-8" /> {/* spacer for mobile bottom nav */}
     </div>
   );
 }

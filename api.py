@@ -520,6 +520,7 @@ class PortfolioAgentStatusResponse(BaseModel):
     avg_closed_pick_pnl: float = 0.0
     avg_closed_pick_days: float = 0.0
     max_drawdown_pct: float = 0.0
+    managed_remaining_capital: float = 0.0
     last_run_at: Optional[int] = None
     last_action: Optional[str] = None
     last_status: Optional[str] = None
@@ -840,7 +841,7 @@ def _should_skip_strategy_exec(exec_key: str) -> bool:
 
 
 def _execute_strategy_alert_trade(alert: PortfolioAlertResponse, agent_id: str = "a") -> Optional[PortfolioTradeResponse]:
-    exec_key = f"{alert.position_id}:{alert.alert_type}:{int((alert.trigger_price or 0) * 10000)}"
+    exec_key = f"{agent_id}:{alert.position_id}:{alert.alert_type}"
     if _should_skip_strategy_exec(exec_key):
         return None
 
@@ -852,14 +853,16 @@ def _execute_strategy_alert_trade(alert: PortfolioAlertResponse, agent_id: str =
         trades = s.execute(select(PortfolioTrade)).scalars().all()
         held_qty = float(_agent_live_position_quantities(agent_id, trades, positions).get(alert.position_id, 0.0) or 0.0)
 
+    current_price = float(alert.current_price or 0.0)
     trigger_price = float(alert.trigger_price or 0.0)
-    if trigger_price <= 0:
-        trigger_price = float(alert.current_price or 0.0)
-    if trigger_price <= 0:
+    trade_price = current_price if current_price > 0 else trigger_price
+    if trade_price <= 0:
         return None
 
     if alert.alert_type in {"target_buy", "strategy_buy_zone", "signal_buy"}:
-        return _create_trade_at_price(alert.position_id, "BUY", 10000.0, trigger_price, _agent_id_to_source(agent_id))
+        if held_qty > 0:
+            return None
+        return _create_trade_at_price(alert.position_id, "BUY", 10000.0, trade_price, _agent_id_to_source(agent_id))
     if held_qty <= 0:
         return None
     if alert.alert_type == "strategy_take_profit_1":
@@ -2398,7 +2401,6 @@ def list_portfolio_trades(position_id: Optional[str] = None, limit: int = 100):
         if trade_position_ids:
             history_trades = s.query(PortfolioTrade).filter(PortfolioTrade.position_id.in_(trade_position_ids)).all()
         realized_pnl_map = _trade_realized_pnl_map(history_trades, positions)
-        cumulative_realized_pnl_map = _trade_cumulative_realized_pnl_map(s.query(PortfolioTrade).all(), positions)
         out = []
         for t in trades:
             p = s.get(PortfolioPosition, t.position_id)
@@ -2408,7 +2410,7 @@ def list_portfolio_trades(position_id: Optional[str] = None, limit: int = 100):
                 amount=float(t.amount or 0), fee=float(getattr(t, "fee", 0.0) or 0.0), source=getattr(t, "source", "manual") or "manual",
                 symbol=p.symbol if p else None, name=p.name if p else None,
                 market=p.market if p else None, created_at=int(t.created_at or 0),
-                realized_pnl=realized_pnl_map.get(t.id), cumulative_realized_pnl=cumulative_realized_pnl_map.get(t.id),
+                realized_pnl=realized_pnl_map.get(t.id),
             ))
         return out
 
@@ -3128,39 +3130,6 @@ def _portfolio_agent_pick_candidate(min_buy_quantity: float) -> Optional[tuple[s
 
 
 def _agent_b_buy_rejection_reason(candidate: Optional[dict], buy_price: float, available_capital: float, min_qty: float) -> Optional[str]:
-    if not candidate:
-        return "missing_candidate"
-    action = str(candidate.get("action") or "").strip()
-    if action not in {"强买信号", "积极建仓", "轻仓试探"}:
-        return f"weak_action:{action or 'unknown'}"
-    trend = str(candidate.get("trend") or "").strip()
-    if trend in {"下跌", "震荡偏弱", "观望"}:
-        return f"weak_trend:{trend}"
-    rsi14 = candidate.get("rsi14")
-    try:
-        if rsi14 is not None and float(rsi14) >= 68:
-            return f"rsi_too_hot:{float(rsi14):.1f}"
-    except Exception:
-        pass
-    ma20 = candidate.get("ma20")
-    ma60 = candidate.get("ma60")
-    try:
-        if ma20 is not None and ma60 is not None and float(ma20) < float(ma60):
-            return "ma20_below_ma60"
-    except Exception:
-        pass
-    buy_zone_high = candidate.get("buy_zone_high")
-    try:
-        if buy_zone_high is not None and buy_price > float(buy_zone_high) * 1.01:
-            return "chasing_above_buy_zone"
-    except Exception:
-        pass
-    buy_zone_low = candidate.get("buy_zone_low")
-    try:
-        if buy_zone_low is not None and buy_price < float(buy_zone_low) * 0.97:
-            return "breakdown_below_buy_zone"
-    except Exception:
-        pass
     if buy_price <= 0:
         return "invalid_buy_price"
     if available_capital < max(0.0, float(min_qty or 0.0)) * buy_price:
@@ -3169,31 +3138,7 @@ def _agent_b_buy_rejection_reason(candidate: Optional[dict], buy_price: float, a
 
 
 def _agent_b_sell_rejection_reason(position_info: Optional[dict], current_price: float, sell_alert_types: set[str]) -> Optional[str]:
-    if not position_info:
-        return "missing_position"
-    if sell_alert_types.intersection({"strategy_stop_loss", "strategy_take_profit_1", "strategy_take_profit_2", "target_sell", "signal_sell"}):
-        return None
-    stop_loss = position_info.get("stop_loss")
-    take_profit_1 = position_info.get("take_profit_1")
-    trend = str(position_info.get("trend") or "").strip()
-    ma20 = position_info.get("ma20")
-    pnl_pct = position_info.get("pnl_pct")
-    try:
-        if stop_loss is not None and current_price <= float(stop_loss) * 1.005:
-            return None
-    except Exception:
-        pass
-    try:
-        if take_profit_1 is not None and current_price >= float(take_profit_1) * 0.995:
-            return None
-    except Exception:
-        pass
-    try:
-        if trend in {"下跌", "震荡偏弱"} and ma20 is not None and current_price < float(ma20) and float(pnl_pct or 0.0) < 0:
-            return None
-    except Exception:
-        pass
-    return "no_hard_sell_signal"
+    return None
 
 
 def _run_llm_agent_once(
@@ -3206,6 +3151,7 @@ def _run_llm_agent_once(
     from core.recommend import get_latest_scan, run_scan, save_scan_result
     now = int(time.time())
     capital = float(cfg.capital or 10000000.0)
+    target_return_pct = float(cfg.target_profit or 0.0)
 
     with session_scope() as s:
         positions = s.execute(select(PortfolioPosition)).scalars().all()
@@ -3313,26 +3259,34 @@ def _run_llm_agent_once(
         if len(candidates) >= 5:
             break
     candidate_symbols = {str(item.get("symbol") or "").upper() for item in candidates}
+    held_symbols = {(h.get("symbol") or "").upper() for h in holdings_info}
 
-    system_prompt = """你是一个极度保守的A股交易决策AI。你的首要目标不是多交易，而是控制回撤、避免追高、只在高确定性场景下出手。
+    system_prompt = """你是一个专业的A股交易决策AI。你与规则驱动的Agent A不同，你的核心价值是综合分析多维信息做出更优决策。
 
-规则：
-1. 只能操作A股(CN市场)
-2. 每次只做一个决策
-3. 卖出优先于买入
-4. 如果没有明确信号，选择hold（不操作）
-5. 如果选择buy，symbol必须来自候选股列表
-6. 不要追高，不要对已持有股票重复买入
-7. 硬性风控：弱趋势、RSI过热、价格高于买入区上沿、均线走弱时禁止买入
-8. 除非存在明确止损/止盈/卖出信号，否则不要轻易卖出
-9. 当信息不足、信号冲突、盈亏比一般时，默认hold
+你的决策框架：
+1. 只能操作A股(CN市场)，每次只做一个决策
+2. 卖出优先于买入
+3. 买入新股票时，symbol必须来自候选股列表
+4. 已持有股票可以加仓
 
-你必须严格按以下JSON格式回复，不要有任何其他文字：
+你的分析维度（区别于纯规则执行）：
+- 持仓分析：综合评估每只持仓的技术面（趋势/RSI/MACD/均线/布林带）和盈亏状态，判断是继续持有、加仓还是减仓
+- 告警响应：结合告警类型和持仓盈亏，判断告警是否应该立即执行（如止损必执行），还是可以观察
+- 候选股筛选：从候选股中结合当前持仓结构、资金使用效率、行业分散度，选择最优标的
+- 时机判断：综合考虑多指标共振情况（如MACD金叉+RSI低位+价格在买入区=强买点），而非看单一指标
+- 仓位管理：考虑当前持仓集中度，避免过度集中单一股票；考虑资金使用效率，避免资金长期闲置
+
+决策输出格式（严格遵守）：
 {"action": "sell"|"buy"|"hold", "symbol": "股票代码(如600036)", "reason": "简短理由(20字内)"}
 
 如果action是hold，symbol填null。"""
 
     user_prompt = f"""当前时间：{time.strftime('%Y-%m-%d %H:%M', time.localtime(now))} 北京时间
+
+## Agent KPI考核
+- 目标收益率：{target_return_pct:.1f}%（净收益/本金）
+- 当前净收益率：{(managed_net_pnl / capital * 100) if capital > 0 else 0:.2f}%，{'未达标' if managed_net_pnl < capital * target_return_pct / 100 else '已达标'}
+- 资金使用效率：{(1 - available_capital / capital) * 100 if capital > 0 else 0:.1f}%（已用市值/本金），{'资金闲置过多' if available_capital / capital > 0.7 else '正常'}
 
 ## Agent资金状态
 - 本金：{capital:,.0f}
@@ -3436,7 +3390,7 @@ def _run_llm_agent_once(
             return {"ok": True, "message": "trade_failed"}
 
     if action == "buy" and symbol:
-        if symbol not in candidate_symbols:
+        if symbol not in candidate_symbols and symbol not in held_symbols:
             with session_scope() as s:
                 c = _get_or_create_agent_config(s, agent_id)
                 c.last_status = f"llm_buy_symbol_not_in_candidates:{symbol}"
@@ -3447,11 +3401,6 @@ def _run_llm_agent_once(
                 PortfolioPosition.market == "CN",
                 PortfolioPosition.symbol == symbol,
             )).scalars().first()
-            if pos is not None and float(agent_position_qty.get(pos.id, 0.0) or 0.0) > 0:
-                c = _get_or_create_agent_config(s, agent_id)
-                c.last_status = f"llm_buy_already_held:{symbol}"
-                c.updated_at = now
-                return {"ok": True, "message": f"already_held:{symbol}"}
             candidate = next((item for item in candidates if (item.get("symbol") or "").upper() == symbol), None)
             sp = get_stock_price(symbol=symbol, market="CN")
             buy_price = float(getattr(sp, "price", 0) or 0)
@@ -3460,6 +3409,8 @@ def _run_llm_agent_once(
                 c = _get_or_create_agent_config(s, agent_id)
                 c.last_status = f"llm_buy_no_price:{symbol}"
                 c.updated_at = now
+                if pos is not None and float(pos.quantity or 0) <= 0 and float(agent_position_qty.get(pos.id, 0.0) or 0.0) <= 0:
+                    s.delete(pos)
                 return {"ok": True, "message": f"no_price:{symbol}"}
             min_qty = float(cfg.min_buy_quantity or 10000.0)
             buy_rejection = _agent_b_buy_rejection_reason(candidate, buy_price, available_capital, min_qty)
@@ -3467,6 +3418,8 @@ def _run_llm_agent_once(
                 c = _get_or_create_agent_config(s, agent_id)
                 c.last_status = f"llm_buy_rejected:{buy_rejection}:{symbol}"
                 c.updated_at = now
+                if pos is not None and float(pos.quantity or 0) <= 0 and float(agent_position_qty.get(pos.id, 0.0) or 0.0) <= 0:
+                    s.delete(pos)
                 return {"ok": True, "message": f"buy_rejected:{buy_rejection}"}
             name = ""
             if pos is not None:
@@ -3665,6 +3618,8 @@ def _run_portfolio_agent_once(
             cfg.last_status = "picked_new_stock"
             cfg.updated_at = now
             return {"ok": True, "message": "picked_new_stock", "trade": trade.model_dump()}
+        if existing is not None and float(existing.quantity or 0.0) <= 0:
+            s.delete(existing)
         if executed_trade is not None:
             return {"ok": True, "message": "trade_executed", "trade": executed_trade.model_dump()}
         cfg.last_status = "candidate_trade_skipped"
@@ -3708,6 +3663,8 @@ def get_portfolio_agent_status(agent_id: str = "a"):
     avg_closed_pick_pnl, avg_closed_pick_days, max_drawdown_pct = _compute_agent_advanced_kpis(trades, positions, agent_id)
 
     managed_net_return_rate = (managed_net_pnl / capital * 100.0) if capital > 0 else 0.0
+    managed_holdings_mv = float(summary.agent_a.total_market_value or 0) if agent_id == "a" else float(summary.agent_b.total_market_value or 0)
+    managed_remaining_capital = capital + managed_realized_pnl - managed_holdings_mv
     target_progress_pct = 0.0
     if cfg.target_profit and float(cfg.target_profit) > 0 and managed_capital > 0:
         target_profit_amount = managed_capital * float(cfg.target_profit) / 100.0
@@ -3741,6 +3698,7 @@ def get_portfolio_agent_status(agent_id: str = "a"):
         avg_closed_pick_pnl=avg_closed_pick_pnl,
         avg_closed_pick_days=avg_closed_pick_days,
         max_drawdown_pct=max_drawdown_pct,
+        managed_remaining_capital=managed_remaining_capital,
         last_run_at=cfg.last_run_at,
         last_action=cfg.last_action,
         last_status=cfg.last_status,

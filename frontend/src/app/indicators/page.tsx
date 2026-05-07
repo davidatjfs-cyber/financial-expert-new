@@ -406,7 +406,7 @@ export default function PortfolioPage() {
           <div className="flex items-center gap-2 overflow-x-auto">
             <span className="text-amber-400 text-xs font-semibold shrink-0">提醒 {alerts.length}</span>
             {alerts.slice(0, 3).map((a) => (
-              <span key={a.key} className="text-[var(--text-secondary)] text-xs whitespace-nowrap">{a.symbol}：{a.message}</span>
+              <span key={a.key} className="text-[var(--text-secondary)] text-xs whitespace-nowrap">{a.name || a.symbol}：{a.message}</span>
             ))}
           </div>
         </div>

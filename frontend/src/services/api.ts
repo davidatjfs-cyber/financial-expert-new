@@ -177,7 +177,6 @@ export interface PortfolioTrade {
   market?: string | null;
   created_at: number;
    realized_pnl?: number | null;
-  cumulative_realized_pnl?: number | null;
 }
 
 export interface PortfolioSummary {
@@ -244,6 +243,7 @@ export interface PortfolioAgentStatus {
   avg_closed_pick_pnl: number;
   avg_closed_pick_days: number;
   max_drawdown_pct: number;
+  managed_remaining_capital: number;
   last_run_at?: number | null;
   last_action?: string | null;
   last_status?: string | null;
