@@ -383,6 +383,12 @@ class StockSearchResult(BaseModel):
     market: str
 
 
+class PositionHoldingsBreakdown(BaseModel):
+    manual: float = 0.0
+    agent_a: float = 0.0
+    agent_b: float = 0.0
+
+
 class PortfolioPositionResponse(BaseModel):
     id: str
     market: str
@@ -405,6 +411,7 @@ class PortfolioPositionResponse(BaseModel):
     strategy_sell_reason: Optional[str] = None
     strategy_sell_desc: Optional[str] = None
     updated_at: int
+    holdings_breakdown: Optional[PositionHoldingsBreakdown] = None
 
 
 class PortfolioCreatePositionRequest(BaseModel):
@@ -2165,6 +2172,11 @@ def list_portfolio_positions():
         for p, market, symbol, name in positions_raw:
             prices_map.setdefault((market, symbol), None)
 
+    # Fetch trades for holdings breakdown
+    with session_scope() as s:
+        all_trades = s.execute(select(PortfolioTrade)).scalars().all()
+    _, holdings_map = _portfolio_source_breakdown(all_trades, [p for p, _, _, _ in positions_raw], {p.id: prices_map.get((m, s)) or 0.0 for p, m, s, _ in positions_raw})
+
     out: list[PortfolioPositionResponse] = []
     for p, market, symbol, name in positions_raw:
         current_price = prices_map.get((market, symbol))
@@ -2239,6 +2251,11 @@ def list_portfolio_positions():
                 strategy_sell_reason=strategy_sell_reason,
                 strategy_sell_desc=strategy_sell_desc,
                 updated_at=int(p.updated_at or 0),
+                holdings_breakdown=PositionHoldingsBreakdown(
+                    manual=float(holdings_map.get("manual", {}).get(p.id, 0.0) or 0.0),
+                    agent_a=float(holdings_map.get("a", {}).get(p.id, 0.0) or 0.0),
+                    agent_b=float(holdings_map.get("b", {}).get(p.id, 0.0) or 0.0),
+                ),
             )
         )
 
@@ -3035,13 +3052,13 @@ def _compute_agent_period_returns(
     position_map = {p.id: p for p in positions}
     by_position: dict[str, list[PortfolioTrade]] = {}
     for trade in trades:
-        if trade.position_id in managed_position_ids and (trade.source or "").strip() == agent_source:
+        if trade.position_id in managed_position_ids:
             by_position.setdefault(trade.position_id, []).append(trade)
     realized = {"today": 0.0, "week": 0.0, "month": 0.0}
     unrealized = 0.0
     for position_id, items in by_position.items():
         items.sort(key=lambda x: (int(x.created_at or 0), x.id or ""))
-        lots: list[dict[str, float]] = []
+        lots: list[dict] = []
         for trade in items:
             side = (trade.side or "").strip().upper()
             qty = float(trade.quantity or 0.0)
@@ -3050,9 +3067,10 @@ def _compute_agent_period_returns(
             if qty <= 0:
                 continue
             ts = int(trade.created_at or 0)
+            bucket_id = _trade_source_bucket(trade.source)
             if side == "BUY":
                 unit_cost = (qty * price + fee) / qty if qty > 0 else price
-                lots.append({"qty": qty, "price": unit_cost})
+                lots.append({"qty": qty, "price": unit_cost, "bucket": bucket_id})
                 continue
             remaining = qty
             unit_proceeds = (qty * price - fee) / qty if qty > 0 else price
@@ -3060,13 +3078,15 @@ def _compute_agent_period_returns(
                 lot = lots[0]
                 lot_qty = float(lot["qty"])
                 used = min(remaining, lot_qty)
+                lot_bucket = str(lot.get("bucket", ""))
                 pnl = used * (unit_proceeds - float(lot["price"]))
-                if ts >= today_ts:
-                    realized["today"] += pnl
-                if ts >= week_ts:
-                    realized["week"] += pnl
-                if ts >= month_ts:
-                    realized["month"] += pnl
+                if lot_bucket == agent_id:
+                    if ts >= today_ts:
+                        realized["today"] += pnl
+                    if ts >= week_ts:
+                        realized["week"] += pnl
+                    if ts >= month_ts:
+                        realized["month"] += pnl
                 lot_qty -= used
                 remaining -= used
                 lot["qty"] = lot_qty
@@ -3076,6 +3096,9 @@ def _compute_agent_period_returns(
         for lot in lots:
             lot_qty = float(lot["qty"])
             if lot_qty <= 1e-9:
+                continue
+            lot_bucket = str(lot.get("bucket", ""))
+            if lot_bucket != agent_id:
                 continue
             cost = lot_qty * float(lot["price"])
             mv = lot_qty * current_price

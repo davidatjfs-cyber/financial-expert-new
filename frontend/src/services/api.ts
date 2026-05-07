@@ -140,6 +140,7 @@ export interface PortfolioPosition {
   strategy_sell_reason?: string | null;
   strategy_sell_desc?: string | null;
   updated_at: number;
+  holdings_breakdown?: { manual: number; agent_a: number; agent_b: number } | null;
 }
 
 export interface PortfolioCreatePositionRequest {

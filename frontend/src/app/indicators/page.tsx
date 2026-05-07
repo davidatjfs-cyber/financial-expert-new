@@ -424,83 +424,109 @@ export default function PortfolioPage() {
         </div>
       ) : (
         <div className="flex flex-col gap-2">
-          {positions.map((p) => (
-            <div key={p.id} className="card-surface px-4 py-3 cursor-pointer active:scale-[0.99] transition-transform"
-                 onClick={() => router.push(`/stock?symbol=${encodeURIComponent(p.symbol)}&market=${encodeURIComponent(p.market)}&name=${encodeURIComponent(p.name || '')}`)}>
-              {/* Top row: name + price + PnL */}
-              <div className="flex items-center justify-between">
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-[var(--text-primary)] text-base font-bold truncate">{p.name || p.symbol}</span>
-                    <span className="text-[var(--text-muted)] text-[10px] bg-[var(--bg-page)] px-1.5 py-0.5 rounded shrink-0">{p.market}</span>
+          {(() => {
+            const groups: { key: string; label: string; color: string }[] = [
+              { key: 'manual', label: '手动持仓', color: 'text-[var(--text-secondary)]' },
+              { key: 'agent_a', label: 'Agent A 持仓', color: 'text-purple-400' },
+              { key: 'agent_b', label: 'Agent B 持仓', color: 'text-blue-400' },
+            ];
+            return groups.map((g) => {
+              const groupPositions = positions.filter((p) => {
+                const bd = p.holdings_breakdown;
+                if (!bd) return g.key === 'manual';
+                return (bd as Record<string, number>)[g.key] > 0;
+              });
+              if (groupPositions.length === 0) return null;
+              return (
+                <div key={g.key}>
+                  <div className="flex items-center gap-2 mb-1.5 mt-2">
+                    <span className={`text-sm font-bold ${g.color}`}>{g.label}</span>
+                    <span className="text-[var(--text-muted)] text-xs">({groupPositions.length})</span>
                   </div>
+                  {groupPositions.map((p) => (
+                    <div key={p.id} className="card-surface px-4 py-3 mb-2 cursor-pointer active:scale-[0.99] transition-transform"
+                         onClick={() => router.push(`/stock?symbol=${encodeURIComponent(p.symbol)}&market=${encodeURIComponent(p.market)}&name=${encodeURIComponent(p.name || '')}`)}>
+                      <div className="flex items-center justify-between">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-[var(--text-primary)] text-base font-bold truncate">{p.name || p.symbol}</span>
+                            <span className="text-[var(--text-muted)] text-[10px] bg-[var(--bg-page)] px-1.5 py-0.5 rounded shrink-0">{p.market}</span>
+                          </div>
+                        </div>
+                        <div className="text-right shrink-0 ml-3">
+                          <div className="text-[var(--text-primary)] text-lg font-bold leading-tight">{fmt(p.current_price)}</div>
+                          <div className={`text-xs font-bold leading-tight ${(p.unrealized_pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                            {fmtSigned(p.unrealized_pnl)} · {fmtSigned(p.unrealized_pnl_pct)}%
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-3 mt-2 text-[10px] text-[var(--text-muted)]">
+                        <span>持仓 <b className="text-[var(--text-secondary)]">{p.quantity || 0}</b></span>
+                        {p.holdings_breakdown && (
+                          <>
+                            {p.holdings_breakdown.manual > 0 && <span>手动 <b className="text-[var(--text-secondary)]">{Math.round(p.holdings_breakdown.manual)}</b></span>}
+                            {p.holdings_breakdown.agent_a > 0 && <span>Agent A <b className="text-purple-400">{Math.round(p.holdings_breakdown.agent_a)}</b></span>}
+                            {p.holdings_breakdown.agent_b > 0 && <span>Agent B <b className="text-blue-400">{Math.round(p.holdings_breakdown.agent_b)}</b></span>}
+                          </>
+                        )}
+                        <span>成本 <b className="text-[var(--text-secondary)]">{fmt(p.avg_cost)}</b></span>
+                        <span>市值 <b className="text-[var(--text-secondary)]">{p.market_value != null ? p.market_value.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '-'}</b></span>
+                      </div>
+                      <div className="flex items-center gap-2 mt-1.5">
+                        {p.target_buy_price != null && p.target_buy_price > 0 && (
+                          <span className="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 text-[11px] font-bold">
+                            买入 {fmt(p.target_buy_price)}
+                          </span>
+                        )}
+                        {p.target_sell_price != null && p.target_sell_price > 0 && (
+                          <span className="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full bg-red-500/15 text-red-400 text-[11px] font-bold">
+                            卖出 {fmt(p.target_sell_price)}
+                          </span>
+                        )}
+                        {p.strategy_buy_price != null && p.strategy_buy_price > 0 && p.strategy_buy_price !== p.target_buy_price && (
+                          <span className="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400/80 text-[10px] font-semibold">
+                            策略买 {fmt(p.strategy_buy_price)}
+                          </span>
+                        )}
+                        {p.strategy_sell_price != null && p.strategy_sell_price > 0 && p.strategy_sell_price !== p.target_sell_price && (
+                          <span className="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full bg-red-500/10 text-red-400/80 text-[10px] font-semibold">
+                            策略卖 {fmt(p.strategy_sell_price)}
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-1.5 mt-2.5" onClick={e => e.stopPropagation()}>
+                        <button
+                          onClick={() => { setTradeTarget(p); setTradeSide('BUY'); setTradeQty(''); }}
+                          className="px-3 py-1.5 rounded-full bg-emerald-500/15 text-emerald-400 text-xs font-bold active:scale-[0.97] transition-transform"
+                        >买入</button>
+                        <button
+                          onClick={() => { setTradeTarget(p); setTradeSide('SELL'); setTradeQty(''); }}
+                          className="px-3 py-1.5 rounded-full bg-red-500/15 text-red-400 text-xs font-bold active:scale-[0.97] transition-transform"
+                        >卖出</button>
+                        <button
+                          onClick={() => { setAutoTradeTarget(p); setAutoTradeSide('BUY'); setAutoTradePrice(''); setAutoTradeQty(''); }}
+                          className="px-3 py-1.5 rounded-full bg-blue-500/12 text-blue-400 text-xs font-bold active:scale-[0.97] transition-transform relative"
+                        >委托
+                          {pendingAutoTrades.filter(at => at.position_id === p.id).length > 0 && (
+                            <span className="absolute -top-1 -right-1 bg-blue-500 text-white text-[8px] w-3.5 h-3.5 rounded-full flex items-center justify-center font-bold">{pendingAutoTrades.filter(at => at.position_id === p.id).length}</span>
+                          )}
+                        </button>
+                        <button
+                          onClick={() => fetchAdvice(p)}
+                          className="px-3 py-1.5 rounded-full bg-[#FFB547]/12 text-[#FFB547] text-xs font-bold active:scale-[0.97] transition-transform"
+                        >AI</button>
+                        <div className="flex-1" />
+                        <button
+                          onClick={() => handleDelete(p.id, p.name || p.symbol)}
+                          className="px-2 py-1.5 rounded-full text-[var(--text-muted)] text-xs active:scale-[0.97] transition-transform hover:text-red-400"
+                        ><Trash2 size={13} /></button>
+                      </div>
+                    </div>
+                  ))}
                 </div>
-                <div className="text-right shrink-0 ml-3">
-                  <div className="text-[var(--text-primary)] text-lg font-bold leading-tight">{fmt(p.current_price)}</div>
-                  <div className={`text-xs font-bold leading-tight ${(p.unrealized_pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                    {fmtSigned(p.unrealized_pnl)} · {fmtSigned(p.unrealized_pnl_pct)}%
-                  </div>
-                </div>
-              </div>
-              {/* Metrics row */}
-              <div className="flex items-center gap-3 mt-2 text-[10px] text-[var(--text-muted)]">
-                <span>持仓 <b className="text-[var(--text-secondary)]">{p.quantity || 0}</b></span>
-                <span>成本 <b className="text-[var(--text-secondary)]">{fmt(p.avg_cost)}</b></span>
-                <span>市值 <b className="text-[var(--text-secondary)]">{p.market_value != null ? p.market_value.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '-'}</b></span>
-              </div>
-              {/* Buy/Sell price row */}
-              <div className="flex items-center gap-2 mt-1.5">
-                {p.target_buy_price != null && p.target_buy_price > 0 && (
-                  <span className="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 text-[11px] font-bold">
-                    买入 {fmt(p.target_buy_price)}
-                  </span>
-                )}
-                {p.target_sell_price != null && p.target_sell_price > 0 && (
-                  <span className="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full bg-red-500/15 text-red-400 text-[11px] font-bold">
-                    卖出 {fmt(p.target_sell_price)}
-                  </span>
-                )}
-                {p.strategy_buy_price != null && p.strategy_buy_price > 0 && p.strategy_buy_price !== p.target_buy_price && (
-                  <span className="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400/80 text-[10px] font-semibold">
-                    策略买 {fmt(p.strategy_buy_price)}
-                  </span>
-                )}
-                {p.strategy_sell_price != null && p.strategy_sell_price > 0 && p.strategy_sell_price !== p.target_sell_price && (
-                  <span className="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full bg-red-500/10 text-red-400/80 text-[10px] font-semibold">
-                    策略卖 {fmt(p.strategy_sell_price)}
-                  </span>
-                )}
-              </div>
-              {/* Action row — compact pills */}
-              <div className="flex items-center gap-1.5 mt-2.5" onClick={e => e.stopPropagation()}>
-                <button
-                  onClick={() => { setTradeTarget(p); setTradeSide('BUY'); setTradeQty(''); }}
-                  className="px-3 py-1.5 rounded-full bg-emerald-500/15 text-emerald-400 text-xs font-bold active:scale-[0.97] transition-transform"
-                >买入</button>
-                <button
-                  onClick={() => { setTradeTarget(p); setTradeSide('SELL'); setTradeQty(''); }}
-                  className="px-3 py-1.5 rounded-full bg-red-500/15 text-red-400 text-xs font-bold active:scale-[0.97] transition-transform"
-                >卖出</button>
-                <button
-                  onClick={() => { setAutoTradeTarget(p); setAutoTradeSide('BUY'); setAutoTradePrice(''); setAutoTradeQty(''); }}
-                  className="px-3 py-1.5 rounded-full bg-blue-500/12 text-blue-400 text-xs font-bold active:scale-[0.97] transition-transform relative"
-                >委托
-                  {pendingAutoTrades.filter(at => at.position_id === p.id).length > 0 && (
-                    <span className="absolute -top-1 -right-1 bg-blue-500 text-white text-[8px] w-3.5 h-3.5 rounded-full flex items-center justify-center font-bold">{pendingAutoTrades.filter(at => at.position_id === p.id).length}</span>
-                  )}
-                </button>
-                <button
-                  onClick={() => fetchAdvice(p)}
-                  className="px-3 py-1.5 rounded-full bg-[#FFB547]/12 text-[#FFB547] text-xs font-bold active:scale-[0.97] transition-transform"
-                >AI</button>
-                <div className="flex-1" />
-                <button
-                  onClick={() => handleDelete(p.id, p.name || p.symbol)}
-                  className="px-2 py-1.5 rounded-full text-[var(--text-muted)] text-xs active:scale-[0.97] transition-transform hover:text-red-400"
-                ><Trash2 size={13} /></button>
-              </div>
-            </div>
-          ))}
+              );
+            });
+          })()}
         </div>
       )}
 

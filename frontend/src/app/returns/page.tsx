@@ -33,7 +33,9 @@ export default function ReturnsPage() {
   const [openMetricTip, setOpenMetricTip] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [running, setRunning] = useState(false);
-  const [tradesCollapsed, setTradesCollapsed] = useState(true);
+  const [manualTradesCollapsed, setManualTradesCollapsed] = useState(true);
+  const [agentATradesCollapsed, setAgentATradesCollapsed] = useState(true);
+  const [agentBTradesCollapsed, setAgentBTradesCollapsed] = useState(true);
 
   const agentConfig = agentConfigs[activeAgent] ?? null;
   const agentStatus = agentStatuses[activeAgent] ?? null;
@@ -349,39 +351,38 @@ export default function ReturnsPage() {
       </div>
 
       <div className="card-surface p-4">
-        <div className="flex items-center gap-2 mb-3 cursor-pointer select-none" onClick={() => setTradesCollapsed(!tradesCollapsed)}>
-            {tradesCollapsed ? <ChevronRight size={16} className="text-[var(--text-muted)]" /> : <ChevronDown size={16} className="text-[var(--text-muted)]" />}
-            <PiggyBank size={16} className="text-[var(--text-muted)]" />
-            <span className="text-[var(--text-primary)] text-sm font-bold">交易记录</span>
-            <span className="text-[var(--text-muted)] text-xs">({trades.length})</span>
-          </div>
-        {!tradesCollapsed && (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 max-h-[60vh] overflow-y-auto">
-          {[
-            { label: '手动交易', items: manualTrades },
-            { label: 'Agent A 交易', items: trades.filter((t) => sourceGroup(t.source) === 'agent_a') },
-            { label: 'Agent B 交易', items: trades.filter((t) => sourceGroup(t.source) === 'agent_b') },
-          ].map((group) => (
-            <div key={group.label} className="flex flex-col gap-2">
-              <div className="text-[var(--text-primary)] text-sm font-bold">{group.label}</div>
-              {group.items.length === 0 && <div className="text-[var(--text-secondary)] text-sm">暂无{group.label}</div>}
-              {group.items.slice(0, 50).map((t) => (
-                <div key={t.id} className="flex items-center justify-between rounded-lg bg-[var(--bg-elevated)] px-3 py-2 text-xs">
-                  <div className="min-w-0">
-                    <div className="text-[var(--text-primary)] font-bold truncate">{t.name || t.symbol || t.position_id}</div>
-                    <div className="text-[var(--text-muted)]">{t.market || '-'} · {sourceLabel(t.source)} · {fmtTs(t.created_at)}</div>
-                  </div>
-                  <div className="text-right shrink-0 ml-3">
-                    <div className={`font-bold ${t.side === 'BUY' ? 'text-emerald-400' : 'text-red-400'}`}>{t.side === 'BUY' ? '买入' : '卖出'} {fmt(t.price)}</div>
-                    <div className="text-[var(--text-secondary)]">{t.quantity.toLocaleString()}股 · {t.amount.toLocaleString(undefined, { maximumFractionDigits: 0 })} · 手续费 {t.fee.toLocaleString(undefined, { maximumFractionDigits: 0 })}</div>
-                    {t.realized_pnl != null && <div className={`${pnlColor(t.realized_pnl)} text-[11px]`}>单笔盈亏 {fmtSigned(t.realized_pnl, 0)}</div>}
-                  </div>
-                </div>
-              ))}
+        {[
+          { label: '手动交易', items: manualTrades, collapsed: manualTradesCollapsed, setCollapsed: setManualTradesCollapsed, color: 'text-[var(--text-secondary)]' },
+          { label: 'Agent A 交易', items: trades.filter((t) => sourceGroup(t.source) === 'agent_a'), collapsed: agentATradesCollapsed, setCollapsed: setAgentATradesCollapsed, color: 'text-purple-400' },
+          { label: 'Agent B 交易', items: trades.filter((t) => sourceGroup(t.source) === 'agent_b'), collapsed: agentBTradesCollapsed, setCollapsed: setAgentBTradesCollapsed, color: 'text-blue-400' },
+        ].map((group) => (
+          <div key={group.label} className="mb-4 last:mb-0">
+            <div className="flex items-center gap-2 mb-2 cursor-pointer select-none" onClick={() => group.setCollapsed(!group.collapsed)}>
+              {group.collapsed ? <ChevronRight size={16} className="text-[var(--text-muted)]" /> : <ChevronDown size={16} className="text-[var(--text-muted)]" />}
+              <PiggyBank size={16} className="text-[var(--text-muted)]" />
+              <span className={`text-sm font-bold ${group.color}`}>{group.label}</span>
+              <span className="text-[var(--text-muted)] text-xs">({group.items.length})</span>
             </div>
-          ))}
-        </div>
-        )}
+            {!group.collapsed && (
+              <div className="flex flex-col gap-2 max-h-[40vh] overflow-y-auto">
+                {group.items.length === 0 && <div className="text-[var(--text-secondary)] text-sm">暂无{group.label}</div>}
+                {group.items.slice(0, 50).map((t) => (
+                  <div key={t.id} className="flex items-center justify-between rounded-lg bg-[var(--bg-elevated)] px-3 py-2 text-xs">
+                    <div className="min-w-0">
+                      <div className="text-[var(--text-primary)] font-bold truncate">{t.name || t.symbol || t.position_id}</div>
+                      <div className="text-[var(--text-muted)]">{t.market || '-'} · {sourceLabel(t.source)} · {fmtTs(t.created_at)}</div>
+                    </div>
+                    <div className="text-right shrink-0 ml-3">
+                      <div className={`font-bold ${t.side === 'BUY' ? 'text-emerald-400' : 'text-red-400'}`}>{t.side === 'BUY' ? '买入' : '卖出'} {fmt(t.price)}</div>
+                      <div className="text-[var(--text-secondary)]">{t.quantity.toLocaleString()}股 · {t.amount.toLocaleString(undefined, { maximumFractionDigits: 0 })} · 手续费 {t.fee.toLocaleString(undefined, { maximumFractionDigits: 0 })}</div>
+                      {t.realized_pnl != null && <div className={`${pnlColor(t.realized_pnl)} text-[11px]`}>单笔盈亏 {fmtSigned(t.realized_pnl, 0)}</div>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
       </div>
       <div className="h-20 md:h-8" /> {/* spacer for mobile bottom nav */}
     </div>
