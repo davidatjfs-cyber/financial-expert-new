@@ -230,7 +230,7 @@ export default function Dashboard() {
     if (addingPortfolio.has(key)) return;
     setAddingPortfolio(prev => new Set(prev).add(key));
     try {
-      await createPortfolioPosition({ market: 'CN', symbol: r.symbol, name: r.name });
+      await createPortfolioPosition({ market: r.market || 'CN', symbol: r.symbol, name: r.name });
     } catch {
       // ignore
     } finally {
