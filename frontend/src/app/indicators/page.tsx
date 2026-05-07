@@ -74,20 +74,27 @@ export default function PortfolioPage() {
   const totalPnl = positions.reduce((s, p) => s + (p.unrealized_pnl ?? 0), 0);
   const totalPnlPct = totalCost > 0 ? (totalPnl / totalCost) * 100 : 0;
 
-  const loadData = async () => {
-    try {
-      const [ps, al, ats] = await Promise.all([
-        getPortfolioPositions(),
-        getPortfolioAlerts(),
-        getPortfolioAutoTrades(),
-      ]);
-      setPositions(ps);
-      setAlerts(al);
-      setAutoTrades(ats);
-    } catch (e) {
-      console.error('Failed to load portfolio:', e);
-    } finally {
-      setLoading(false);
+  const loadData = async (retries = 3) => {
+    for (let i = 0; i < retries; i++) {
+      try {
+        const [ps, al, ats] = await Promise.all([
+          getPortfolioPositions(),
+          getPortfolioAlerts(),
+          getPortfolioAutoTrades(),
+        ]);
+        setPositions(ps);
+        setAlerts(al);
+        setAutoTrades(ats);
+        setLoading(false);
+        return;
+      } catch (e) {
+        console.error('Failed to load portfolio (attempt', i + 1, '):', e);
+        if (i < retries - 1) {
+          await new Promise(r => setTimeout(r, 2000));
+        } else {
+          setLoading(false);
+        }
+      }
     }
   };
 
