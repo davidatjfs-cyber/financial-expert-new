@@ -477,6 +477,68 @@ class AgentRuntimeTests(unittest.TestCase):
 
         self.assertLess(abs(float(periods.get("unrealized") or 0.0)), 1000.0)
 
+    def test_compute_period_returns_uses_summary_total_for_agent_total_pnl(self):
+        summary = self.api.PortfolioSummaryResponse(
+            total_cost=0.0,
+            total_market_value=0.0,
+            unrealized_pnl=0.0,
+            unrealized_pnl_pct=0.0,
+            realized_pnl=0.0,
+            total_trades=0,
+            total_buy_amount=0.0,
+            total_hold_amount=0.0,
+            manual={
+                "total_cost": 0.0,
+                "total_market_value": 0.0,
+                "unrealized_pnl": 0.0,
+                "unrealized_pnl_pct": 0.0,
+                "realized_pnl": 0.0,
+                "total_trades": 0,
+                "total_buy_amount": 0.0,
+                "total_hold_amount": 0.0,
+            },
+            agent_a={
+                "total_cost": 100000.0,
+                "total_market_value": 141000.0,
+                "unrealized_pnl": 41000.0,
+                "unrealized_pnl_pct": 41.0,
+                "realized_pnl": 37000.0,
+                "total_trades": 3,
+                "total_buy_amount": 100000.0,
+                "total_hold_amount": 141000.0,
+            },
+            agent_b={
+                "total_cost": 0.0,
+                "total_market_value": 0.0,
+                "unrealized_pnl": 0.0,
+                "unrealized_pnl_pct": 0.0,
+                "realized_pnl": 0.0,
+                "total_trades": 0,
+                "total_buy_amount": 0.0,
+                "total_hold_amount": 0.0,
+            },
+        )
+
+        def fake_agent_periods(trades, positions, pos_prices, agent_id, today_ts, week_ts, month_ts):
+            if agent_id == "a":
+                return {"today": 18384.0, "week": 80654.0, "month": 80654.0, "unrealized": 9197.0}
+            return {"today": 0.0, "week": 0.0, "month": 0.0, "unrealized": 0.0}
+
+        def fake_source_returns(**kwargs):
+            return types.SimpleNamespace(**kwargs)
+
+        def fake_returns(**kwargs):
+            return types.SimpleNamespace(**kwargs)
+
+        with patch.object(self.api, "_compute_agent_period_returns", side_effect=fake_agent_periods), \
+             patch.object(self.api, "_orphan_agent_sell_realized_adjustment", return_value=0.0), \
+             patch.object(self.api, "PortfolioSourceReturnsResponse", side_effect=fake_source_returns), \
+             patch.object(self.api, "PortfolioReturnsResponse", side_effect=fake_returns):
+            result = self.api._compute_period_returns([], summary, {"manual": {}, "a": {}, "b": {}}, [], {})
+
+        self.assertEqual(result.agent_a.today_pnl, 18384.0)
+        self.assertEqual(result.agent_a.total_pnl, 78000.0)
+
     def test_market_closed_queues_new_pick_execution(self):
         now = int(time.time())
         with self.db.session_scope() as s:

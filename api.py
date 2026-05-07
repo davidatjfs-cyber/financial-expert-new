@@ -3191,8 +3191,8 @@ def _compute_period_returns(
 
     total_pnl = float(summary.realized_pnl or 0.0) + float(summary.unrealized_pnl or 0.0)
     manual_total = float(summary.manual.realized_pnl or 0.0) + float(summary.manual.unrealized_pnl or 0.0)
-    agent_a_total = float(summary.agent_a.realized_pnl or 0.0) + unrealized_pnl_by_bucket["a"]
-    agent_b_total = float(summary.agent_b.realized_pnl or 0.0) + unrealized_pnl_by_bucket["b"]
+    agent_a_total = float(summary.agent_a.realized_pnl or 0.0) + float(summary.agent_a.unrealized_pnl or 0.0)
+    agent_b_total = float(summary.agent_b.realized_pnl or 0.0) + float(summary.agent_b.unrealized_pnl or 0.0)
 
     agent_a_capital = 0.0
     agent_b_capital = 0.0

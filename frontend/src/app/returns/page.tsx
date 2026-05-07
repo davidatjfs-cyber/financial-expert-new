@@ -217,9 +217,9 @@ export default function ReturnsPage() {
   ];
 
   const splitSummaryCards = [
-    { label: '手动收益', data: summary?.manual, returns: returnsData?.manual, trades: manualTrades },
-    { label: 'Agent A', data: summary?.agent_a, returns: returnsData?.agent_a, trades: trades.filter((t) => sourceGroup(t.source) === 'agent_a') },
-    { label: 'Agent B', data: summary?.agent_b, returns: returnsData?.agent_b, trades: trades.filter((t) => sourceGroup(t.source) === 'agent_b') },
+    { label: '手动收益', data: summary?.manual, returns: returnsData?.manual, trades: manualTrades, currentPnl: (summary?.manual?.realized_pnl ?? 0) + (summary?.manual?.unrealized_pnl ?? 0), firstMetricLabel: '今日 / 本周 / 本月' },
+    { label: 'Agent A', data: summary?.agent_a, returns: returnsData?.agent_a, trades: trades.filter((t) => sourceGroup(t.source) === 'agent_a'), currentPnl: agentStatuses.a?.managed_net_pnl ?? ((summary?.agent_a?.realized_pnl ?? 0) + (summary?.agent_a?.unrealized_pnl ?? 0)), firstMetricLabel: '当前净收益 / 本周 / 本月' },
+    { label: 'Agent B', data: summary?.agent_b, returns: returnsData?.agent_b, trades: trades.filter((t) => sourceGroup(t.source) === 'agent_b'), currentPnl: agentStatuses.b?.managed_net_pnl ?? ((summary?.agent_b?.realized_pnl ?? 0) + (summary?.agent_b?.unrealized_pnl ?? 0)), firstMetricLabel: '当前净收益 / 本周 / 本月' },
   ];
 
   return (
@@ -336,12 +336,12 @@ export default function ReturnsPage() {
             {splitSummaryCards.map((card) => (
               <div key={card.label} className="rounded-lg bg-[var(--bg-elevated)] p-3 flex flex-col gap-2">
                 <div className="text-[var(--text-primary)] font-bold">{card.label}</div>
-                <div className="flex items-center justify-between"><span className="text-[var(--text-secondary)]">今日 / 本周 / 本月</span><span className="text-[var(--text-primary)] font-bold">{fmtSigned(card.returns?.today_pnl, 0)} / {fmtSigned(card.returns?.week_pnl, 0)} / {fmtSigned(card.returns?.month_pnl, 0)}</span></div>
+                <div className="flex items-center justify-between"><span className="text-[var(--text-secondary)]">{card.firstMetricLabel}</span><span className="text-[var(--text-primary)] font-bold">{fmtSigned(card.currentPnl, 0)} / {fmtSigned(card.returns?.week_pnl, 0)} / {fmtSigned(card.returns?.month_pnl, 0)}</span></div>
                 <div className="flex items-center justify-between"><span className="text-[var(--text-secondary)]">已实现收益</span><span className={`${(card.data?.realized_pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'} font-bold`}>{fmtSigned(card.data?.realized_pnl, 0)}</span></div>
                 <div className="flex items-center justify-between"><span className="text-[var(--text-secondary)]">未实现收益</span><span className={`${(card.data?.unrealized_pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'} font-bold`}>{fmtSigned(card.data?.unrealized_pnl, 0)}</span></div>
                 <div className="flex items-center justify-between"><span className="text-[var(--text-secondary)]">持仓成本 / 市值</span><span className="text-[var(--text-primary)] font-bold">{card.data ? card.data.total_cost.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '-'} / {card.data ? card.data.total_market_value.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '-'}</span></div>
                 <div className="flex items-center justify-between"><span className="text-[var(--text-secondary)]">买入 / 持有金额</span><span className="text-[var(--text-primary)] font-bold">{card.data ? card.data.total_buy_amount.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '-'} / {card.data ? card.data.total_hold_amount.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '-'}</span></div>
-                <div className="flex items-center justify-between"><span className="text-[var(--text-secondary)]">交易笔数 / 总收益</span><span className="text-[var(--text-primary)] font-bold">{card.data?.total_trades ?? '-'} / {fmtSigned(card.returns?.total_pnl, 0)}</span></div>
+                <div className="flex items-center justify-between"><span className="text-[var(--text-secondary)]">交易笔数 / 总收益</span><span className="text-[var(--text-primary)] font-bold">{card.data?.total_trades ?? '-'} / {fmtSigned(card.currentPnl, 0)}</span></div>
               </div>
             ))}
           </div>
