@@ -526,6 +526,10 @@ class PortfolioSummaryResponse(BaseModel):
     manual: "PortfolioSourceSummaryResponse" = Field(default_factory=lambda: PortfolioSourceSummaryResponse())
     agent_a: "PortfolioSourceSummaryResponse" = Field(default_factory=lambda: PortfolioSourceSummaryResponse())
     agent_b: "PortfolioSourceSummaryResponse" = Field(default_factory=lambda: PortfolioSourceSummaryResponse())
+    manual_principal: float = 10000000.0
+    manual_remaining: float = 0.0
+    manual_utilization: float = 0.0
+    manual_net_return: float = 0.0
 
 
 class PortfolioAgentConfigRequest(BaseModel):
@@ -3476,6 +3480,10 @@ def get_portfolio_summary():
         manual=_source_summary_response(breakdown["manual"]),
         agent_a=_source_summary_response(breakdown["a"]),
         agent_b=_source_summary_response(breakdown["b"]),
+        manual_principal=10000000.0,
+        manual_remaining=max(0.0, 10000000.0 - float(breakdown["manual"]["total_cost"])),
+        manual_utilization=min(100.0, float(breakdown["manual"]["total_cost"]) / 100000.0),
+        manual_net_return=float(breakdown["manual"]["unrealized_pnl"]) + float(breakdown["manual"]["realized_pnl"]),
     )
 
 
@@ -4740,6 +4748,8 @@ def _portfolio_feishu_notifier():
         try:
             print(f"[FEISHU] checking portfolio alerts and agents...")
             alerts = get_portfolio_alerts()
+            for alert in alerts:
+                _send_feishu_portfolio_alert(alert)
             _process_live_auto_trades("CN")
             slot_a = _claim_agent_new_pick_slot("a")
             slot_b = _claim_agent_new_pick_slot("b")

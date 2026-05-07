@@ -11,6 +11,7 @@ import {
   getRecommendScanStatus,
   getRecommendLatest,
   getRecommendSectors,
+  createPortfolioPosition,
   type StockSearchResult,
   type StockIndicators,
   type RecommendStock,
@@ -39,6 +40,7 @@ export default function Dashboard() {
   // AI recommend state
   const [aiResults, setAiResults] = useState<RecommendStock[]>([]);
   const [aiScanning, setAiScanning] = useState(false);
+  const [addingPortfolio, setAddingPortfolio] = useState<Set<string>>(new Set());
   const [aiStatus, setAiStatus] = useState('');
   const [aiProgress, setAiProgress] = useState(0);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -197,37 +199,42 @@ export default function Dashboard() {
   }, []);
 
   const startAiScan = async () => {
+    setAiScanning(true);
     try {
-      const sector = selectedSector || undefined;
-      await startRecommendScan(20, true, sector);
+      await startRecommendScan(20, true, selectedSector);
       setAiScanning(true);
-      setAiProgress(0);
-      const sectorName = selectedSector ? sectors.find(s => s.label === selectedSector)?.name : '沪深300';
-      setAiStatus(`正在扫描${sectorName}...`);
-      stopPolling();
-      pollRef.current = setInterval(async () => {
+      // Poll until done
+      for (let i = 0; i < 60; i++) {
+        await new Promise(r => setTimeout(r, 3000));
         try {
           const st = await getRecommendScanStatus();
-          setAiProgress(st.progress);
-          setAiStatus(st.message);
-          if (st.status === 'done') {
-            stopPolling();
+          if (st.status === 'done' || st.progress >= 100) {
             setAiScanning(false);
             const res = await getRecommendLatest();
-            setAiResults(res.results || []);
-          } else if (st.status === 'error') {
-            stopPolling();
-            setAiScanning(false);
-            setAiStatus(st.message);
+            if (res?.results) setAiResults(res.results);
+            return;
           }
         } catch {
-          stopPolling();
           setAiScanning(false);
+          return;
         }
-      }, 2000);
-    } catch (e: any) {
-      setAiStatus(e?.message || '启动失败');
+      }
       setAiScanning(false);
+    } catch {
+      setAiScanning(false);
+    }
+  };
+
+  const handleAddToPortfolio = async (r: RecommendStock) => {
+    const key = `${r.market}:${r.symbol}`;
+    if (addingPortfolio.has(key)) return;
+    setAddingPortfolio(prev => new Set(prev).add(key));
+    try {
+      await createPortfolioPosition({ market: 'CN', symbol: r.symbol, name: r.name });
+    } catch {
+      // ignore
+    } finally {
+      setTimeout(() => setAddingPortfolio(prev => { const s = new Set(prev); s.delete(key); return s; }), 2000);
     }
   };
 
@@ -516,6 +523,19 @@ export default function Dashboard() {
                           {r.timing_signal_reason || r.reason}
                         </div>
                       )}
+                      <div className="mt-2" onClick={e => e.stopPropagation()}>
+                        {(() => {
+                          const pk = `${r.market}:${r.symbol}`;
+                          const adding = addingPortfolio.has(pk);
+                          return (
+                            <button
+                              onClick={() => handleAddToPortfolio(r)}
+                              disabled={adding}
+                              className="w-full py-2 rounded-xl text-xs font-bold transition-all bg-emerald-500/15 text-emerald-400 active:scale-[0.97] disabled:opacity-40"
+                            >{adding ? '添加中...' : '+ 持仓'}</button>
+                          );
+                        })()}
+                      </div>
                       </div>
                     </div>
                   );})}

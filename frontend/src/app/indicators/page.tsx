@@ -9,6 +9,7 @@ import {
   getPortfolioPositions,
   createPortfolioPosition,
   deletePortfolioPosition,
+  getPortfolioSummary,
   createPortfolioTrade,
   updatePortfolioPosition,
   getPortfolioAlerts,
@@ -18,6 +19,7 @@ import {
   type PortfolioPosition,
   type PortfolioAlert,
   type PortfolioAutoTrade,
+  type PortfolioSummary,
   type StockSearchResult,
 } from '@/services/api';
 
@@ -38,6 +40,7 @@ export default function PortfolioPage() {
   const [alerts, setAlerts] = useState<PortfolioAlert[]>([]);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState<string | null>(null);
+  const [summary, setSummary] = useState<PortfolioSummary | null>(null);
   const [manualCollapsed, setManualCollapsed] = useState(false);
   const [agentACollapsed, setAgentACollapsed] = useState(false);
   const [agentBCollapsed, setAgentBCollapsed] = useState(false);
@@ -77,14 +80,16 @@ export default function PortfolioPage() {
   const loadData = async (retries = 3) => {
     for (let i = 0; i < retries; i++) {
       try {
-        const [ps, al, ats] = await Promise.all([
+        const [ps, al, ats, sm] = await Promise.all([
           getPortfolioPositions(),
           getPortfolioAlerts(),
           getPortfolioAutoTrades(),
+          getPortfolioSummary(),
         ]);
         setPositions(ps);
         setAlerts(al);
         setAutoTrades(ats);
+        setSummary(sm);
         setLoading(false);
         return;
       } catch (e) {
@@ -370,7 +375,7 @@ export default function PortfolioPage() {
         </div>
       )}
 
-      {/* Portfolio Summary — compact horizontal strip */}
+      {/* Portfolio Summary */}
       <div className="card-surface px-4 py-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -393,11 +398,38 @@ export default function PortfolioPage() {
             <div className="text-[var(--text-muted)] text-[10px]">总盈亏</div>
             <div className={`text-sm font-bold ${totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
               {totalCost > 0 ? `${fmtSigned(totalPnl, 0)}` : '-'}
-              {totalCost > 0 && <span className="text-[10px] ml-0.5">({fmtSigned(totalPnlPct, 1)}%)</span>}
             </div>
           </div>
         </div>
       </div>
+
+      {/* Manual Capital Metrics */}
+      {summary && (
+        <div className="card-surface px-4 py-3">
+          <div className="flex items-center gap-2 mb-2">
+            <BarChart3 size={14} className="text-[var(--text-muted)]" />
+            <span className="text-[var(--text-secondary)] text-[11px] font-semibold tracking-wide">手动资金</span>
+          </div>
+          <div className="grid grid-cols-4 gap-2">
+            <div>
+              <div className="text-[var(--text-muted)] text-[10px]">本金</div>
+              <div className="text-[var(--text-primary)] text-sm font-bold">{summary.manual_principal.toLocaleString(undefined, { maximumFractionDigits: 0 })}</div>
+            </div>
+            <div>
+              <div className="text-[var(--text-muted)] text-[10px]">剩余资金</div>
+              <div className={`text-sm font-bold ${summary.manual_remaining >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{summary.manual_remaining.toLocaleString(undefined, { maximumFractionDigits: 0 })}</div>
+            </div>
+            <div>
+              <div className="text-[var(--text-muted)] text-[10px]">资金使用效率</div>
+              <div className="text-[var(--text-primary)] text-sm font-bold">{summary.manual_utilization.toFixed(1)}%</div>
+            </div>
+            <div>
+              <div className="text-[var(--text-muted)] text-[10px]">净收益</div>
+              <div className={`text-sm font-bold ${summary.manual_net_return >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmtSigned(summary.manual_net_return, 0)}</div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Alerts — expanded */}
       {alerts.length > 0 && (
@@ -446,13 +478,15 @@ export default function PortfolioPage() {
             ] as const;
             for (const p of positions) {
               const bd = p.holdings_breakdown as Record<string, SH | null | undefined> | null;
+              let hasAny = false;
               for (const sd of srcDefs) {
                 const h = bd?.[sd.key];
                 if (h && h.quantity > 0) {
                   flat.push({ position: p, sourceKey: sd.key, sourceLabel: sd.label, sourceColor: sd.color, holding: h });
+                  hasAny = true;
                 }
               }
-              if (!bd) {
+              if (!hasAny) {
                 flat.push({ position: p, sourceKey: 'manual', sourceLabel: '手动', sourceColor: 'text-[var(--text-secondary)]', holding: { quantity: p.quantity, avg_cost: p.avg_cost, market_value: p.market_value ?? 0, unrealized_pnl: p.unrealized_pnl ?? 0, unrealized_pnl_pct: p.unrealized_pnl_pct ?? 0 } });
               }
             }

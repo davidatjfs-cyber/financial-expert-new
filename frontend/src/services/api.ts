@@ -196,6 +196,10 @@ export interface PortfolioSummary {
   manual: PortfolioSourceSummary;
   agent_a: PortfolioSourceSummary;
   agent_b: PortfolioSourceSummary;
+  manual_principal: number;
+  manual_remaining: number;
+  manual_utilization: number;
+  manual_net_return: number;
 }
 
 export interface PortfolioSourceSummary {
