@@ -169,8 +169,9 @@ export default function PortfolioPage() {
     }
   };
 
+  const [tradeSubmitting, setTradeSubmitting] = useState(false);
   const handleTrade = async () => {
-    if (!tradeTarget) return;
+    if (!tradeTarget || tradeSubmitting) return;
     const qty = Number(tradeQty);
     if (!Number.isFinite(qty) || qty <= 0) {
       setMessage('请输入有效数量');
@@ -178,6 +179,7 @@ export default function PortfolioPage() {
       return;
     }
     try {
+      setTradeSubmitting(true);
       await createPortfolioTrade({ position_id: tradeTarget.id, side: tradeSide, quantity: qty });
       setTradeTarget(null);
       setTradeQty('');
@@ -185,6 +187,8 @@ export default function PortfolioPage() {
       setMessage(`${tradeSide === 'BUY' ? '买入' : '卖出'}成功`);
     } catch {
       setMessage('交易失败，请重试');
+    } finally {
+      setTradeSubmitting(false);
     }
     setTimeout(() => setMessage(null), 3000);
   };
@@ -478,16 +482,30 @@ export default function PortfolioPage() {
             ] as const;
             for (const p of positions) {
               const bd = p.holdings_breakdown as Record<string, SH | null | undefined> | null;
-              let hasAny = false;
+              let hasAnySource = false;
               for (const sd of srcDefs) {
                 const h = bd?.[sd.key];
                 if (h && h.quantity > 0) {
                   flat.push({ position: p, sourceKey: sd.key, sourceLabel: sd.label, sourceColor: sd.color, holding: h });
-                  hasAny = true;
+                  hasAnySource = true;
                 }
               }
-              if (!hasAny) {
-                flat.push({ position: p, sourceKey: 'manual', sourceLabel: '手动', sourceColor: 'text-[var(--text-secondary)]', holding: { quantity: p.quantity, avg_cost: p.avg_cost, market_value: p.market_value ?? 0, unrealized_pnl: p.unrealized_pnl ?? 0, unrealized_pnl_pct: p.unrealized_pnl_pct ?? 0 } });
+              if (bd?.manual && bd.manual.quantity > 0) {
+                // already pushed above
+              } else if (!hasAnySource) {
+                const hasAgentAPending = pendingAutoTrades.some(at => at.position_id === p.id && (at.source || '').startsWith('auto_strategy_a'));
+                const hasAgentBPending = pendingAutoTrades.some(at => at.position_id === p.id && (at.source || '').startsWith('auto_strategy_b'));
+                if (!hasAgentAPending && !hasAgentBPending) {
+                  flat.push({ position: p, sourceKey: 'manual', sourceLabel: '手动', sourceColor: 'text-[var(--text-secondary)]', holding: { quantity: p.quantity, avg_cost: p.avg_cost, market_value: p.market_value ?? 0, unrealized_pnl: p.unrealized_pnl ?? 0, unrealized_pnl_pct: p.unrealized_pnl_pct ?? 0 } });
+                }
+              }
+              const agentATrades = pendingAutoTrades.filter(at => at.position_id === p.id && (at.source || '').startsWith('auto_strategy_a'));
+              const agentBTrades = pendingAutoTrades.filter(at => at.position_id === p.id && (at.source || '').startsWith('auto_strategy_b'));
+              if (agentATrades.length > 0 && !(bd?.agent_a && bd.agent_a.quantity > 0)) {
+                flat.push({ position: p, sourceKey: 'agent_a', sourceLabel: 'Agent A', sourceColor: 'text-purple-400', holding: { quantity: 0, avg_cost: 0, market_value: 0, unrealized_pnl: 0, unrealized_pnl_pct: 0 } });
+              }
+              if (agentBTrades.length > 0 && !(bd?.agent_b && bd.agent_b.quantity > 0)) {
+                flat.push({ position: p, sourceKey: 'agent_b', sourceLabel: 'Agent B', sourceColor: 'text-blue-400', holding: { quantity: 0, avg_cost: 0, market_value: 0, unrealized_pnl: 0, unrealized_pnl_pct: 0 } });
               }
             }
             const renderGroup = (key: string, label: string, color: string, collapsed: boolean, setCollapsed: (v: boolean) => void) => {
@@ -505,6 +523,13 @@ export default function PortfolioPage() {
                   {!collapsed && items.map(f => {
                     const p = f.position;
                     const h = f.holding;
+                    const pendingForThis = pendingAutoTrades.filter(at => at.position_id === p.id && (
+                      (f.sourceKey === 'agent_a' && (at.source || '').startsWith('auto_strategy_a')) ||
+                      (f.sourceKey === 'agent_b' && (at.source || '').startsWith('auto_strategy_b')) ||
+                      (f.sourceKey === 'manual' && (at.source || '').startsWith('auto_order'))
+                    ));
+                    const isPendingOnly = h.quantity <= 0 && pendingForThis.length > 0;
+                    const isEmpty = h.quantity <= 0 && pendingForThis.length === 0;
                     return (
                       <div key={`${p.id}-${key}`} className="card-surface px-4 py-3 mb-2 cursor-pointer active:scale-[0.99] transition-transform"
                            onClick={() => router.push(`/stock?symbol=${encodeURIComponent(p.symbol)}&market=${encodeURIComponent(p.market)}&name=${encodeURIComponent(p.name || '')}`)}>
@@ -514,20 +539,37 @@ export default function PortfolioPage() {
                               <span className="text-[var(--text-primary)] text-base font-bold truncate">{p.name || p.symbol}</span>
                               <span className="text-[var(--text-muted)] text-[10px] bg-[var(--bg-page)] px-1.5 py-0.5 rounded shrink-0">{p.market}</span>
                               <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${f.sourceColor} bg-[var(--bg-page)]`}>{f.sourceLabel}</span>
+                              {isPendingOnly && <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400">委托中</span>}
+                              {isEmpty && <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[var(--bg-elevated)] text-[var(--text-muted)]">未持仓</span>}
                             </div>
                           </div>
                           <div className="text-right shrink-0 ml-3">
                             <div className="text-[var(--text-primary)] text-lg font-bold leading-tight">{fmt(p.current_price)}</div>
-                            <div className={`text-xs font-bold leading-tight ${h.unrealized_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                            {!isPendingOnly && !isEmpty && <div className={`text-xs font-bold leading-tight ${h.unrealized_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                               {fmtSigned(h.unrealized_pnl)} · {fmtSigned(h.unrealized_pnl_pct)}%
-                            </div>
+                            </div>}
                           </div>
                         </div>
-                        <div className="flex items-center gap-3 mt-2 text-[10px] text-[var(--text-muted)]">
-                          <span>持仓 <b className="text-[var(--text-secondary)]">{Math.round(h.quantity)}</b></span>
-                          <span>成本 <b className="text-[var(--text-secondary)]">{fmt(h.avg_cost)}</b></span>
-                          <span>市值 <b className="text-[var(--text-secondary)]">{h.market_value.toLocaleString(undefined, { maximumFractionDigits: 0 })}</b></span>
-                        </div>
+                        {isPendingOnly ? (
+                          <div className="flex flex-col gap-1 mt-2">
+                            {pendingForThis.map(at => (
+                              <div key={at.id} className="flex items-center gap-2 text-[10px] text-[var(--text-muted)]">
+                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${at.side === 'BUY' ? 'bg-emerald-500/15 text-emerald-400' : 'bg-red-500/15 text-red-400'}`}>{at.side === 'BUY' ? '买' : '卖'}</span>
+                                <span>触发价 {at.trigger_price.toFixed(2)} · {Math.round(at.quantity)}股</span>
+                              </div>
+                            ))}
+                          </div>
+                        ) : isEmpty ? (
+                          <div className="flex items-center gap-3 mt-2 text-[10px] text-[var(--text-muted)]">
+                            <span>持仓 <b className="text-[var(--text-secondary)]">0</b></span>
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-3 mt-2 text-[10px] text-[var(--text-muted)]">
+                            <span>持仓 <b className="text-[var(--text-secondary)]">{Math.round(h.quantity)}</b></span>
+                            <span>成本 <b className="text-[var(--text-secondary)]">{fmt(h.avg_cost)}</b></span>
+                            <span>市值 <b className="text-[var(--text-secondary)]">{h.market_value.toLocaleString(undefined, { maximumFractionDigits: 0 })}</b></span>
+                          </div>
+                        )}
                         <div className="flex items-center gap-2 mt-1.5">
                           {p.target_buy_price != null && p.target_buy_price > 0 && (
                             <span className="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 text-[11px] font-bold">买入 {fmt(p.target_buy_price)}</span>
@@ -573,7 +615,12 @@ export default function PortfolioPage() {
             <span className="text-blue-400 text-sm font-semibold">委托订单 ({pendingAutoTrades.length})</span>
           </div>
           <div className="flex flex-col gap-2">
-            {pendingAutoTrades.map((at) => (
+            {pendingAutoTrades.map((at) => {
+              const srcLabel = (at.source || '').startsWith('auto_strategy_a') ? 'Agent A' : (at.source || '').startsWith('auto_strategy_b') ? 'Agent B' : '手动';
+              const srcColor = srcLabel === 'Agent A' ? 'text-purple-400 bg-purple-500/15' : srcLabel === 'Agent B' ? 'text-blue-400 bg-blue-500/15' : 'text-[var(--text-secondary)] bg-[var(--bg-elevated)]';
+              const createdTime = at.created_at ? new Date(at.created_at * 1000) : null;
+              const timeStr = createdTime ? `${createdTime.getMonth()+1}/${createdTime.getDate()} ${String(createdTime.getHours()).padStart(2,'0')}:${String(createdTime.getMinutes()).padStart(2,'0')}` : '';
+              return (
               <div key={at.id} className="flex items-center justify-between bg-[var(--bg-page)] rounded-[var(--radius-md)] px-3 py-2.5">
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
@@ -581,10 +628,12 @@ export default function PortfolioPage() {
                       {at.side === 'BUY' ? '买' : '卖'}
                     </span>
                     <span className="text-[var(--text-primary)] text-sm font-semibold truncate">{at.name || at.symbol}</span>
+                    <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${srcColor}`}>{srcLabel}</span>
                   </div>
                   <div className="text-[var(--text-muted)] text-xs mt-1">
                     触发价 {at.trigger_price.toFixed(2)} · {at.quantity}股
                     {at.side === 'BUY' ? ' · 价格≤触发价时买入' : ' · 价格≥触发价时卖出'}
+                    {timeStr && <span className="ml-2">{timeStr}</span>}
                   </div>
                 </div>
                 <button
@@ -595,7 +644,8 @@ export default function PortfolioPage() {
                   <XCircle size={18} />
                 </button>
               </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
@@ -720,7 +770,8 @@ export default function PortfolioPage() {
 
             <button
               onClick={handleTrade}
-              className={`w-full rounded-[var(--radius-lg)] py-4 font-bold text-base active:scale-[0.98] transition-transform ${
+              disabled={tradeSubmitting}
+              className={`w-full rounded-[var(--radius-lg)] py-4 font-bold text-base active:scale-[0.98] transition-transform disabled:opacity-50 disabled:pointer-events-none ${
                 tradeSide === 'BUY'
                   ? 'bg-emerald-500 text-[var(--bg-page)]'
                   : 'bg-red-500 text-white'

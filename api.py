@@ -538,7 +538,7 @@ class PortfolioAgentConfigRequest(BaseModel):
     target_profit: Optional[float] = None
     deadline_ts: Optional[int] = None
     capital: float = 10000000.0
-    min_buy_quantity: float = 10000.0
+    min_buy_quantity: float = 1000.0
 
 
 class PortfolioAgentConfigResponse(BaseModel):
@@ -547,7 +547,7 @@ class PortfolioAgentConfigResponse(BaseModel):
     target_profit: Optional[float] = None
     deadline_ts: Optional[int] = None
     capital: float = 10000000.0
-    min_buy_quantity: float = 10000.0
+    min_buy_quantity: float = 1000.0
     last_run_at: Optional[int] = None
     last_action: Optional[str] = None
     last_status: Optional[str] = None
@@ -561,7 +561,7 @@ class PortfolioAgentStatusResponse(BaseModel):
     target_profit: Optional[float] = None
     deadline_ts: Optional[int] = None
     capital: float = 10000000.0
-    min_buy_quantity: float = 10000.0
+    min_buy_quantity: float = 1000.0
     managed_capital: float = 0.0
     managed_realized_pnl: float = 0.0
     managed_unrealized_pnl: float = 0.0
@@ -808,7 +808,7 @@ def _buy_is_add_position(position_id: str, source: str, buy_quantity: float) -> 
 
 
 def _send_feishu_trade_notify(position_id: str, side: str, price: float, quantity: float,
-                               symbol: str, name: str | None, market: str, source: str):
+                               symbol: str, name: str | None, market: str, source: str, trade_type: str = "直接成交"):
     mkt = (market or "").strip().upper()
     if mkt == "CN":
         if _cn_market_closed():
@@ -844,12 +844,14 @@ def _send_feishu_trade_notify(position_id: str, side: str, price: float, quantit
     currency = _mkt_currencies.get(mkt, "")
     side_label = "买入" if side == "BUY" else "卖出"
     source_label = {"manual": "手动", "auto_strategy": "策略自动", "auto_strategy_a": "Agent A", "auto_strategy_b": "Agent B", "auto_order": "委托自动"}.get(source, source)
+    trade_type_label = "委托成交" if trade_type == "委托成交" else "直接成交"
     amount = price * quantity
     tz = _ZoneInfo('America/New_York') if mkt == 'US' else _ZoneInfo('Asia/Hong_Kong') if mkt == 'HK' else _ZoneInfo('Asia/Shanghai')
     time_str = _dt.datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')
 
     elements = [
         {"tag": "div", "text": {"tag": "lark_md", "content": f"**股票**：{name or symbol} ({market}:{symbol})"}},
+        {"tag": "div", "text": {"tag": "lark_md", "content": f"**成交方式**：{trade_type_label}"}},
         {"tag": "div", "text": {"tag": "lark_md", "content": f"**价格**：{price:.2f} {currency}    **数量**：{int(quantity)}股"}},
         {"tag": "div", "text": {"tag": "lark_md", "content": f"**金额**：{amount:,.0f} {currency}"}},
         {"tag": "div", "text": {"tag": "lark_md", "content": f"**时间**：{time_str}"}},
@@ -874,7 +876,7 @@ def _send_feishu_trade_notify(position_id: str, side: str, price: float, quantit
         "config": {"wide_screen_mode": True},
         "header": {
             "template": "green" if side == "BUY" else "red",
-            "title": {"tag": "plain_text", "content": f"[{mkt_tag}] {source_label}执行{side_label}"},
+            "title": {"tag": "plain_text", "content": f"[{mkt_tag}] {source_label}{trade_type_label}{side_label}"},
         },
         "elements": elements,
     }
@@ -954,6 +956,12 @@ def _create_trade_at_price(position_id: str, side: str, quantity: float, price: 
 
     if side == "SELL" and float(p.quantity or 0.0) <= 0:
         session.query(PortfolioAutoTrade).filter(PortfolioAutoTrade.position_id == p.id).update({"status": "CANCELLED"})
+    elif side == "BUY":
+        session.query(PortfolioAutoTrade).filter(
+            PortfolioAutoTrade.position_id == p.id,
+            PortfolioAutoTrade.side == "BUY",
+            PortfolioAutoTrade.status == "PENDING",
+        ).update({"status": "CANCELLED"})
 
     return PortfolioTradeResponse(
         id=trade.id,
@@ -971,7 +979,14 @@ def _create_trade_at_price(position_id: str, side: str, quantity: float, price: 
     )
 
 
+_strategy_exec_today: dict[str, str] = {}
+
+
 def _should_skip_strategy_exec(exec_key: str) -> bool:
+    today = time.strftime("%Y-%m-%d")
+    if _strategy_exec_today.get(exec_key) == today:
+        return True
+    _strategy_exec_today[exec_key] = today
     return False
 
 
@@ -987,6 +1002,7 @@ def _execute_strategy_alert_trade(alert: PortfolioAlertResponse, agent_id: str =
         positions = s.execute(select(PortfolioPosition)).scalars().all()
         trades = s.execute(select(PortfolioTrade)).scalars().all()
         held_qty = float(_agent_live_position_quantities(agent_id, trades, positions).get(alert.position_id, 0.0) or 0.0)
+        agent_qty_map = _agent_live_position_quantities(agent_id, trades, positions)
 
     current_price = float(alert.current_price or 0.0)
     trigger_price = float(alert.trigger_price or 0.0)
@@ -995,7 +1011,26 @@ def _execute_strategy_alert_trade(alert: PortfolioAlertResponse, agent_id: str =
         return None
 
     if alert.alert_type in {"target_buy", "strategy_buy_zone", "signal_buy"}:
-        return _create_trade_at_price(alert.position_id, "BUY", 10000.0, trade_price, _agent_id_to_source(agent_id))
+        if held_qty <= 0:
+            return None
+        buy_qty = 10000.0
+        buy_amount = buy_qty * trade_price
+        agent_mv = 0.0
+        for pos in positions:
+            aqty = float(agent_qty_map.get(pos.id, 0.0) or 0.0)
+            if aqty > 0:
+                sp = get_stock_price(symbol=pos.symbol, market=pos.market)
+                agent_mv += aqty * float(getattr(sp, "price", 0) or 0)
+        capital = 10000000.0
+        remaining = max(0.0, capital - agent_mv)
+        if trade_price > 0 and buy_amount > remaining:
+            buy_qty = max(0.0, remaining / trade_price)
+            buy_qty = math.floor(buy_qty / 100) * 100
+            if buy_qty < 100:
+                _log_agent_pick_event(agent_id, "alert", "buy_rejected_insufficient_capital", symbol=alert.symbol or "", detail=f"remaining={remaining:.0f} < min_buy={trade_price * 100:.0f}")
+                return None
+            buy_amount = buy_qty * trade_price
+        return _create_trade_at_price(alert.position_id, "BUY", buy_qty, trade_price, _agent_id_to_source(agent_id))
     if held_qty <= 0:
         return None
     if alert.alert_type == "strategy_take_profit_1":
@@ -2493,6 +2528,16 @@ def create_portfolio_trade(req: PortfolioTradeRequest):
             if new_qty <= 0:
                 p.avg_cost = 0.0
 
+        recent = s.execute(select(PortfolioTrade).where(
+            PortfolioTrade.position_id == p.id,
+            PortfolioTrade.side == side,
+            PortfolioTrade.price == price,
+            PortfolioTrade.quantity == qty,
+            PortfolioTrade.source == (req.source or "manual"),
+        ).order_by(PortfolioTrade.created_at.desc()).limit(1)).scalars().first()
+        if recent and abs(now - (recent.created_at or 0)) < 5:
+            raise HTTPException(status_code=429, detail="duplicate trade")
+
         p.updated_at = now
 
         t = PortfolioTrade(
@@ -3066,7 +3111,7 @@ def _trade_realized_pnl_map(
 
 
 def _agent_dynamic_buy_quantity(min_buy_quantity: float, target_profit: Optional[float], deadline_ts: Optional[int], net_pnl: float, action: str, managed_capital: float) -> float:
-    base = max(10000.0, float(min_buy_quantity or 10000.0))
+    base = max(1000.0, float(min_buy_quantity or 1000.0))
     units = 1.0
     action = (action or "").strip()
     if action == "强买信号":
@@ -3487,6 +3532,12 @@ def get_portfolio_summary():
     )
 
 
+def _compute_manual_remaining_capital(trades: list[PortfolioTrade], positions: list[PortfolioPosition], capital: float = 10000000.0) -> float:
+    breakdown = _position_source_holdings(trades, positions, {p.id: 0.0 for p in positions})
+    manual_cost = float(breakdown.get("manual", {}).get("total_cost", 0.0))
+    return max(0.0, capital - manual_cost)
+
+
 def _get_or_create_agent_config(session, agent_id: str = "a") -> PortfolioAgentConfig:
     cfg = session.get(PortfolioAgentConfig, agent_id)
     if cfg:
@@ -3634,8 +3685,10 @@ def _run_llm_agent_once(
         all_trades, positions, agent_id, capital,
     )
 
+    capital_reserve = max(capital * 0.2, 4000000.0)
+    max_holdings = capital - capital_reserve
     agent_holdings_mv = float(get_portfolio_summary().agent_a.total_market_value or 0) + float(get_portfolio_summary().agent_b.total_market_value or 0)
-    available_capital = capital - agent_holdings_mv
+    available_capital = max(0.0, max_holdings - agent_holdings_mv)
 
     holdings_info = []
     for pos in positions:
@@ -3893,16 +3946,21 @@ def _run_llm_agent_once(
                 if buy_price <= 0:
                     last_status = f"llm_buy_no_price:{symbol}"
                     continue
-                min_qty = float(cfg.min_buy_quantity or 10000.0)
+                min_qty = float(cfg.min_buy_quantity or 1000.0)
                 buy_rejection = _agent_b_buy_rejection_reason(candidate, buy_price, available_capital, min_qty)
                 if buy_rejection is not None:
                     _log_agent_pick_event(agent_id, slot_key, "llm_buy_rejected", symbol=symbol, detail=buy_rejection)
                     last_status = f"llm_buy_rejected:{buy_rejection}:{symbol}"
                     continue
                 if pos is None:
-                    _log_agent_pick_event(agent_id, slot_key, "llm_buy_no_position", symbol=symbol, detail="user has not added this stock to portfolio")
-                    last_status = f"llm_buy_no_position:{symbol}"
-                    continue
+                    name = (candidate or {}).get("name") or symbol
+                    pos = PortfolioPosition(
+                        market="CN", symbol=symbol, name=name or symbol,
+                        quantity=0.0, avg_cost=0.0, created_at=now, updated_at=now,
+                    )
+                    s.add(pos)
+                    s.flush()
+                    _log_agent_pick_event(agent_id, slot_key, "llm_buy_created_position", symbol=symbol, detail="agent created new position")
                 qty = _agent_dynamic_buy_quantity(
                     min_qty,
                     cfg.target_profit,
@@ -4079,9 +4137,10 @@ def _run_portfolio_agent_once(
     slot_key = pick_slot_key or "unknown"
     with session_scope() as s:
         cfg = _get_or_create_agent_config(s, agent_id)
-        min_buy_quantity = float(cfg.min_buy_quantity or 10000.0)
+        min_buy_quantity = float(cfg.min_buy_quantity or 1000.0)
     _log_agent_pick_event(agent_id, slot_key, "slot_entered")
     candidates = _portfolio_agent_pick_candidates(min_buy_quantity, limit=5)
+    _log_agent_pick_event(agent_id, slot_key, "candidates_count", detail=str(len(candidates)))
     committed_trades: list[PortfolioTradeResponse] = []
     post_commit_events: list[tuple[str, str | None, str | None]] = []
     result: Optional[dict] = None
@@ -4098,48 +4157,71 @@ def _run_portfolio_agent_once(
                 result = {"ok": True, "message": "no_candidate"}
         else:
             picked_trades: list[dict] = []
+            capital_reserve = max(capital * 0.2, 4000000.0)
+            max_holdings = capital - capital_reserve
             agent_holdings_mv = float(summary.agent_a.total_market_value or 0) + float(summary.agent_b.total_market_value or 0)
-            available_capital = capital - agent_holdings_mv
-            for market, symbol, name, buy_price, action in candidates[:5]:
-                existing = s.execute(select(PortfolioPosition).where(
-                    PortfolioPosition.market == market,
-                    PortfolioPosition.symbol == symbol,
-                )).scalars().first()
-                if existing is None:
-                    continue
-                managed_capital, _, _, managed_net_pnl = _compute_agent_managed_financials(
-                    s.execute(select(PortfolioTrade)).scalars().all(),
-                    s.execute(select(PortfolioPosition)).scalars().all(),
-                    agent_id,
-                    capital,
-                )
-                dynamic_qty = _agent_dynamic_buy_quantity(
-                    float(cfg.min_buy_quantity or 10000.0),
-                    cfg.target_profit,
-                    cfg.deadline_ts,
-                    managed_net_pnl,
-                    action,
-                    available_capital,
-                )
-                if trading_now:
-                    trade = _create_trade_at_price(existing.id, "BUY", dynamic_qty, buy_price, _agent_id_to_source(agent_id), session=s)
-                    if trade is None:
-                        if existing is not None and float(existing.quantity or 0.0) <= 0:
-                            s.delete(existing)
+            available_capital = max(0.0, max_holdings - agent_holdings_mv)
+            _log_agent_pick_event(agent_id, slot_key, "available_capital", detail=f"capital={capital} reserve={capital_reserve:.0f} max_holdings={max_holdings:.0f} holdings_mv={agent_holdings_mv:.0f} available={available_capital:.2f}")
+            if available_capital <= 0:
+                _log_agent_pick_event(agent_id, slot_key, "capital_exhausted", detail=f"no_available_capital={available_capital:.2f}")
+                cfg.last_status = "capital_exhausted"
+                cfg.updated_at = now
+                result = {"ok": True, "message": "capital_exhausted"}
+            else:
+                for market, symbol, name, scan_price, action in candidates[:5]:
+                    if available_capital <= 0:
+                        _log_agent_pick_event(agent_id, slot_key, "capital_exhausted", symbol=symbol, detail=f"available={available_capital:.2f}")
+                        break
+                    existing = _get_or_create_position_for_symbol(s, market, symbol, name, now)
+                    _log_agent_pick_event(agent_id, slot_key, "candidate_processing", symbol=symbol, detail=f"action={action} price={scan_price} pos_id={existing.id}")
+                    sp = get_stock_price(symbol=symbol, market=market)
+                    buy_price = float(getattr(sp, "price", 0) or 0)
+                    if buy_price <= 0:
+                        buy_price = scan_price
+                    if buy_price <= 0:
                         continue
-                    committed_trades.append(trade)
-                    picked_trades.append(trade.model_dump())
-                    available_capital = max(0.0, available_capital - float(trade.amount or 0.0))
-                    post_commit_events.append(("picked_new_stock", symbol, f"qty={trade.quantity}@{trade.price:.2f} action={action}"))
-                else:
-                    queued = _queue_auto_trade(s, existing.id, "BUY", buy_price, dynamic_qty, _agent_id_to_source(agent_id))
-                    if queued is None:
-                        if existing is not None and float(existing.quantity or 0.0) <= 0:
-                            s.delete(existing)
+                    managed_capital, _, _, managed_net_pnl = _compute_agent_managed_financials(
+                        s.execute(select(PortfolioTrade)).scalars().all(),
+                        s.execute(select(PortfolioPosition)).scalars().all(),
+                        agent_id,
+                        capital,
+                    )
+                    dynamic_qty = _agent_dynamic_buy_quantity(
+                        float(cfg.min_buy_quantity or 1000.0),
+                        cfg.target_profit,
+                        cfg.deadline_ts,
+                        managed_net_pnl,
+                        action,
+                        available_capital,
+                    )
+                    max_qty = int(available_capital / buy_price) if buy_price > 0 else 0
+                    if dynamic_qty > max_qty:
+                        _log_agent_pick_event(agent_id, slot_key, "qty_capped", symbol=symbol, detail=f"wanted={dynamic_qty} capped={max_qty} price={buy_price:.2f} available={available_capital:.2f}")
+                        dynamic_qty = float(max_qty)
+                    if dynamic_qty < 100:
+                        _log_agent_pick_event(agent_id, slot_key, "qty_too_small", symbol=symbol, detail=f"qty={dynamic_qty}")
                         continue
-                    queued_orders.append(queued.model_dump())
-                    available_capital = max(0.0, available_capital - dynamic_qty * buy_price)
-                    post_commit_events.append(("queued_new_stock", symbol, f"qty={dynamic_qty}@<= {buy_price:.2f} action={action}"))
+                    if trading_now:
+                        trade = _create_trade_at_price(existing.id, "BUY", dynamic_qty, buy_price, _agent_id_to_source(agent_id), session=s)
+                        if trade is None:
+                            _log_agent_pick_event(agent_id, slot_key, "pick_trade_failed", symbol=symbol, detail=f"buy_price={buy_price} qty={dynamic_qty}")
+                            if float(existing.quantity or 0.0) <= 0:
+                                s.delete(existing)
+                            continue
+                        committed_trades.append(trade)
+                        picked_trades.append(trade.model_dump())
+                        available_capital = max(0.0, available_capital - float(trade.amount or 0.0))
+                        post_commit_events.append(("picked_new_stock", symbol, f"qty={trade.quantity}@{trade.price:.2f} action={action}"))
+                    else:
+                        queued = _queue_auto_trade(s, existing.id, "BUY", buy_price, dynamic_qty, _agent_id_to_source(agent_id))
+                        if queued is None:
+                            _log_agent_pick_event(agent_id, slot_key, "pick_queue_failed", symbol=symbol, detail=f"buy_price={buy_price} qty={dynamic_qty}")
+                            if float(existing.quantity or 0.0) <= 0:
+                                s.delete(existing)
+                            continue
+                        queued_orders.append(queued.model_dump())
+                        available_capital = max(0.0, available_capital - dynamic_qty * buy_price)
+                        post_commit_events.append(("queued_new_stock", symbol, f"qty={dynamic_qty}@<= {buy_price:.2f} action={action}"))
             if picked_trades:
                 last_trade = picked_trades[-1]
                 cfg.last_action = f"BUY:{last_trade['symbol']}:{last_trade['quantity']}@{last_trade['price']:.2f}"
@@ -4176,7 +4258,7 @@ def get_portfolio_agent_config(agent_id: str = "a"):
             target_profit=cfg.target_profit,
             deadline_ts=cfg.deadline_ts,
             capital=float(cfg.capital or 10000000.0),
-            min_buy_quantity=float(cfg.min_buy_quantity or 10000.0),
+            min_buy_quantity=float(cfg.min_buy_quantity or 1000.0),
             last_run_at=cfg.last_run_at,
             last_action=cfg.last_action,
             last_status=cfg.last_status,
@@ -4242,7 +4324,7 @@ def get_portfolio_agent_status(agent_id: str = "a"):
         target_profit=cfg.target_profit,
         deadline_ts=cfg.deadline_ts,
         capital=capital,
-        min_buy_quantity=float(cfg.min_buy_quantity or 10000.0),
+        min_buy_quantity=float(cfg.min_buy_quantity or 1000.0),
         managed_capital=managed_capital,
         managed_realized_pnl=managed_realized_pnl,
         managed_unrealized_pnl=managed_unrealized_pnl,
@@ -4311,7 +4393,7 @@ def update_portfolio_agent_config(req: PortfolioAgentConfigRequest):
         cfg.target_profit = req.target_profit
         cfg.deadline_ts = req.deadline_ts
         cfg.capital = max(100000.0, float(req.capital or 10000000.0))
-        cfg.min_buy_quantity = max(10000.0, float(req.min_buy_quantity or 10000.0))
+        cfg.min_buy_quantity = max(1000.0, float(req.min_buy_quantity or 1000.0))
         cfg.updated_at = now
         return PortfolioAgentConfigResponse(
             agent_id=agent_id,
@@ -4319,7 +4401,7 @@ def update_portfolio_agent_config(req: PortfolioAgentConfigRequest):
             target_profit=cfg.target_profit,
             deadline_ts=cfg.deadline_ts,
             capital=float(cfg.capital or 10000000.0),
-            min_buy_quantity=float(cfg.min_buy_quantity or 10000.0),
+            min_buy_quantity=float(cfg.min_buy_quantity or 1000.0),
             last_run_at=cfg.last_run_at,
             last_action=cfg.last_action,
             last_status=cfg.last_status,
@@ -4348,6 +4430,15 @@ def create_auto_trade(req: PortfolioAutoTradeRequest):
         p = s.get(PortfolioPosition, req.position_id)
         if not p:
             raise HTTPException(status_code=404, detail="position not found")
+
+        if side == "BUY":
+            order_amount = req.trigger_price * req.quantity
+            all_trades = s.execute(select(PortfolioTrade)).scalars().all()
+            all_positions = s.execute(select(PortfolioPosition)).scalars().all()
+            manual_remaining = _compute_manual_remaining_capital(all_trades, all_positions)
+            if manual_remaining < order_amount:
+                raise HTTPException(status_code=400, detail=f"资金不足：可用 {manual_remaining:.0f}，需要 {order_amount:.0f}")
+
         at = PortfolioAutoTrade(
             position_id=p.id,
             side=side,
@@ -4495,12 +4586,19 @@ def _execute_auto_trade(at_id: str):
             pos_name = (p.name or "").strip() or None
             _send_feishu_trade_notify(p.id, at.side, exec_price,
                 actual_qty if at.side == "SELL" else qty,
-                symbol, pos_name, market, (at.source or "auto_order"))
+                symbol, pos_name, market, (at.source or "auto_order"), trade_type="委托成交")
 
             # Mark position as closed (quantity=0) instead of deleting — preserves trade history
             if at.side == "SELL" and new_qty <= 0:
                 s.query(PortfolioAutoTrade).filter(
                     PortfolioAutoTrade.position_id == p.id,
+                    PortfolioAutoTrade.id != at.id,
+                ).update({"status": "CANCELLED"})
+            elif at.side == "BUY":
+                s.query(PortfolioAutoTrade).filter(
+                    PortfolioAutoTrade.position_id == p.id,
+                    PortfolioAutoTrade.side == "BUY",
+                    PortfolioAutoTrade.status == "PENDING",
                     PortfolioAutoTrade.id != at.id,
                 ).update({"status": "CANCELLED"})
 
@@ -4546,7 +4644,7 @@ def _execute_live_auto_trade(at_id: str):
             at.executed_at = now
             at.executed_price = current_price
         if committed_trade is not None:
-            _send_feishu_trade_notify(committed_trade.position_id, committed_trade.side, committed_trade.price, committed_trade.quantity, committed_trade.symbol, committed_trade.name, committed_trade.market, committed_trade.source)
+            _send_feishu_trade_notify(committed_trade.position_id, committed_trade.side, committed_trade.price, committed_trade.quantity, committed_trade.symbol, committed_trade.name, committed_trade.market, committed_trade.source, trade_type="委托成交")
             log.info(f"Live auto-trade executed: {committed_trade.side} {committed_trade.quantity} of {committed_trade.symbol} @ {committed_trade.price}")
     except Exception as e:
         log.error(f"Live auto-trade error: {e}")

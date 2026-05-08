@@ -157,7 +157,7 @@ export default function ReturnsPage() {
         capital: Number(agentCapital) || 10000000,
         target_profit: Number.isFinite(targetProfit as number) ? targetProfit : null,
         deadline_ts: deadlineTs,
-        min_buy_quantity: Math.max(10000, Number(agentConfig?.min_buy_quantity || 10000)),
+        min_buy_quantity: Math.max(1000, Number(agentConfig?.min_buy_quantity || 1000)),
         last_run_at: agentConfig?.last_run_at ?? null,
         last_action: agentConfig?.last_action ?? null,
         last_status: agentConfig?.last_status ?? null,
@@ -295,7 +295,7 @@ export default function ReturnsPage() {
           </div>
           <div className="flex items-center gap-3 mt-3">
             <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
-              <input type="checkbox" checked={!!agentConfig?.enabled} onChange={(e) => setAgentConfigs(prev => ({ ...prev, [activeAgent]: { ...(prev[activeAgent] || { agent_id: activeAgent, enabled: false, capital: 10000000, min_buy_quantity: 10000 }), enabled: e.target.checked } }))} />
+              <input type="checkbox" checked={!!agentConfig?.enabled} onChange={(e) => setAgentConfigs(prev => ({ ...prev, [activeAgent]: { ...(prev[activeAgent] || { agent_id: activeAgent, enabled: false, capital: 20000000, min_buy_quantity: 1000 }), enabled: e.target.checked } }))} />
               开启自动操作（仅A股）
             </label>
             <button onClick={handleSaveAgent} disabled={saving} className="px-3 py-1.5 rounded-full bg-emerald-500/15 text-emerald-400 text-xs font-bold disabled:opacity-50">{saving ? '保存中...' : '保存配置'}</button>

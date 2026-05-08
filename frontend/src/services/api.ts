@@ -628,6 +628,7 @@ export interface PortfolioAutoTrade {
   symbol?: string | null;
   name?: string | null;
   market?: string | null;
+  source?: string | null;
 }
 
 export interface PortfolioAutoTradeRequest {
