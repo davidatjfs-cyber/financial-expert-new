@@ -2792,8 +2792,12 @@ def _portfolio_source_breakdown(
                 continue
             remaining = qty
             unit_proceeds = (qty * price - fee) / qty if qty > 0 else price
+            sell_bucket = _trade_source_bucket(getattr(trade, "source", "manual"))
             while remaining > 1e-9 and lots:
-                lot = lots[0]
+                idx = next((i for i, lot in enumerate(lots) if str(lot.get("bucket")) == sell_bucket), None)
+                if idx is None:
+                    break
+                lot = lots[idx]
                 lot_qty = float(lot["qty"])
                 used = min(remaining, lot_qty)
                 bucket = str(lot["bucket"])
@@ -2802,7 +2806,7 @@ def _portfolio_source_breakdown(
                 remaining -= used
                 lot["qty"] = lot_qty
                 if lot_qty <= 1e-9:
-                    lots.pop(0)
+                    lots.pop(idx)
 
         current_price = float(pos_prices.get(position_id, 0.0) or 0.0)
         live_qty = float(getattr(position_map.get(position_id), "quantity", 0.0) or 0.0)
