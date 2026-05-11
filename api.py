@@ -3690,7 +3690,7 @@ def _run_llm_agent_once(
         all_trades, positions, agent_id, capital,
     )
 
-    capital_reserve = max(capital * 0.2, 4000000.0)
+    capital_reserve = capital * 0.2
     max_holdings = capital - capital_reserve
     agent_holdings_mv = float(get_portfolio_summary().agent_a.total_market_value or 0) + float(get_portfolio_summary().agent_b.total_market_value or 0)
     available_capital = max(0.0, max_holdings - agent_holdings_mv)
@@ -4162,7 +4162,7 @@ def _run_portfolio_agent_once(
                 result = {"ok": True, "message": "no_candidate"}
         else:
             picked_trades: list[dict] = []
-            capital_reserve = max(capital * 0.2, 4000000.0)
+            capital_reserve = capital * 0.2
             max_holdings = capital - capital_reserve
             agent_holdings_mv = float(summary.agent_a.total_market_value or 0) + float(summary.agent_b.total_market_value or 0)
             available_capital = max(0.0, max_holdings - agent_holdings_mv)
