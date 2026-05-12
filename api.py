@@ -3692,8 +3692,19 @@ def _run_llm_agent_once(
 
     capital_reserve = capital * 0.2
     max_holdings = capital - capital_reserve
-    agent_holdings_mv = float(get_portfolio_summary().agent_a.total_market_value or 0) + float(get_portfolio_summary().agent_b.total_market_value or 0)
+    _summary = get_portfolio_summary()
+    agent_holdings_mv = float((_summary.agent_a if agent_id == "a" else _summary.agent_b).total_market_value or 0)
     available_capital = max(0.0, max_holdings - agent_holdings_mv)
+
+    # Per-source holdings gives each agent's actual cost basis (not blended across all sources)
+    _src_holdings = _position_source_holdings(all_trades, positions, {p.id: 0.0 for p in positions})
+    _agent_src = _src_holdings.get(agent_id, {})
+    pos_id_to_pos = {p.id: p for p in positions}
+    manually_held_symbols = {
+        (pos_id_to_pos[pid].symbol or "").strip().upper()
+        for pid, entry in _src_holdings.get("manual", {}).items()
+        if float((entry or {}).get("quantity", 0) or 0) > 0 and pid in pos_id_to_pos
+    }
 
     holdings_info = []
     for pos in positions:
@@ -3715,7 +3726,12 @@ def _run_llm_agent_once(
         except Exception:
             indicators = None
         qty = agent_qty
-        avg_cost = float(pos.avg_cost or 0)
+        # Use agent-specific avg_cost from FIFO lot tracking, not the blended position avg_cost
+        _agent_entry = _agent_src.get(pos.id)
+        if _agent_entry and float(_agent_entry.get("quantity", 0) or 0) > 0:
+            avg_cost = float(_agent_entry["total_cost"]) / float(_agent_entry["quantity"])
+        else:
+            avg_cost = float(pos.avg_cost or 0)
         pnl_pct = ((current_price - avg_cost) / avg_cost * 100) if avg_cost > 0 else 0
         holdings_info.append({
             "symbol": symbol, "name": name, "market": market,
@@ -3935,6 +3951,12 @@ def _run_llm_agent_once(
             held_symbol = next((s for s in held_symbols if s.split(".")[0].upper() == symbol_base), None)
             if held_symbol is not None:
                 symbol = held_symbol
+            # Don't buy into a position that is already manually held
+            resolved_symbol = symbol.upper()
+            if resolved_symbol in manually_held_symbols and held_symbol is None:
+                _log_agent_pick_event(agent_id, slot_key, "llm_buy_rejected", symbol=symbol, detail="manual_position_protected")
+                last_status = f"llm_buy_rejected:manual_position_protected:{symbol}"
+                continue
             committed_trade: Optional[PortfolioTradeResponse] = None
             queued_order: Optional[PortfolioAutoTradeResponse] = None
             with session_scope() as s:
@@ -4164,7 +4186,7 @@ def _run_portfolio_agent_once(
             picked_trades: list[dict] = []
             capital_reserve = capital * 0.2
             max_holdings = capital - capital_reserve
-            agent_holdings_mv = float(summary.agent_a.total_market_value or 0) + float(summary.agent_b.total_market_value or 0)
+            agent_holdings_mv = float(summary.agent_a.total_market_value or 0) if agent_id == "a" else float(summary.agent_b.total_market_value or 0)
             available_capital = max(0.0, max_holdings - agent_holdings_mv)
             _log_agent_pick_event(agent_id, slot_key, "available_capital", detail=f"capital={capital} reserve={capital_reserve:.0f} max_holdings={max_holdings:.0f} holdings_mv={agent_holdings_mv:.0f} available={available_capital:.2f}")
             if available_capital <= 0:
@@ -4173,10 +4195,25 @@ def _run_portfolio_agent_once(
                 cfg.updated_at = now
                 result = {"ok": True, "message": "capital_exhausted"}
             else:
+                # Build set of manually-held symbols to protect them from agent picks
+                _all_trades_for_manual = s.execute(select(PortfolioTrade)).scalars().all()
+                _all_pos_for_manual = s.execute(select(PortfolioPosition)).scalars().all()
+                _, _manual_holdings = _portfolio_source_breakdown(
+                    _all_trades_for_manual, _all_pos_for_manual, {p.id: 0.0 for p in _all_pos_for_manual}
+                )
+                _pid_to_pos = {p.id: p for p in _all_pos_for_manual}
+                _manual_symbols = {
+                    (_pid_to_pos[pid].symbol or "").strip().upper()
+                    for pid, qty in _manual_holdings.get("manual", {}).items()
+                    if float(qty or 0.0) > 0 and pid in _pid_to_pos
+                }
                 for market, symbol, name, scan_price, action in candidates[:5]:
                     if available_capital <= 0:
                         _log_agent_pick_event(agent_id, slot_key, "capital_exhausted", symbol=symbol, detail=f"available={available_capital:.2f}")
                         break
+                    if symbol.strip().upper() in _manual_symbols:
+                        _log_agent_pick_event(agent_id, slot_key, "buy_skipped_manual_position", symbol=symbol, detail="manual_position_protected")
+                        continue
                     existing = _get_or_create_position_for_symbol(s, market, symbol, name, now)
                     _log_agent_pick_event(agent_id, slot_key, "candidate_processing", symbol=symbol, detail=f"action={action} price={scan_price} pos_id={existing.id}")
                     sp = get_stock_price(symbol=symbol, market=market)
