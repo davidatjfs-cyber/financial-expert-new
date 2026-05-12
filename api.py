@@ -1034,13 +1034,6 @@ def _execute_strategy_alert_trade(alert: PortfolioAlertResponse, agent_id: str =
         return _create_trade_at_price(alert.position_id, "BUY", buy_qty, trade_price, _agent_id_to_source(agent_id))
     if held_qty <= 0:
         return None
-    avg_cost = float(p.avg_cost or 0.0)
-    # CRITICAL FIX: For take_profit alerts, only SELL if current_price > avg_cost (profitable)
-    # This prevents selling at a loss when take_profit price was calculated incorrectly
-    if alert.alert_type in {"strategy_take_profit_1", "strategy_take_profit_2"}:
-        if avg_cost > 0 and current_price <= avg_cost:
-            _log_agent_pick_event(agent_id, "alert", "take_profit_skipped_no_profit", symbol=alert.symbol or "", detail=f"current={current_price:.2f} <= cost={avg_cost:.2f}")
-            return None
     if alert.alert_type == "strategy_take_profit_1":
         return _create_trade_at_price(alert.position_id, "SELL", max(1.0, held_qty / 2.0), trade_price, _agent_id_to_source(agent_id))
     if alert.alert_type in {"target_sell", "signal_sell", "strategy_take_profit_2", "strategy_stop_loss"}:
@@ -4192,10 +4185,10 @@ def _run_portfolio_agent_once(
                         current_price = scan_price
                     if current_price <= 0:
                         continue
-                    # CRITICAL FIX: Only buy if current price is within acceptable range of recommended price
-                    # Allow up to 3% above recommended price, reject if price has run up too much
-                    if scan_price > 0 and current_price > scan_price * 1.03:
-                        _log_agent_pick_event(agent_id, slot_key, "buy_skipped_price_too_high", symbol=symbol, detail=f"current={current_price:.2f} > recommended={scan_price:.2f} * 1.03")
+                    # CRITICAL FIX: Only buy if current price <= recommended max price
+                    # scan_price is the system's recommended max buy price, must not exceed it
+                    if scan_price > 0 and current_price > scan_price:
+                        _log_agent_pick_event(agent_id, slot_key, "buy_skipped_price_above_max", symbol=symbol, detail=f"current={current_price:.2f} > max_allowed={scan_price:.2f}")
                         continue
                     buy_price = current_price
                     managed_capital, _, _, managed_net_pnl = _compute_agent_managed_financials(
