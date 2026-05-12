@@ -4216,16 +4216,21 @@ def _run_portfolio_agent_once(
                         continue
                     existing = _get_or_create_position_for_symbol(s, market, symbol, name, now)
                     _log_agent_pick_event(agent_id, slot_key, "candidate_processing", symbol=symbol, detail=f"action={action} price={scan_price} pos_id={existing.id}")
+                    _fresh_pos = float(existing.quantity or 0.0) <= 0
                     sp = get_stock_price(symbol=symbol, market=market)
                     current_price = float(getattr(sp, "price", 0) or 0)
                     if current_price <= 0:
                         current_price = scan_price
                     if current_price <= 0:
+                        if _fresh_pos:
+                            s.delete(existing)
                         continue
                     # CRITICAL FIX: Only buy if current price <= recommended max price
                     # scan_price is the system's recommended max buy price, must not exceed it
                     if scan_price > 0 and current_price > scan_price:
                         _log_agent_pick_event(agent_id, slot_key, "buy_skipped_price_above_max", symbol=symbol, detail=f"current={current_price:.2f} > max_allowed={scan_price:.2f}")
+                        if _fresh_pos:
+                            s.delete(existing)
                         continue
                     buy_price = current_price
                     managed_capital, _, _, managed_net_pnl = _compute_agent_managed_financials(
@@ -4248,6 +4253,8 @@ def _run_portfolio_agent_once(
                         dynamic_qty = float(max_qty)
                     if dynamic_qty < 100:
                         _log_agent_pick_event(agent_id, slot_key, "qty_too_small", symbol=symbol, detail=f"qty={dynamic_qty}")
+                        if _fresh_pos:
+                            s.delete(existing)
                         continue
                     if trading_now:
                         trade = _create_trade_at_price(existing.id, "BUY", dynamic_qty, buy_price, _agent_id_to_source(agent_id), session=s)
