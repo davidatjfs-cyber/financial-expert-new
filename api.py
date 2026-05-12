@@ -8267,9 +8267,10 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
         sell_total_max = 85
 
         # === BUY/SELL 一致性修正 ===
-        # 如果sell_score较高，buy_score应打折（卖出信号与买入信号矛盾）
-        if sell_score is not None and buy_score is not None and sell_score > 20:
-            penalty = min(buy_score, int(sell_score * 0.6))
+        # 当卖出信号较强时对买入评分施加惩罚。阈值从20提高到30，系数从0.6降到0.35，
+        # 避免轻微卖出信号（如MACD偏空+略低于MA20）误杀超卖底部的买点。
+        if sell_score is not None and buy_score is not None and sell_score > 30:
+            penalty = min(buy_score, int(sell_score * 0.35))
             buy_score = max(0, buy_score - penalty)
             if penalty > 0:
                 buy_score_details["sell_conflict"] = {"score": -penalty, "max": 0, "reason": f"卖出信号冲突(扣{penalty}分)"}
@@ -8326,13 +8327,17 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
         rsi_v = rsi14
         boll_v = boll_pct_b_now
         if rsi_v is not None and rsi_v < 40 and boll_v is not None and boll_v < 0.2:
+            # Deeply oversold + near Bollinger lower band: use lower band as aggressive entry
             buy_price_aggressive = float(boll_lower.iloc[-1]) if boll_lower is not None and pd.notna(boll_lower.iloc[-1]) else None
             buy_price_stable = float(ma60_now) if ma60_now is not None else None
         elif rsi_v is not None and rsi_v < 50:
+            # Mild oversold: MA60 as aggressive entry (typically 5-15% below current)
             buy_price_aggressive = float(ma60_now) if ma60_now is not None else None
             buy_price_stable = float(boll_lower.iloc[-1]) if boll_lower is not None and pd.notna(boll_lower.iloc[-1]) else None
         else:
-            buy_price_aggressive = float(ma20_now) if ma20_now is not None else None
+            # RSI neutral/high: no real pullback entry. Give a 3% limit-order discount
+            # vs MA20 so the price represents a pending order below market, not market price.
+            buy_price_aggressive = float(ma20_now) * 0.97 if ma20_now is not None else None
             buy_price_stable = float(ma60_now) if ma60_now is not None else None
         if buy_price_aggressive is None and last_close is not None:
             buy_price_aggressive = float(last_close)
@@ -8389,7 +8394,8 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
                 global_reversal_score += 20
             timing_score = global_reversal_score
         else:
-            if big_drop_5d and vol_spike:
+            below_ma60_5pct = dist_ma60_pct is None or dist_ma60_pct < -5
+            if big_drop_5d and vol_spike and below_ma60_5pct:
                 timing_score = 100
             elif steep_drop and oversold and vol_spike:
                 timing_score = 98
@@ -8411,7 +8417,10 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
                 lower_candidates.append(float(entry_ref) - float(atr14))
             if boll_lower is not None and not boll_lower.empty and pd.notna(boll_lower.iloc[-1]):
                 lower_candidates.append(float(boll_lower.iloc[-1]))
-            strategy_buy_zone_low = min(lower_candidates)
+            # Cap buy zone at 12% below entry to prevent excessively wide zones
+            # caused by fat Bollinger bands on high-volatility stocks.
+            min_floor = float(entry_ref) * 0.88
+            strategy_buy_zone_low = max(min(lower_candidates), min_floor)
             strategy_buy_zone_high = float(entry_ref)
             stop_ref = float(strategy_buy_zone_low)
             strategy_stop_loss = max(stop_ref * 0.92, stop_ref - 2 * float(atr14)) if atr14 is not None and atr14 > 0 else stop_ref * 0.92

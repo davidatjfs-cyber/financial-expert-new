@@ -483,7 +483,6 @@ def _score_tech(rsi14: Optional[float], slope_pct: Optional[float],
     if ma_bullish_align is True:
         score -= 1.0
     elif ma_bullish_align is False:
-        score += 1.5
         score += 2.0
 
     return max(0.0, min(25.0, score))
@@ -506,7 +505,11 @@ def _score_timing(rsi14: Optional[float], boll_position: Optional[float],
     big_drop_10d = ret_10d is not None and ret_10d < -8
     below_ma60_10pct = dist_ma60_pct is not None and dist_ma60_pct < -10
 
-    if big_drop_5d and vol_spike:
+    # Require price already below MA60 by at least 5% to confirm distress, not just a
+    # momentum-driven drop that could continue. dist_ma60_pct=None means data unavailable,
+    # we allow the signal through rather than blocking on missing data.
+    below_ma60_5pct = dist_ma60_pct is None or dist_ma60_pct < -5
+    if big_drop_5d and vol_spike and below_ma60_5pct:
         return 100.0
     if steep_drop and oversold and vol_spike:
         return 98.0
@@ -967,7 +970,8 @@ def _fetch_north_flow() -> dict[str, float]:
     return result
 
 
-def _fetch_kline_close_batch(stocks: list[dict]) -> dict[str, list[float]]:
+def _fetch_kline_close_batch(stocks: list[dict]) -> dict[str, dict]:
+    """Returns {code: {"closes": [...], "volumes": [...]}} for each stock."""
     disable_proxies_for_process()
     result = {}
     try:
@@ -988,18 +992,20 @@ def _fetch_kline_close_batch(stocks: list[dict]) -> dict[str, list[float]]:
                 data = resp.json()
                 body = data.get("data", {}).get(qt_sym, {})
                 closes = []
+                volumes = []
                 for key in ["day", "week", "month"]:
                     if key in body:
                         for item in body[key]:
                             if len(item) >= 6:
                                 try:
                                     closes.append(float(item[2]))
+                                    volumes.append(float(item[5]))
                                 except (ValueError, TypeError):
                                     continue
                         break
-                result[code] = closes
+                result[code] = {"closes": closes, "volumes": volumes}
             except Exception:
-                result[code] = []
+                result[code] = {"closes": [], "volumes": []}
             time.sleep(0.05)
     except Exception as e:
         print(f"[recommend] kline batch error: {e}")
@@ -1025,28 +1031,6 @@ def _compute_momentum_from_kline(closes: list[float]) -> tuple[Optional[float], 
         vol_20 = None
         if len(arr) >= 21:
             rets = np.diff(arr[-21:]) / arr[-21:-1]
-            rets = rets[~np.isnan(rets)]
-            if len(rets) > 0:
-                vol_20 = float(np.std(rets) * np.sqrt(252) * 100)
-
-        return mom_20, mom_60, vol_20
-    except Exception:
-        return None, None, None
-
-        close_arr = np.array(close_series, dtype=float)
-        close_arr = close_arr[~np.isnan(close_arr)]
-
-        mom_20 = None
-        if len(close_arr) >= 21:
-            mom_20 = (close_arr[-1] / close_arr[-21] - 1.0) * 100.0
-
-        mom_60 = None
-        if len(close_arr) >= 61:
-            mom_60 = (close_arr[-1] / close_arr[-61] - 1.0) * 100.0
-
-        vol_20 = None
-        if len(close_arr) >= 21:
-            rets = np.diff(close_arr[-21:]) / close_arr[-21:-1]
             rets = rets[~np.isnan(rets)]
             if len(rets) > 0:
                 vol_20 = float(np.std(rets) * np.sqrt(252) * 100)
@@ -1194,7 +1178,9 @@ def run_scan(top_n: int = 20,
         ps = val.get("ps_ratio")
         turnover = val.get("turnover_rate")
 
-        closes = kline_closes.get(code, [])
+        kline_entry = kline_closes.get(code, {})
+        closes = kline_entry.get("closes", [])
+        volumes = kline_entry.get("volumes", [])
         mom_20, mom_60, vol_20 = _compute_momentum_from_kline(closes)
         north_pct = north_data.get(code)
 
@@ -1224,10 +1210,17 @@ def run_scan(top_n: int = 20,
             except (ValueError, TypeError):
                 pass
 
-        # vol_ratio approximation from turnover_rate
+        # vol_ratio: current volume vs 10-day average volume from kline data.
+        # Falls back to turnover_rate proxy when volume data is unavailable.
         vol_ratio = None
-        if turnover is not None:
-            vol_ratio = float(turnover) / 2.0 if float(turnover) > 0 else None
+        if len(volumes) >= 11 and volumes[-1] > 0:
+            avg_vol_10 = sum(volumes[-11:-1]) / 10
+            if avg_vol_10 > 0:
+                vol_ratio = volumes[-1] / avg_vol_10
+        elif turnover is not None and float(turnover) > 0:
+            # Rough proxy: compare today's turnover rate against typical ~2% baseline
+            avg_turnover_approx = 2.0
+            vol_ratio = float(turnover) / avg_turnover_approx
 
         cashflow_ratio = fin.get("cashflow_ratio")
         sector_name = _STOCK_SECTOR_MAP.get(code, "其他")
