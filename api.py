@@ -4912,8 +4912,9 @@ def _portfolio_feishu_notifier():
         try:
             print(f"[FEISHU] checking portfolio alerts and agents...")
             alerts = get_portfolio_alerts()
-            for alert in alerts:
-                _send_feishu_portfolio_alert(alert)
+            if _cn_market_trading_now():
+                for alert in alerts:
+                    _send_feishu_portfolio_alert(alert)
             _process_live_auto_trades("CN")
             slot_a = _claim_agent_new_pick_slot("a")
             slot_b = _claim_agent_new_pick_slot("b")
