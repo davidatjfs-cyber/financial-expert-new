@@ -4731,6 +4731,18 @@ def _process_live_auto_trades(market: str = "CN"):
                 ).update({"status": "CANCELLED"})
                 if count:
                     print(f"[AUTO_TRADE] Close-clear: cancelled {count} pending orders")
+        # Clean up orphaned positions (qty=0, no executed trades)
+        with session_scope() as s:
+            trade_pos_ids = select(PortfolioTrade.position_id).distinct()
+            orphaned = s.execute(
+                select(PortfolioPosition).where(
+                    PortfolioPosition.quantity == 0,
+                    ~PortfolioPosition.id.in_(trade_pos_ids)
+                )
+            ).scalars().all()
+            for pos in orphaned:
+                print(f"[AUTO_TRADE] Cleaning up orphaned position: {pos.symbol} ({pos.name})")
+                s.delete(pos)
         return  # Don't execute trades when market is not open
 
     with session_scope() as s:
