@@ -4705,8 +4705,34 @@ def _execute_live_auto_trade(at_id: str):
 
 
 def _process_live_auto_trades(market: str = "CN"):
-    if market == "CN" and not _cn_market_trading_now():
+    if market != "CN":
         return
+    now_bj = _dt.datetime.now(_ZoneInfo("Asia/Shanghai"))
+    total_min = now_bj.hour * 60 + now_bj.minute
+
+    # ── Auto-cancel stale orders ──────────────────────────────────
+    if not _cn_market_trading_now():
+        if 690 <= total_min < 780:  # 11:30-13:00 lunch break
+            # Cancel orders queued before the morning session ended
+            # (includes overnight orders and this morning's orders)
+            morning_end = now_bj.replace(hour=11, minute=30, second=0, microsecond=0)
+            morning_end_ts = int(morning_end.timestamp())
+            with session_scope() as s:
+                count = s.query(PortfolioAutoTrade).filter(
+                    PortfolioAutoTrade.status == "PENDING",
+                    PortfolioAutoTrade.created_at < morning_end_ts,
+                ).update({"status": "CANCELLED"})
+                if count:
+                    print(f"[AUTO_TRADE] Lunch-clear: cancelled {count} stale pending orders")
+        elif total_min >= 900:  # 15:00+ market close
+            with session_scope() as s:
+                count = s.query(PortfolioAutoTrade).filter(
+                    PortfolioAutoTrade.status == "PENDING",
+                ).update({"status": "CANCELLED"})
+                if count:
+                    print(f"[AUTO_TRADE] Close-clear: cancelled {count} pending orders")
+        return  # Don't execute trades when market is not open
+
     with session_scope() as s:
         pending = s.execute(
             select(PortfolioAutoTrade)
