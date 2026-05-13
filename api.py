@@ -4225,10 +4225,9 @@ def _run_portfolio_agent_once(
                         if _fresh_pos:
                             s.delete(existing)
                         continue
-                    # CRITICAL FIX: Only buy if current price <= recommended max price
-                    # scan_price is the system's recommended max buy price, must not exceed it
-                    if scan_price > 0 and current_price > scan_price:
-                        _log_agent_pick_event(agent_id, slot_key, "buy_skipped_price_above_max", symbol=symbol, detail=f"current={current_price:.2f} > max_allowed={scan_price:.2f}")
+                    # Buy price protection: allow up to 3% above scan price
+                    if scan_price > 0 and current_price > scan_price * 1.03:
+                        _log_agent_pick_event(agent_id, slot_key, "buy_skipped_price_above_max", symbol=symbol, detail=f"current={current_price:.2f} > max_allowed={scan_price * 1.03:.2f}({scan_price:.2f}+3%)")
                         if _fresh_pos:
                             s.delete(existing)
                         continue
