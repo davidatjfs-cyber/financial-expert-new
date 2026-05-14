@@ -787,16 +787,13 @@ def _sell_trade_pnl(position_id: str, side: str, sell_quantity: float, sell_pric
 
 def _buy_is_add_position(position_id: str, source: str, buy_quantity: float) -> tuple[bool, Optional[float]]:
     """Return (is_add, prev_cost)."""
-    source_prefix = _trade_source_bucket(source) if source != "manual" else "manual"
     with session_scope() as s:
         trades = s.execute(
             select(PortfolioTrade)
             .where(PortfolioTrade.position_id == position_id)
             .order_by(PortfolioTrade.created_at, PortfolioTrade.id)
         ).scalars().all()
-    prior_buys = [t for t in trades
-                  if (t.side or "").strip().upper() == "BUY"
-                  and _trade_source_bucket(getattr(t, "source", "manual") or "manual") == source_prefix]
+    prior_buys = [t for t in trades if (t.side or "").strip().upper() == "BUY"]
     if not prior_buys:
         return False, None
     total = sum(float(t.quantity or 0.0) for t in prior_buys)
@@ -1002,13 +999,34 @@ def _execute_strategy_alert_trade(alert: PortfolioAlertResponse, agent_id: str =
         return None
 
     with session_scope() as s:
-        p = s.get(PortfolioPosition, alert.position_id)
-        if not p:
+        alert_pos = s.get(PortfolioPosition, alert.position_id)
+        if not alert_pos:
             return None
-        positions = s.execute(select(PortfolioPosition)).scalars().all()
+        symbol = (alert_pos.symbol or "").strip().upper()
+        market = (alert_pos.market or "CN").strip().upper()
+        name = (alert_pos.name or "").strip() or None
+        agent_positions = s.execute(
+            select(PortfolioPosition).where(
+                PortfolioPosition.market == market,
+                PortfolioPosition.symbol == symbol,
+                PortfolioPosition.source == agent_id,
+            )
+        ).scalars().all()
+        agent_pos = next((p for p in agent_positions if float(p.quantity or 0.0) > 0 or True), None)
+        if agent_pos is None:
+            now = int(time.time())
+            agent_pos = PortfolioPosition(
+                market=market, symbol=symbol, name=name or symbol,
+                source=agent_id, quantity=0.0, avg_cost=0.0,
+                created_at=now, updated_at=now,
+            )
+            s.add(agent_pos)
+            s.flush()
+        all_positions = s.execute(select(PortfolioPosition)).scalars().all()
         trades = s.execute(select(PortfolioTrade)).scalars().all()
-        held_qty = float(_agent_live_position_quantities(agent_id, trades, positions).get(alert.position_id, 0.0) or 0.0)
-        agent_qty_map = _agent_live_position_quantities(agent_id, trades, positions)
+        held_qty = float(_agent_live_position_quantities(agent_id, trades, all_positions).get(agent_pos.id, 0.0) or 0.0)
+        agent_qty_map = _agent_live_position_quantities(agent_id, trades, all_positions)
+        agent_pos_id = agent_pos.id
 
     current_price = float(alert.current_price or 0.0)
     trigger_price = float(alert.trigger_price or 0.0)
@@ -1020,7 +1038,7 @@ def _execute_strategy_alert_trade(alert: PortfolioAlertResponse, agent_id: str =
         buy_qty = 10000.0
         buy_amount = buy_qty * trade_price
         agent_mv = 0.0
-        for pos in positions:
+        for pos in all_positions:
             aqty = float(agent_qty_map.get(pos.id, 0.0) or 0.0)
             if aqty > 0:
                 sp = get_stock_price(symbol=pos.symbol, market=pos.market)
@@ -1034,13 +1052,13 @@ def _execute_strategy_alert_trade(alert: PortfolioAlertResponse, agent_id: str =
                 _log_agent_pick_event(agent_id, "alert", "buy_rejected_insufficient_capital", symbol=alert.symbol or "", detail=f"remaining={remaining:.0f} < min_buy={trade_price * 100:.0f}")
                 return None
             buy_amount = buy_qty * trade_price
-        return _create_trade_at_price(alert.position_id, "BUY", buy_qty, trade_price, _agent_id_to_source(agent_id))
+        return _create_trade_at_price(agent_pos_id, "BUY", buy_qty, trade_price, _agent_id_to_source(agent_id))
     if held_qty <= 0:
         return None
     if alert.alert_type == "strategy_take_profit_1":
-        return _create_trade_at_price(alert.position_id, "SELL", max(1.0, held_qty / 2.0), trade_price, _agent_id_to_source(agent_id))
+        return _create_trade_at_price(agent_pos_id, "SELL", max(1.0, held_qty / 2.0), trade_price, _agent_id_to_source(agent_id))
     if alert.alert_type in {"target_sell", "signal_sell", "strategy_take_profit_2", "strategy_stop_loss"}:
-        return _create_trade_at_price(alert.position_id, "SELL", held_qty, trade_price, _agent_id_to_source(agent_id))
+        return _create_trade_at_price(agent_pos_id, "SELL", held_qty, trade_price, _agent_id_to_source(agent_id))
     return None
 
 
@@ -2549,6 +2567,7 @@ def create_portfolio_trade(req: PortfolioTradeRequest):
             raise HTTPException(status_code=404, detail="position not found")
         market = (p.market or "CN").strip().upper()
         symbol = (p.symbol or "").strip().upper()
+        effective_source = (req.source or "manual").strip()
 
         sp = get_stock_price(symbol=symbol, market=market)
         price = getattr(sp, "price", None) if sp is not None else None
@@ -2577,7 +2596,7 @@ def create_portfolio_trade(req: PortfolioTradeRequest):
             PortfolioTrade.side == side,
             PortfolioTrade.price == price,
             PortfolioTrade.quantity == qty,
-            PortfolioTrade.source == (req.source or "manual"),
+            PortfolioTrade.source == effective_source,
         ).order_by(PortfolioTrade.created_at.desc()).limit(1)).scalars().first()
         if recent and abs(now - (recent.created_at or 0)) < 5:
             raise HTTPException(status_code=429, detail="duplicate trade")
@@ -2591,7 +2610,7 @@ def create_portfolio_trade(req: PortfolioTradeRequest):
             quantity=qty,
             amount=amount,
             fee=fee,
-            source=(req.source or "manual"),
+            source=effective_source,
             created_at=now,
         )
         s.add(t)
@@ -2607,7 +2626,7 @@ def create_portfolio_trade(req: PortfolioTradeRequest):
         if side == "SELL" and new_qty <= 0:
             s.query(PortfolioAutoTrade).filter(PortfolioAutoTrade.position_id == pos_id).update({"status": "CANCELLED"})
 
-        _send_feishu_trade_notify(pos_id, side, price, qty, symbol, pos_name, market, req.source or "manual")
+        _send_feishu_trade_notify(pos_id, side, price, qty, symbol, pos_name, market, effective_source)
 
         return PortfolioTradeResponse(
             id=t.id,
@@ -2617,7 +2636,7 @@ def create_portfolio_trade(req: PortfolioTradeRequest):
             quantity=qty,
             amount=amount,
             fee=fee,
-            source=(req.source or "manual"),
+            source=effective_source,
             symbol=symbol,
             name=pos_name,
             market=market,
@@ -2915,12 +2934,14 @@ def _compute_agent_month_buy_amount(trades: list[PortfolioTrade], agent_id: str 
 
 
 def _compute_agent_pick_kpis(trades: list[PortfolioTrade], positions: list[PortfolioPosition], agent_id: str = "a") -> tuple[int, int, int, int, float]:
-    agent_source_prefix = f"auto_strategy_{agent_id}"
+    agent_source = f"auto_strategy_{agent_id}"
+    agent_position_ids = {p.id for p in positions if (p.source or "manual") == agent_id}
     position_qty = {p.id: float(p.quantity or 0.0) for p in positions}
     position_map = {p.id: p for p in positions}
     by_position: dict[str, list[PortfolioTrade]] = {}
     for trade in trades:
-        by_position.setdefault(trade.position_id, []).append(trade)
+        if trade.position_id in agent_position_ids or (trade.source or "").strip() == agent_source:
+            by_position.setdefault(trade.position_id, []).append(trade)
 
     auto_pick_count = 0
     closed_count = 0
@@ -2929,26 +2950,21 @@ def _compute_agent_pick_kpis(trades: list[PortfolioTrade], positions: list[Portf
 
     for items in by_position.values():
         items.sort(key=lambda x: (int(x.created_at or 0), x.id or ""))
-        if any(_trade_source_bucket(getattr(t, "source", "manual") or "manual") == agent_id and (t.side or "").upper() == "BUY" for t in items):
+        auto_trade_count += len(items)
+        if any((t.side or "").upper() == "BUY" for t in items):
             auto_pick_count += 1
 
         qty = 0.0
         avg_cost = 0.0
         realized = 0.0
-        has_auto_pick_buy = False
         for trade in items:
             side = (trade.side or "").strip().upper()
-            source = (getattr(trade, "source", "manual") or "manual").strip()
             trade_qty = float(trade.quantity or 0.0)
             trade_price = float(trade.price or 0.0)
             trade_fee = _trade_fee_value(trade, position_map)
-            if _trade_source_bucket(source) == agent_id:
-                auto_trade_count += 1
             if trade_qty <= 0:
                 continue
             if side == "BUY":
-                if _trade_source_bucket(source) == agent_id:
-                    has_auto_pick_buy = True
                 new_qty = qty + trade_qty
                 avg_cost = ((qty * avg_cost) + (trade_qty * trade_price) + trade_fee) / new_qty if new_qty > 0 else 0.0
                 qty = new_qty
@@ -2960,7 +2976,7 @@ def _compute_agent_pick_kpis(trades: list[PortfolioTrade], positions: list[Portf
             if qty <= 0:
                 avg_cost = 0.0
 
-        if has_auto_pick_buy and position_qty.get(items[0].position_id, 0.0) <= 0:
+        if position_qty.get(items[0].position_id, 0.0) <= 0:
             closed_count += 1
             if realized > 0:
                 success_count += 1
@@ -2970,8 +2986,10 @@ def _compute_agent_pick_kpis(trades: list[PortfolioTrade], positions: list[Portf
 
 
 def _compute_agent_advanced_kpis(trades: list[PortfolioTrade], positions: list[PortfolioPosition], agent_id: str = "a") -> tuple[float, float, float]:
-    by_position: dict[str, list[PortfolioTrade]] = {}
+    agent_source = f"auto_strategy_{agent_id}"
+    agent_position_ids = {p.id for p in positions if (p.source or "manual") == agent_id}
     position_map = {p.id: p for p in positions}
+    by_position: dict[str, list[PortfolioTrade]] = {}
     for trade in trades:
         by_position.setdefault(trade.position_id, []).append(trade)
 
@@ -2984,7 +3002,7 @@ def _compute_agent_advanced_kpis(trades: list[PortfolioTrade], positions: list[P
     live_position_ids = {p.id for p in positions if float(p.quantity or 0.0) > 0}
 
     all_auto_trades = sorted(
-        [t for t in trades if _trade_source_bucket(getattr(t, "source", "manual") or "manual") == agent_id],
+        [t for t in trades if t.position_id in agent_position_ids or (t.source or "").strip() == agent_source],
         key=lambda x: (int(x.created_at or 0), x.id or ""),
     )
     inv_qty_by_position: dict[str, float] = {}
@@ -3014,16 +3032,17 @@ def _compute_agent_advanced_kpis(trades: list[PortfolioTrade], positions: list[P
             max_drawdown_pct = max(max_drawdown_pct, (peak - running_realized) / peak * 100.0)
 
     for pid, items in by_position.items():
-        auto_items = [t for t in items if _trade_source_bucket(getattr(t, "source", "manual") or "manual") == agent_id]
-        if not auto_items or pid in live_position_ids:
+        if pid not in agent_position_ids:
             continue
-        auto_items.sort(key=lambda x: (int(x.created_at or 0), x.id or ""))
+        if not items or pid in live_position_ids:
+            continue
+        items.sort(key=lambda x: (int(x.created_at or 0), x.id or ""))
         qty = 0.0
         avg = 0.0
         realized = 0.0
         first_buy_ts: Optional[int] = None
         last_sell_ts: Optional[int] = None
-        for trade in auto_items:
+        for trade in items:
             tqty = float(trade.quantity or 0.0)
             tprice = float(trade.price or 0.0)
             tfee = _trade_fee_value(trade, position_map)
@@ -3166,9 +3185,13 @@ def _compute_period_realized_pnl(trades: list[PortfolioTrade], today_ts: int, we
     by_position: dict[str, list[PortfolioTrade]] = {}
     for trade in trades:
         by_position.setdefault(trade.position_id, []).append(trade)
-    for items in by_position.values():
+    for position_id, items in by_position.items():
         items.sort(key=lambda x: (int(x.created_at or 0), x.id or ""))
-        lots: list[dict[str, str | float]] = []
+        pos = position_map.get(position_id)
+        bucket = (pos.source or "manual") if pos else "manual"
+        if bucket not in result:
+            bucket = "manual"
+        lots: list[dict[str, float]] = []
         for trade in items:
             side = (trade.side or "").strip().upper()
             qty = float(trade.quantity or 0.0)
@@ -3176,35 +3199,29 @@ def _compute_period_realized_pnl(trades: list[PortfolioTrade], today_ts: int, we
             fee = _trade_fee_value(trade, position_map)
             if qty <= 0:
                 continue
-            bucket = _trade_source_bucket(getattr(trade, "source", "manual"))
             ts = int(trade.created_at or 0)
             if side == "BUY":
                 unit_cost = (qty * price + fee) / qty if qty > 0 else price
-                lots.append({"bucket": bucket, "qty": qty, "price": unit_cost})
+                lots.append({"qty": qty, "price": unit_cost})
                 continue
             remaining = qty
             unit_proceeds = (qty * price - fee) / qty if qty > 0 else price
-            sell_bucket = _trade_source_bucket(getattr(trade, "source", "manual"))
             while remaining > 1e-9 and lots:
-                idx = next((i for i, lot in enumerate(lots) if str(lot.get("bucket")) == sell_bucket), None)
-                if idx is None:
-                    idx = 0
-                lot = lots[idx]
+                lot = lots[0]
                 lot_qty = float(lot["qty"])
                 used = min(remaining, lot_qty)
-                lot_bucket = str(lot["bucket"])
                 pnl = used * (unit_proceeds - float(lot["price"]))
                 if ts >= today_ts:
-                    result[lot_bucket]["today"] += pnl
+                    result[bucket]["today"] += pnl
                 if ts >= week_ts:
-                    result[lot_bucket]["week"] += pnl
+                    result[bucket]["week"] += pnl
                 if ts >= month_ts:
-                    result[lot_bucket]["month"] += pnl
+                    result[bucket]["month"] += pnl
                 lot_qty -= used
                 remaining -= used
                 lot["qty"] = lot_qty
                 if lot_qty <= 1e-9:
-                    lots.pop(idx)
+                    lots.pop(0)
     return result
 
 
@@ -3242,23 +3259,17 @@ def _compute_agent_period_returns(
     week_ts: int,
     month_ts: int,
 ) -> dict[str, float]:
-    agent_source = f"auto_strategy_{agent_id}"
-    managed_position_ids: set[str] = set()
-    for trade in trades:
-        if (trade.source or "").strip() == agent_source:
-            managed_position_ids.add(trade.position_id)
-    if not managed_position_ids:
-        return {"today": 0.0, "week": 0.0, "month": 0.0, "unrealized": 0.0}
     position_map = {p.id: p for p in positions}
+    agent_position_ids = {p.id for p in positions if (p.source or "manual") == agent_id}
     by_position: dict[str, list[PortfolioTrade]] = {}
     for trade in trades:
-        if trade.position_id in managed_position_ids:
+        if trade.position_id in agent_position_ids:
             by_position.setdefault(trade.position_id, []).append(trade)
     realized = {"today": 0.0, "week": 0.0, "month": 0.0}
     unrealized = 0.0
     for position_id, items in by_position.items():
         items.sort(key=lambda x: (int(x.created_at or 0), x.id or ""))
-        lots: list[dict] = []
+        lots: list[dict[str, float]] = []
         for trade in items:
             side = (trade.side or "").strip().upper()
             qty = float(trade.quantity or 0.0)
@@ -3267,10 +3278,9 @@ def _compute_agent_period_returns(
             if qty <= 0:
                 continue
             ts = int(trade.created_at or 0)
-            bucket_id = _trade_source_bucket(trade.source)
             if side == "BUY":
                 unit_cost = (qty * price + fee) / qty if qty > 0 else price
-                lots.append({"qty": qty, "price": unit_cost, "bucket": bucket_id})
+                lots.append({"qty": qty, "price": unit_cost})
                 continue
             remaining = qty
             unit_proceeds = (qty * price - fee) / qty if qty > 0 else price
@@ -3278,15 +3288,13 @@ def _compute_agent_period_returns(
                 lot = lots[0]
                 lot_qty = float(lot["qty"])
                 used = min(remaining, lot_qty)
-                lot_bucket = str(lot.get("bucket", ""))
                 pnl = used * (unit_proceeds - float(lot["price"]))
-                if lot_bucket == agent_id:
-                    if ts >= today_ts:
-                        realized["today"] += pnl
-                    if ts >= week_ts:
-                        realized["week"] += pnl
-                    if ts >= month_ts:
-                        realized["month"] += pnl
+                if ts >= today_ts:
+                    realized["today"] += pnl
+                if ts >= week_ts:
+                    realized["week"] += pnl
+                if ts >= month_ts:
+                    realized["month"] += pnl
                 lot_qty -= used
                 remaining -= used
                 lot["qty"] = lot_qty
@@ -3296,9 +3304,6 @@ def _compute_agent_period_returns(
         for lot in lots:
             lot_qty = float(lot["qty"])
             if lot_qty <= 1e-9:
-                continue
-            lot_bucket = str(lot.get("bucket", ""))
-            if lot_bucket != agent_id:
                 continue
             cost = lot_qty * float(lot["price"])
             mv = lot_qty * current_price
@@ -3331,127 +3336,6 @@ def _compute_agent_position_unrealized_pnl(
         avg_cost = float(p.avg_cost or 0.0)
         total += qty * (current_price - avg_cost)
     return float(total)
-
-
-def _orphan_agent_sell_realized_adjustment(
-    trades: list[PortfolioTrade],
-    positions: list[PortfolioPosition],
-    agent_id: str,
-    since_ts: int,
-) -> float:
-    agent_source = _agent_id_to_source(agent_id)
-    position_map = {p.id: p for p in positions}
-    realized_map = _trade_realized_pnl_map(trades, positions)
-    total = 0.0
-    for trade in trades:
-        if int(trade.created_at or 0) < since_ts:
-            continue
-        if (trade.side or "").strip().upper() != "SELL":
-            continue
-        if (trade.source or "").strip() != agent_source:
-            continue
-        pid = trade.position_id
-        prior_agent_buy_qty = sum(
-            float(t.quantity or 0.0)
-            for t in trades
-            if t.position_id == pid
-            and int(t.created_at or 0) < int(trade.created_at or 0)
-            and (t.side or "").strip().upper() == "BUY"
-            and (t.source or "").strip() == agent_source
-        )
-        if prior_agent_buy_qty > 1e-9:
-            continue
-        total += float(realized_map.get(trade.id) or 0.0) * 0.5
-    return total
-
-
-def _compute_unrealized_at_timestamps(
-    trades: list[PortfolioTrade],
-    positions: list[PortfolioPosition],
-    pos_prices: dict[str, float],
-    today_ts: int,
-    week_ts: int,
-    month_ts: int,
-) -> dict[str, dict[str, float]]:
-    """Calculate what unrealized PnL would have been at start of each period, per bucket.
-
-    Starts from actual position data and reverses intra-period trades,
-    ensuring consistency with current position quantities in the database.
-    """
-    position_map = {p.id: p for p in positions}
-    by_position: dict[str, list[PortfolioTrade]] = {}
-    for trade in trades:
-        by_position.setdefault(trade.position_id, []).append(trade)
-
-    # Use _position_source_holdings to determine current bucket attribution per position
-    current_holdings = _position_source_holdings(trades, positions, pos_prices)
-
-    result = {
-        "manual": {"today": 0.0, "week": 0.0, "month": 0.0},
-        "a": {"today": 0.0, "week": 0.0, "month": 0.0},
-        "b": {"today": 0.0, "week": 0.0, "month": 0.0},
-    }
-
-    for position_id, items in by_position.items():
-        pos = position_map.get(position_id)
-        if not pos:
-            continue
-
-        current_price = float(pos_prices.get(position_id, 0.0) or 0.0)
-        if current_price <= 0:
-            continue
-
-        items.sort(key=lambda x: (int(x.created_at or 0), x.id or ""))
-
-        for label, ts in [("today", today_ts), ("week", week_ts), ("month", month_ts)]:
-            # Start from current position state (database ground truth)
-            qty = float(pos.quantity or 0.0)
-            avg_cost = float(pos.avg_cost or 0.0)
-
-            # Reverse intra-period trades (newest first) to get position at period start.
-            # IMPORTANT: do NOT skip early based on current qty — positions fully sold
-            # during the period (qty=0 now) may have had qty>0 at period start.
-            period_trades = [t for t in items if int(t.created_at or 0) >= ts]
-            for trade in reversed(period_trades):
-                side = (trade.side or "").strip().upper()
-                trade_qty = float(trade.quantity or 0.0)
-                trade_price = float(trade.price or 0.0)
-                fee = _trade_fee_value(trade, position_map)
-                if trade_qty <= 0:
-                    continue
-                if side == "BUY":
-                    if qty > trade_qty:
-                        buy_total = trade_qty * trade_price + fee
-                        qty -= trade_qty
-                        avg_cost = ((qty + trade_qty) * avg_cost - buy_total) / qty if qty > 0 else 0.0
-                    else:
-                        qty = 0.0
-                        avg_cost = 0.0
-                elif side == "SELL":
-                    qty += trade_qty
-                else:
-                    continue
-                if qty <= 0:
-                    break
-
-            # After reversing: if position had zero qty at period start (bought & sold
-            # entirely within this period), historical unrealized is correctly 0 — skip.
-            if qty <= 0 or avg_cost <= 0:
-                continue
-
-            # Determine bucket from current holdings breakdown
-            bucket = None
-            for b in ("manual", "a", "b"):
-                if position_id in current_holdings.get(b, {}):
-                    bucket = b
-                    break
-            if not bucket:
-                last_trade = max(items, key=lambda x: int(x.created_at or 0))
-                bucket = _trade_source_bucket(getattr(last_trade, "source", "manual"))
-
-            result[bucket][label] += qty * (current_price - avg_cost)
-
-    return result
 
 
 def _compute_period_returns(
@@ -3494,13 +3378,6 @@ def _compute_period_returns(
             "month": float(agent_periods["b"]["month"]),
         },
     }
-    orphan_b_today = _orphan_agent_sell_realized_adjustment(trades, positions, "b", today_ts)
-    orphan_b_week = _orphan_agent_sell_realized_adjustment(trades, positions, "b", week_ts)
-    orphan_b_month = _orphan_agent_sell_realized_adjustment(trades, positions, "b", month_ts)
-    bucket_periods["b"]["today"] += orphan_b_today
-    bucket_periods["b"]["week"] += orphan_b_week
-    bucket_periods["b"]["month"] += orphan_b_month
-
     total_pnl = float(summary.realized_pnl or 0.0) + float(summary.unrealized_pnl or 0.0)
     manual_total = float(summary.manual.realized_pnl or 0.0) + float(summary.manual.unrealized_pnl or 0.0)
     agent_a_total = float(summary.agent_a.realized_pnl or 0.0) + float(summary.agent_a.unrealized_pnl or 0.0)
@@ -4061,6 +3938,7 @@ def _run_llm_agent_once(
                 pos = s.execute(select(PortfolioPosition).where(
                     PortfolioPosition.market == "CN",
                     PortfolioPosition.symbol == symbol,
+                    PortfolioPosition.source == agent_id,
                 )).scalars().first()
                 sp = get_stock_price(symbol=symbol, market="CN")
                 buy_price = float(getattr(sp, "price", 0) or 0)
