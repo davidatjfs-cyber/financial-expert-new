@@ -1017,8 +1017,6 @@ def _execute_strategy_alert_trade(alert: PortfolioAlertResponse, agent_id: str =
         return None
 
     if alert.alert_type in {"target_buy", "strategy_buy_zone", "signal_buy"}:
-        if held_qty <= 0:
-            return None
         buy_qty = 10000.0
         buy_amount = buy_qty * trade_price
         agent_mv = 0.0
@@ -2662,8 +2660,10 @@ def _trade_source_bucket(source: Optional[str]) -> str:
         return "manual"
     if s.startswith("auto_strategy_"):
         return s[len("auto_strategy_"):]
-    if s == "auto_strategy" or s == "auto_order":
+    if s == "auto_strategy":
         return "a"
+    if s == "auto_order":
+        return "manual"
     return "manual"
 
 
@@ -3266,15 +3266,19 @@ def _position_source_holdings(
                 lots.append({"bucket": _trade_source_bucket(getattr(trade, "source", "manual")), "qty": qty, "price": unit_cost})
                 continue
             remaining = qty
+            sell_bucket = _trade_source_bucket(getattr(trade, "source", "manual"))
             while remaining > 1e-9 and lots:
-                lot = lots[0]
+                idx = next((i for i, lot in enumerate(lots) if str(lot.get("bucket")) == sell_bucket), None)
+                if idx is None:
+                    idx = 0
+                lot = lots[idx]
                 lot_qty = float(lot["qty"])
                 used = min(remaining, lot_qty)
                 lot_qty -= used
                 remaining -= used
                 lot["qty"] = lot_qty
                 if lot_qty <= 1e-9:
-                    lots.pop(0)
+                    lots.pop(idx)
         current_price = float(pos_prices.get(position_id, 0.0) or 0.0)
         live_qty = float(getattr(position_map.get(position_id), "quantity", 0.0) or 0.0)
         remaining_cap = live_qty
@@ -3566,9 +3570,9 @@ def _compute_period_returns(
     orphan_b_today = _orphan_agent_sell_realized_adjustment(trades, positions, "b", today_ts)
     orphan_b_week = _orphan_agent_sell_realized_adjustment(trades, positions, "b", week_ts)
     orphan_b_month = _orphan_agent_sell_realized_adjustment(trades, positions, "b", month_ts)
-    bucket_periods["a"]["today"] += orphan_b_today
-    bucket_periods["a"]["week"] += orphan_b_week
-    bucket_periods["a"]["month"] += orphan_b_month
+    bucket_periods["b"]["today"] += orphan_b_today
+    bucket_periods["b"]["week"] += orphan_b_week
+    bucket_periods["b"]["month"] += orphan_b_month
 
     total_pnl = float(summary.realized_pnl or 0.0) + float(summary.unrealized_pnl or 0.0)
     manual_total = float(summary.manual.realized_pnl or 0.0) + float(summary.manual.unrealized_pnl or 0.0)

@@ -83,6 +83,7 @@ export default function ReturnsPage() {
   const sourceLabel = (source: PortfolioTrade['source']) => source === 'manual' ? '手动' : source === 'auto_strategy' || source === 'auto_strategy_a' ? 'Agent A' : source === 'auto_strategy_b' ? 'Agent B' : '委托自动';
   const sourceGroup = (source: PortfolioTrade['source']) => {
     if (source === 'manual') return 'manual';
+    if (source === 'auto_order') return 'manual';
     if (source === 'auto_strategy_b') return 'agent_b';
     return 'agent_a';
   };
