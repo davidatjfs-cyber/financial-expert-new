@@ -3221,8 +3221,12 @@ def _compute_period_realized_pnl(trades: list[PortfolioTrade], today_ts: int, we
                 continue
             remaining = qty
             unit_proceeds = (qty * price - fee) / qty if qty > 0 else price
+            sell_bucket = _trade_source_bucket(getattr(trade, "source", "manual"))
             while remaining > 1e-9 and lots:
-                lot = lots[0]
+                idx = next((i for i, lot in enumerate(lots) if str(lot.get("bucket")) == sell_bucket), None)
+                if idx is None:
+                    idx = 0
+                lot = lots[idx]
                 lot_qty = float(lot["qty"])
                 used = min(remaining, lot_qty)
                 lot_bucket = str(lot["bucket"])
@@ -3237,7 +3241,7 @@ def _compute_period_realized_pnl(trades: list[PortfolioTrade], today_ts: int, we
                 remaining -= used
                 lot["qty"] = lot_qty
                 if lot_qty <= 1e-9:
-                    lots.pop(0)
+                    lots.pop(idx)
     return result
 
 
@@ -3546,25 +3550,21 @@ def _compute_period_returns(
         "a": float(agent_periods["a"]["unrealized"]),
         "b": float(agent_periods["b"]["unrealized"]),
     }
-    # Calculate what unrealized was at start of each period, per bucket
-    historical_unrealized = _compute_unrealized_at_timestamps(
-        trades, positions, pos_prices or {}, today_ts, week_ts, month_ts
-    )
     bucket_periods = {
         "manual": {
-            "today": bucket_realized["manual"]["today"] + (unrealized_pnl_by_bucket["manual"] - historical_unrealized["manual"]["today"]),
-            "week": bucket_realized["manual"]["week"] + (unrealized_pnl_by_bucket["manual"] - historical_unrealized["manual"]["week"]),
-            "month": bucket_realized["manual"]["month"] + (unrealized_pnl_by_bucket["manual"] - historical_unrealized["manual"]["month"]),
+            "today": bucket_realized["manual"]["today"] + unrealized_pnl_by_bucket["manual"],
+            "week": bucket_realized["manual"]["week"] + unrealized_pnl_by_bucket["manual"],
+            "month": bucket_realized["manual"]["month"] + unrealized_pnl_by_bucket["manual"],
         },
         "a": {
-            "today": bucket_realized["a"]["today"] + (unrealized_pnl_by_bucket["a"] - historical_unrealized["a"]["today"]),
-            "week": bucket_realized["a"]["week"] + (unrealized_pnl_by_bucket["a"] - historical_unrealized["a"]["week"]),
-            "month": bucket_realized["a"]["month"] + (unrealized_pnl_by_bucket["a"] - historical_unrealized["a"]["month"]),
+            "today": float(agent_periods["a"]["today"]),
+            "week": float(agent_periods["a"]["week"]),
+            "month": float(agent_periods["a"]["month"]),
         },
         "b": {
-            "today": bucket_realized["b"]["today"] + (unrealized_pnl_by_bucket["b"] - historical_unrealized["b"]["today"]),
-            "week": bucket_realized["b"]["week"] + (unrealized_pnl_by_bucket["b"] - historical_unrealized["b"]["week"]),
-            "month": bucket_realized["b"]["month"] + (unrealized_pnl_by_bucket["b"] - historical_unrealized["b"]["month"]),
+            "today": float(agent_periods["b"]["today"]),
+            "week": float(agent_periods["b"]["week"]),
+            "month": float(agent_periods["b"]["month"]),
         },
     }
     orphan_b_today = _orphan_agent_sell_realized_adjustment(trades, positions, "b", today_ts)
