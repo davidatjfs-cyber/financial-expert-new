@@ -2459,6 +2459,7 @@ def create_portfolio_position(req: PortfolioCreatePositionRequest):
             select(PortfolioPosition).where(
                 PortfolioPosition.market == market,
                 PortfolioPosition.symbol == symbol,
+                PortfolioPosition.source == "manual",
             )
         ).scalars().first()
 
@@ -2474,6 +2475,7 @@ def create_portfolio_position(req: PortfolioCreatePositionRequest):
                 market=market,
                 symbol=symbol,
                 name=name,
+                source="manual",
                 quantity=0.0,
                 avg_cost=0.0,
                 target_buy_price=req.target_buy_price,
@@ -2735,10 +2737,11 @@ def _queue_auto_trade(session, position_id: str, side: str, trigger_price: float
     )
 
 
-def _get_or_create_position_for_symbol(session, market: str, symbol: str, name: str, now: int) -> PortfolioPosition:
+def _get_or_create_position_for_symbol(session, market: str, symbol: str, name: str, now: int, source: str = "manual") -> PortfolioPosition:
     existing = session.execute(select(PortfolioPosition).where(
         PortfolioPosition.market == market,
         PortfolioPosition.symbol == symbol,
+        PortfolioPosition.source == source,
     )).scalars().first()
     if existing is not None:
         if name and not (existing.name or "").strip():
@@ -2748,6 +2751,7 @@ def _get_or_create_position_for_symbol(session, market: str, symbol: str, name: 
         market=market,
         symbol=symbol,
         name=name or symbol,
+        source=source,
         quantity=0.0,
         avg_cost=0.0,
         created_at=now,
@@ -2807,72 +2811,39 @@ def _portfolio_source_breakdown(
         "a": _empty_source_summary(),
         "b": _empty_source_summary(),
     }
-    holdings = {
-        "manual": {},
-        "a": {},
-        "b": {},
-    }
+    holdings = {"manual": {}, "a": {}, "b": {}}
 
-    by_position: dict[str, list[PortfolioTrade]] = {}
+    position_map = {p.id: p for p in positions}
+
+    # Compute per-position realized PnL via simple FIFO (single-source positions)
+    realized_map = _trade_realized_pnl_map(trades, positions)
+
     for trade in trades:
-        bucket = _trade_source_bucket(getattr(trade, "source", "manual"))
+        bucket = (position_map.get(trade.position_id) or PortfolioPosition(source="manual")).source or "manual"
+        if bucket not in breakdown:
+            bucket = "manual"
         info = breakdown[bucket]
         info["total_trades"] += 1.0
         amount = float(trade.amount or 0.0)
         if (trade.side or "").strip().upper() == "SELL":
             info["_sell_amount"] += amount
+            info["realized_pnl"] += float(realized_map.get(trade.id) or 0.0)
         else:
             info["total_buy_amount"] += amount
-        by_position.setdefault(trade.position_id, []).append(trade)
 
-    position_map = {p.id: p for p in positions}
-    for position_id, items in by_position.items():
-        items.sort(key=lambda x: (int(x.created_at or 0), x.id or ""))
-        lots: list[dict[str, float | str]] = []
-        for trade in items:
-            side = (trade.side or "").strip().upper()
-            qty = float(trade.quantity or 0.0)
-            price = float(trade.price or 0.0)
-            fee = _trade_fee_value(trade, position_map)
-            if qty <= 0:
-                continue
-            if side == "BUY":
-                unit_cost = (qty * price + fee) / qty if qty > 0 else price
-                lots.append({"bucket": _trade_source_bucket(getattr(trade, "source", "manual")), "qty": qty, "price": unit_cost})
-                continue
-            remaining = qty
-            unit_proceeds = (qty * price - fee) / qty if qty > 0 else price
-            sell_bucket = _trade_source_bucket(getattr(trade, "source", "manual"))
-            while remaining > 1e-9 and lots:
-                idx = next((i for i, lot in enumerate(lots) if str(lot.get("bucket")) == sell_bucket), None)
-                if idx is None:
-                    idx = 0  # Fall back to FIFO when no matching bucket (e.g., Agent B sells Agent A's shares)
-                lot = lots[idx]
-                lot_qty = float(lot["qty"])
-                used = min(remaining, lot_qty)
-                bucket = str(lot["bucket"])
-                breakdown[bucket]["realized_pnl"] += used * (unit_proceeds - float(lot["price"]))
-                lot_qty -= used
-                remaining -= used
-                lot["qty"] = lot_qty
-                if lot_qty <= 1e-9:
-                    lots.pop(idx)
-
-        current_price = float(pos_prices.get(position_id, 0.0) or 0.0)
-        live_qty = float(getattr(position_map.get(position_id), "quantity", 0.0) or 0.0)
-        remaining_cap = live_qty
-        for lot in lots:
-            qty = min(float(lot["qty"]), remaining_cap)
-            if qty <= 0:
-                continue
-            remaining_cap -= qty
-            bucket = str(lot["bucket"])
-            cost = qty * float(lot["price"])
-            mv = qty * current_price
-            breakdown[bucket]["total_cost"] += cost
-            breakdown[bucket]["total_market_value"] += mv
-            breakdown[bucket]["unrealized_pnl"] += mv - cost
-            holdings[bucket][position_id] = holdings[bucket].get(position_id, 0.0) + qty
+    for p in positions:
+        src = (p.source or "manual")
+        if src not in breakdown:
+            src = "manual"
+        qty = float(p.quantity or 0.0)
+        cost = qty * float(p.avg_cost or 0.0)
+        current_price = float(pos_prices.get(p.id, 0.0) or 0.0)
+        mv = qty * current_price
+        breakdown[src]["total_cost"] += cost
+        breakdown[src]["total_market_value"] += mv
+        breakdown[src]["unrealized_pnl"] += mv - cost
+        if qty > 0:
+            holdings[src][p.id] = holdings[src].get(p.id, 0.0) + qty
 
     for bucket in breakdown:
         sell_amt = float(breakdown[bucket].pop("_sell_amount", 0.0))
@@ -3104,21 +3075,13 @@ def _agent_live_position_quantities(
     trades: Optional[list[PortfolioTrade]] = None,
     positions: Optional[list[PortfolioPosition]] = None,
 ) -> dict[str, float]:
-    if trades is None or positions is None:
+    if positions is None:
         with session_scope() as s:
-            if trades is None:
-                trades = s.execute(select(PortfolioTrade)).scalars().all()
-            if positions is None:
-                positions = s.execute(select(PortfolioPosition)).scalars().all()
-    _, holdings = _portfolio_source_breakdown(
-        trades or [],
-        positions or [],
-        {p.id: 0.0 for p in (positions or [])},
-    )
+            positions = s.execute(select(PortfolioPosition)).scalars().all()
     return {
-        position_id: float(qty or 0.0)
-        for position_id, qty in holdings.get(agent_id, {}).items()
-        if float(qty or 0.0) > 1e-9
+        p.id: float(p.quantity or 0.0)
+        for p in (positions or [])
+        if (p.source or "manual") == agent_id and float(p.quantity or 0.0) > 1e-9
     }
 
 
@@ -3250,59 +3213,23 @@ def _position_source_holdings(
     positions: list[PortfolioPosition],
     pos_prices: dict[str, float],
 ) -> dict[str, dict[str, dict]]:
-    position_map = {p.id: p for p in positions}
-    by_position: dict[str, list[PortfolioTrade]] = {}
-    for trade in trades:
-        by_position.setdefault(trade.position_id, []).append(trade)
     result: dict[str, dict[str, dict]] = {"manual": {}, "a": {}, "b": {}}
-    for position_id, items in by_position.items():
-        items.sort(key=lambda x: (int(x.created_at or 0), x.id or ""))
-        lots: list[dict[str, float | str]] = []
-        for trade in items:
-            side = (trade.side or "").strip().upper()
-            qty = float(trade.quantity or 0.0)
-            price = float(trade.price or 0.0)
-            fee = _trade_fee_value(trade, position_map)
-            if qty <= 0:
-                continue
-            if side == "BUY":
-                unit_cost = (qty * price + fee) / qty if qty > 0 else price
-                lots.append({"bucket": _trade_source_bucket(getattr(trade, "source", "manual")), "qty": qty, "price": unit_cost})
-                continue
-            remaining = qty
-            sell_bucket = _trade_source_bucket(getattr(trade, "source", "manual"))
-            while remaining > 1e-9 and lots:
-                idx = next((i for i, lot in enumerate(lots) if str(lot.get("bucket")) == sell_bucket), None)
-                if idx is None:
-                    idx = 0
-                lot = lots[idx]
-                lot_qty = float(lot["qty"])
-                used = min(remaining, lot_qty)
-                lot_qty -= used
-                remaining -= used
-                lot["qty"] = lot_qty
-                if lot_qty <= 1e-9:
-                    lots.pop(idx)
-        current_price = float(pos_prices.get(position_id, 0.0) or 0.0)
-        live_qty = float(getattr(position_map.get(position_id), "quantity", 0.0) or 0.0)
-        remaining_cap = live_qty
-        for lot in lots:
-            qty = min(float(lot["qty"]), remaining_cap)
-            if qty <= 0:
-                continue
-            remaining_cap -= qty
-            bucket = str(lot["bucket"])
-            lot_price = float(lot["price"])
-            cost = qty * lot_price
-            mv = qty * current_price
-            entry = result[bucket].get(position_id)
-            if entry is None:
-                entry = {"quantity": 0.0, "total_cost": 0.0, "market_value": 0.0, "unrealized_pnl": 0.0}
-                result[bucket][position_id] = entry
-            entry["quantity"] += qty
-            entry["total_cost"] += cost
-            entry["market_value"] += mv
-            entry["unrealized_pnl"] += mv - cost
+    for p in positions:
+        src = (p.source or "manual")
+        if src not in result:
+            src = "manual"
+        qty = float(p.quantity or 0.0)
+        if qty <= 1e-9:
+            continue
+        cost = qty * float(p.avg_cost or 0.0)
+        current_price = float(pos_prices.get(p.id, 0.0) or 0.0)
+        mv = qty * current_price
+        result[src][p.id] = {
+            "quantity": qty,
+            "total_cost": cost,
+            "market_value": mv,
+            "unrealized_pnl": mv - cost,
+        }
     return result
 
 
@@ -4088,6 +4015,7 @@ def _run_llm_agent_once(
                     p for p in s.execute(select(PortfolioPosition).where(
                         PortfolioPosition.market == "CN",
                         PortfolioPosition.symbol == symbol,
+                        PortfolioPosition.source == agent_id,
                     )).scalars().all()
                     if float(agent_position_qty.get(p.id, 0.0) or 0.0) > 0
                 ), None)
@@ -4148,6 +4076,7 @@ def _run_llm_agent_once(
                     name = (candidate or {}).get("name") or symbol
                     pos = PortfolioPosition(
                         market="CN", symbol=symbol, name=name or symbol,
+                        source=agent_id,
                         quantity=0.0, avg_cost=0.0, created_at=now, updated_at=now,
                     )
                     s.add(pos)
@@ -4169,7 +4098,7 @@ def _run_llm_agent_once(
                         post_commit_events.append(("llm_buy_trade_failed", symbol, None))
                         last_status = f"llm_buy_trade_failed:{symbol}"
                 else:
-                    pos = pos or _get_or_create_position_for_symbol(s, "CN", symbol, str((candidate or {}).get("name") or symbol), now)
+                    pos = pos or _get_or_create_position_for_symbol(s, "CN", symbol, str((candidate or {}).get("name") or symbol), now, source=agent_id)
                     queued_order = _queue_auto_trade(s, pos.id, "BUY", buy_price, qty, _agent_id_to_source(agent_id))
                     if queued_order is not None:
                         post_commit_events.append(("llm_buy_queued", symbol, f"qty={qty}@<= {buy_price:.2f} reason={reason}"))
@@ -4370,7 +4299,7 @@ def _run_portfolio_agent_once(
                     if symbol.strip().upper() in _manual_symbols:
                         _log_agent_pick_event(agent_id, slot_key, "buy_skipped_manual_position", symbol=symbol, detail="manual_position_protected")
                         continue
-                    existing = _get_or_create_position_for_symbol(s, market, symbol, name, now)
+                    existing = _get_or_create_position_for_symbol(s, market, symbol, name, now, source=agent_id)
                     _log_agent_pick_event(agent_id, slot_key, "candidate_processing", symbol=symbol, detail=f"action={action} price={scan_price} pos_id={existing.id}")
                     # A "fresh" position is truly new with no trade history — safe to delete on failure.
                     # Positions with qty=0 due to previous sells must NOT be deleted (they have trade history).

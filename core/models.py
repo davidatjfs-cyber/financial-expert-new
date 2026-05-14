@@ -96,6 +96,7 @@ class PortfolioPosition(Base):
     market: Mapped[str] = mapped_column(String, index=True)
     symbol: Mapped[str] = mapped_column(String, index=True)
     name: Mapped[str | None] = mapped_column(String, nullable=True)
+    source: Mapped[str] = mapped_column(String, default="manual")  # manual / a / b
 
     quantity: Mapped[float] = mapped_column(Float, default=0.0)
     avg_cost: Mapped[float] = mapped_column(Float, default=0.0)
@@ -106,7 +107,7 @@ class PortfolioPosition(Base):
     created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
     updated_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
 
-    __table_args__ = (UniqueConstraint("market", "symbol", name="uq_portfolio_positions_market_symbol"),)
+    __table_args__ = (UniqueConstraint("market", "symbol", "source", name="uq_portfolio_positions_market_symbol_source"),)
 
 
 class PortfolioTrade(Base):
