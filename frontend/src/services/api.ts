@@ -145,6 +145,8 @@ export interface PortfolioPosition {
     agent_a?: { quantity: number; avg_cost: number; market_value: number; unrealized_pnl: number; unrealized_pnl_pct: number } | null;
     agent_b?: { quantity: number; avg_cost: number; market_value: number; unrealized_pnl: number; unrealized_pnl_pct: number } | null;
   } | null;
+  last_trade_source?: string | null;  // source of most recent trade (helps classify closed positions)
+  realized_pnl?: number | null;        // cumulative realized PnL for this position
 }
 
 export interface PortfolioCreatePositionRequest {

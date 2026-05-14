@@ -490,21 +490,26 @@ export default function PortfolioPage() {
                   hasAnySource = true;
                 }
               }
-              if (bd?.manual && bd.manual.quantity > 0) {
-                // already pushed above
-              } else if (!hasAnySource) {
-                const hasAgentAPending = pendingAutoTrades.some(at => at.position_id === p.id && (at.source || '').startsWith('auto_strategy_a'));
-                const hasAgentBPending = pendingAutoTrades.some(at => at.position_id === p.id && (at.source || '').startsWith('auto_strategy_b'));
-                if (!hasAgentAPending && !hasAgentBPending) {
-                  flat.push({ position: p, sourceKey: 'manual', sourceLabel: '手动', sourceColor: 'text-[var(--text-secondary)]', holding: { quantity: p.quantity, avg_cost: p.avg_cost, market_value: p.market_value ?? 0, unrealized_pnl: p.unrealized_pnl ?? 0, unrealized_pnl_pct: p.unrealized_pnl_pct ?? 0 } });
-                }
-              }
               const agentATrades = pendingAutoTrades.filter(at => at.position_id === p.id && (at.source || '').startsWith('auto_strategy_a'));
               const agentBTrades = pendingAutoTrades.filter(at => at.position_id === p.id && (at.source || '').startsWith('auto_strategy_b'));
-              if (agentATrades.length > 0 && !(bd?.agent_a && bd.agent_a.quantity > 0)) {
+              if (!hasAnySource) {
+                // Determine correct bucket for zero-quantity positions using last_trade_source
+                const lastSrc = p.last_trade_source || '';
+                const closedBucket =
+                  lastSrc.startsWith('auto_strategy_b') ? 'agent_b' :
+                  lastSrc.startsWith('auto_strategy_a') || lastSrc === 'auto_strategy' ? 'agent_a' :
+                  'manual';
+                const hasAgentAPending = agentATrades.length > 0;
+                const hasAgentBPending = agentBTrades.length > 0;
+                // Show under the correct bucket (not always 'manual')
+                const targetKey = hasAgentBPending ? 'agent_b' : hasAgentAPending ? 'agent_a' : closedBucket;
+                const targetDef = srcDefs.find(s => s.key === targetKey) ?? srcDefs[0];
+                flat.push({ position: p, sourceKey: targetDef.key, sourceLabel: targetDef.label, sourceColor: targetDef.color, holding: { quantity: p.quantity, avg_cost: p.avg_cost, market_value: p.market_value ?? 0, unrealized_pnl: p.unrealized_pnl ?? 0, unrealized_pnl_pct: p.unrealized_pnl_pct ?? 0 } });
+              }
+              if (agentATrades.length > 0 && !(bd?.agent_a && bd.agent_a.quantity > 0) && !flat.some(f => f.position.id === p.id && f.sourceKey === 'agent_a')) {
                 flat.push({ position: p, sourceKey: 'agent_a', sourceLabel: 'Agent A', sourceColor: 'text-purple-400', holding: { quantity: 0, avg_cost: 0, market_value: 0, unrealized_pnl: 0, unrealized_pnl_pct: 0 } });
               }
-              if (agentBTrades.length > 0 && !(bd?.agent_b && bd.agent_b.quantity > 0)) {
+              if (agentBTrades.length > 0 && !(bd?.agent_b && bd.agent_b.quantity > 0) && !flat.some(f => f.position.id === p.id && f.sourceKey === 'agent_b')) {
                 flat.push({ position: p, sourceKey: 'agent_b', sourceLabel: 'Agent B', sourceColor: 'text-blue-400', holding: { quantity: 0, avg_cost: 0, market_value: 0, unrealized_pnl: 0, unrealized_pnl_pct: 0 } });
               }
             }
@@ -561,7 +566,10 @@ export default function PortfolioPage() {
                           </div>
                         ) : isEmpty ? (
                           <div className="flex items-center gap-3 mt-2 text-[10px] text-[var(--text-muted)]">
-                            <span>持仓 <b className="text-[var(--text-secondary)]">0</b></span>
+                            <span>已清仓</span>
+                            {p.realized_pnl != null && (
+                              <span>已实现盈亏 <b className={p.realized_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}>{p.realized_pnl >= 0 ? '+' : ''}{Math.round(p.realized_pnl).toLocaleString()}</b></span>
+                            )}
                           </div>
                         ) : (
                           <div className="flex items-center gap-3 mt-2 text-[10px] text-[var(--text-muted)]">

@@ -441,6 +441,8 @@ class PortfolioPositionResponse(BaseModel):
     strategy_sell_desc: Optional[str] = None
     updated_at: int
     holdings_breakdown: Optional[PositionHoldingsBreakdown] = None
+    last_trade_source: Optional[str] = None  # source of most recent trade (for closed positions)
+    realized_pnl: Optional[float] = None  # cumulative realized PnL across all trades
 
 
 class PortfolioCreatePositionRequest(BaseModel):
@@ -950,6 +952,9 @@ def _create_trade_at_price(position_id: str, side: str, quantity: float, price: 
         amount=px * exec_qty,
         fee=fee * (exec_qty / qty) if qty > 0 else 0.0,
         source=source,
+        symbol=symbol,
+        name=pos_name,
+        market=market,
         created_at=now,
     )
     session.add(trade)
@@ -2316,10 +2321,46 @@ def list_portfolio_positions():
         for p, market, symbol, name in positions_raw:
             prices_map.setdefault((market, symbol), None)
 
-    # Fetch trades for holdings breakdown
+    # Fetch trades for holdings breakdown and per-position metadata
     with session_scope() as s:
         all_trades = s.execute(select(PortfolioTrade)).scalars().all()
     source_holdings = _position_source_holdings(all_trades, [p for p, _, _, _ in positions_raw], {p.id: (prices_map.get((m, s)) or 0.0) for p, m, s, _ in positions_raw})
+
+    # Build per-position: last trade source + realized PnL (FIFO)
+    _pos_last_source: dict[str, str] = {}
+    _pos_realized: dict[str, float] = {}
+    _by_pos_trades: dict[str, list[PortfolioTrade]] = {}
+    for t in all_trades:
+        _by_pos_trades.setdefault(t.position_id, []).append(t)
+    _all_positions_map = {p.id: p for p, _, _, _ in positions_raw}
+    for pid, ptrades in _by_pos_trades.items():
+        ptrades.sort(key=lambda x: (int(x.created_at or 0), x.id or ""))
+        if ptrades:
+            _pos_last_source[pid] = ptrades[-1].source or "manual"
+        # FIFO realized PnL
+        lots: list[dict] = []
+        total_realized = 0.0
+        for t in ptrades:
+            side = (t.side or "").upper()
+            tq = float(t.quantity or 0.0)
+            tp = float(t.price or 0.0)
+            fee = _trade_fee_value(t, _all_positions_map)
+            if tq <= 0:
+                continue
+            if side == "BUY":
+                lots.append({"qty": tq, "price": (tq * tp + fee) / tq if tq > 0 else tp})
+            elif side == "SELL":
+                unit_proceeds = (tq * tp - fee) / tq if tq > 0 else tp
+                rem = tq
+                while rem > 1e-9 and lots:
+                    lot = lots[0]
+                    used = min(rem, float(lot["qty"]))
+                    total_realized += used * (unit_proceeds - float(lot["price"]))
+                    lot["qty"] = float(lot["qty"]) - used
+                    rem -= used
+                    if float(lot["qty"]) <= 1e-9:
+                        lots.pop(0)
+        _pos_realized[pid] = total_realized
 
     out: list[PortfolioPositionResponse] = []
     for p, market, symbol, name in positions_raw:
@@ -2400,6 +2441,8 @@ def list_portfolio_positions():
                     agent_a=_build_source_holding(source_holdings.get("a", {}).get(p.id)),
                     agent_b=_build_source_holding(source_holdings.get("b", {}).get(p.id)),
                 ),
+                last_trade_source=_pos_last_source.get(p.id),
+                realized_pnl=_pos_realized.get(p.id, 0.0),
             )
         )
 
@@ -2556,6 +2599,11 @@ def create_portfolio_trade(req: PortfolioTradeRequest):
 
         pos_id = p.id
         pos_name = (p.name or "").strip() or None
+
+        t.symbol = symbol
+        t.name = pos_name
+        t.market = market
+
         if side == "SELL" and new_qty <= 0:
             s.query(PortfolioAutoTrade).filter(PortfolioAutoTrade.position_id == pos_id).update({"status": "CANCELLED"})
 
@@ -2597,8 +2645,10 @@ def list_portfolio_trades(position_id: Optional[str] = None, limit: int = 100):
                 id=t.id, position_id=t.position_id, side=t.side,
                 price=float(t.price or 0), quantity=float(t.quantity or 0),
                 amount=float(t.amount or 0), fee=float(getattr(t, "fee", 0.0) or 0.0), source=getattr(t, "source", "manual") or "manual",
-                symbol=p.symbol if p else None, name=p.name if p else None,
-                market=p.market if p else None, created_at=int(t.created_at or 0),
+                symbol=getattr(t, "symbol", None) or (p.symbol if p else None),
+                name=getattr(t, "name", None) or (p.name if p else None),
+                market=getattr(t, "market", None) or (p.market if p else None),
+                created_at=int(t.created_at or 0),
                 realized_pnl=realized_pnl_map.get(t.id),
             ))
         return out
@@ -2796,7 +2846,7 @@ def _portfolio_source_breakdown(
             while remaining > 1e-9 and lots:
                 idx = next((i for i, lot in enumerate(lots) if str(lot.get("bucket")) == sell_bucket), None)
                 if idx is None:
-                    break
+                    idx = 0  # Fall back to FIFO when no matching bucket (e.g., Agent B sells Agent A's shares)
                 lot = lots[idx]
                 lot_qty = float(lot["qty"])
                 used = min(remaining, lot_qty)
@@ -3380,6 +3430,95 @@ def _orphan_agent_sell_realized_adjustment(
     return total
 
 
+def _compute_unrealized_at_timestamps(
+    trades: list[PortfolioTrade],
+    positions: list[PortfolioPosition],
+    pos_prices: dict[str, float],
+    today_ts: int,
+    week_ts: int,
+    month_ts: int,
+) -> dict[str, dict[str, float]]:
+    """Calculate what unrealized PnL would have been at start of each period, per bucket.
+
+    Starts from actual position data and reverses intra-period trades,
+    ensuring consistency with current position quantities in the database.
+    """
+    position_map = {p.id: p for p in positions}
+    by_position: dict[str, list[PortfolioTrade]] = {}
+    for trade in trades:
+        by_position.setdefault(trade.position_id, []).append(trade)
+
+    # Use _position_source_holdings to determine current bucket attribution per position
+    current_holdings = _position_source_holdings(trades, positions, pos_prices)
+
+    result = {
+        "manual": {"today": 0.0, "week": 0.0, "month": 0.0},
+        "a": {"today": 0.0, "week": 0.0, "month": 0.0},
+        "b": {"today": 0.0, "week": 0.0, "month": 0.0},
+    }
+
+    for position_id, items in by_position.items():
+        pos = position_map.get(position_id)
+        if not pos:
+            continue
+
+        current_price = float(pos_prices.get(position_id, 0.0) or 0.0)
+        if current_price <= 0:
+            continue
+
+        items.sort(key=lambda x: (int(x.created_at or 0), x.id or ""))
+
+        for label, ts in [("today", today_ts), ("week", week_ts), ("month", month_ts)]:
+            # Start from current position state (database ground truth)
+            qty = float(pos.quantity or 0.0)
+            avg_cost = float(pos.avg_cost or 0.0)
+
+            # Reverse intra-period trades (newest first) to get position at period start.
+            # IMPORTANT: do NOT skip early based on current qty — positions fully sold
+            # during the period (qty=0 now) may have had qty>0 at period start.
+            period_trades = [t for t in items if int(t.created_at or 0) >= ts]
+            for trade in reversed(period_trades):
+                side = (trade.side or "").strip().upper()
+                trade_qty = float(trade.quantity or 0.0)
+                trade_price = float(trade.price or 0.0)
+                fee = _trade_fee_value(trade, position_map)
+                if trade_qty <= 0:
+                    continue
+                if side == "BUY":
+                    if qty > trade_qty:
+                        buy_total = trade_qty * trade_price + fee
+                        qty -= trade_qty
+                        avg_cost = ((qty + trade_qty) * avg_cost - buy_total) / qty if qty > 0 else 0.0
+                    else:
+                        qty = 0.0
+                        avg_cost = 0.0
+                elif side == "SELL":
+                    qty += trade_qty
+                else:
+                    continue
+                if qty <= 0:
+                    break
+
+            # After reversing: if position had zero qty at period start (bought & sold
+            # entirely within this period), historical unrealized is correctly 0 — skip.
+            if qty <= 0 or avg_cost <= 0:
+                continue
+
+            # Determine bucket from current holdings breakdown
+            bucket = None
+            for b in ("manual", "a", "b"):
+                if position_id in current_holdings.get(b, {}):
+                    bucket = b
+                    break
+            if not bucket:
+                last_trade = max(items, key=lambda x: int(x.created_at or 0))
+                bucket = _trade_source_bucket(getattr(last_trade, "source", "manual"))
+
+            result[bucket][label] += qty * (current_price - avg_cost)
+
+    return result
+
+
 def _compute_period_returns(
     positions: list[PortfolioPosition],
     summary: PortfolioSummaryResponse,
@@ -3403,21 +3542,25 @@ def _compute_period_returns(
         "a": float(agent_periods["a"]["unrealized"]),
         "b": float(agent_periods["b"]["unrealized"]),
     }
+    # Calculate what unrealized was at start of each period, per bucket
+    historical_unrealized = _compute_unrealized_at_timestamps(
+        trades, positions, pos_prices or {}, today_ts, week_ts, month_ts
+    )
     bucket_periods = {
         "manual": {
-            "today": bucket_realized["manual"]["today"] + unrealized_pnl_by_bucket["manual"],
-            "week": bucket_realized["manual"]["week"] + unrealized_pnl_by_bucket["manual"],
-            "month": bucket_realized["manual"]["month"] + unrealized_pnl_by_bucket["manual"],
+            "today": bucket_realized["manual"]["today"] + (unrealized_pnl_by_bucket["manual"] - historical_unrealized["manual"]["today"]),
+            "week": bucket_realized["manual"]["week"] + (unrealized_pnl_by_bucket["manual"] - historical_unrealized["manual"]["week"]),
+            "month": bucket_realized["manual"]["month"] + (unrealized_pnl_by_bucket["manual"] - historical_unrealized["manual"]["month"]),
         },
         "a": {
-            "today": float(agent_periods["a"]["today"]),
-            "week": float(agent_periods["a"]["week"]),
-            "month": float(agent_periods["a"]["month"]),
+            "today": bucket_realized["a"]["today"] + (unrealized_pnl_by_bucket["a"] - historical_unrealized["a"]["today"]),
+            "week": bucket_realized["a"]["week"] + (unrealized_pnl_by_bucket["a"] - historical_unrealized["a"]["week"]),
+            "month": bucket_realized["a"]["month"] + (unrealized_pnl_by_bucket["a"] - historical_unrealized["a"]["month"]),
         },
         "b": {
-            "today": float(agent_periods["b"]["today"]),
-            "week": float(agent_periods["b"]["week"]),
-            "month": float(agent_periods["b"]["month"]),
+            "today": bucket_realized["b"]["today"] + (unrealized_pnl_by_bucket["b"] - historical_unrealized["b"]["today"]),
+            "week": bucket_realized["b"]["week"] + (unrealized_pnl_by_bucket["b"] - historical_unrealized["b"]["week"]),
+            "month": bucket_realized["b"]["month"] + (unrealized_pnl_by_bucket["b"] - historical_unrealized["b"]["month"]),
         },
     }
     orphan_b_today = _orphan_agent_sell_realized_adjustment(trades, positions, "b", today_ts)
@@ -3699,12 +3842,6 @@ def _run_llm_agent_once(
     # Per-source holdings gives each agent's actual cost basis (not blended across all sources)
     _src_holdings = _position_source_holdings(all_trades, positions, {p.id: 0.0 for p in positions})
     _agent_src = _src_holdings.get(agent_id, {})
-    pos_id_to_pos = {p.id: p for p in positions}
-    manually_held_symbols = {
-        (pos_id_to_pos[pid].symbol or "").strip().upper()
-        for pid, entry in _src_holdings.get("manual", {}).items()
-        if float((entry or {}).get("quantity", 0) or 0) > 0 and pid in pos_id_to_pos
-    }
 
     holdings_info = []
     for pos in positions:
@@ -3805,42 +3942,74 @@ def _run_llm_agent_once(
     held_symbols = {(h.get("symbol") or "").upper() for h in holdings_info}
     held_symbols_base = {s.split(".")[0] for s in held_symbols}
 
-    system_prompt = """你是一个专业的A股交易决策AI。你与规则驱动的Agent A不同，你的核心价值是综合分析多维信息做出更优决策。
+    # --- Market context for LLM decision (HS300 trend + 20d return) ---
+    _hs300_state = "unknown"
+    _hs300_20d_ret: Optional[float] = None
+    _hs300_latest: Optional[float] = None
+    try:
+        _hs300_state = _cn_index_market_state()
+        _hs300_df = _tencent_fetch_history_df("000300.SH", "CN", count=30)
+        if _hs300_df is not None and not _hs300_df.empty:
+            import numpy as np
+            _close = pd.to_numeric(_hs300_df["close"], errors="coerce").dropna().values
+            if len(_close) >= 21:
+                _hs300_latest = round(float(_close[-1]), 2)
+                _hs300_20d_ret = round((float(_close[-1]) / float(_close[-21]) - 1) * 100, 2)
+    except Exception:
+        pass
+    _ret_str = (
+        ("+" if (_hs300_20d_ret or 0) >= 0 else "") + f"{_hs300_20d_ret:.2f}%"
+        if _hs300_20d_ret is not None else "未知"
+    )
+    _market_brief = f"HS300状态：{_hs300_state} | 最新点位：{_hs300_latest or '未知'} | 近20日涨跌：{_ret_str}"
 
-    你的决策框架：
-    1. 只能操作A股(CN市场)，每次最多做5个决策
-2. 卖出优先于买入
-3. 买入新股票时，symbol必须来自候选股列表
-4. 已持有股票可以加仓
+    system_prompt = """你是一个专业的A股量化交易AI，目标是在可用资金范围内最大化净收益率。
 
-你的分析维度（区别于纯规则执行）：
-- 持仓分析：综合评估每只持仓的技术面（趋势/RSI/MACD/均线/布林带）和盈亏状态，判断是继续持有、加仓还是减仓
-- 告警响应：结合告警类型和持仓盈亏，判断告警是否应该立即执行（如止损必执行），还是可以观察
-- 候选股筛选：从候选股中结合当前持仓结构、资金使用效率、行业分散度，选择最优标的
-- 时机判断：综合考虑多指标共振情况（如MACD金叉+RSI低位+价格在买入区=强买点），而非看单一指标
-- 仓位管理：考虑当前持仓集中度，避免过度集中单一股票；考虑资金使用效率，避免资金长期闲置
+## 唯一硬性限制
+买入新股票时，symbol必须来自候选股列表。已持仓股票的加仓和卖出不受此限制。
 
-    决策输出格式（严格遵守）：
-    单个动作：{"action": "sell"|"buy"|"hold", "symbol": "股票代码(如600036)", "reason": "简短理由(20字内)"}
-    多个动作：{"actions": [{"action": "sell"|"buy"|"hold", "symbol": "股票代码(如600036)", "reason": "简短理由(20字内)"}]}
+## 数据解读指南
 
-    如果action是hold，symbol填null。动作总数最多5个。"""
+**大盘状态（HS300）**
+- not_weak：市场健康，可积极操作
+- weak：市场下行压力大，需综合评估风险收益比
+- unknown：数据不足，谨慎判断
+
+**持仓字段含义**
+- pnl_pct：该仓位的浮动盈亏百分比
+- trend：技术趋势（up/down/sideways）
+- rsi14：相对强弱指数，>70超买，<30超卖
+- ma5/ma20/ma60：5日/20日/60日均线价格
+- stop_loss：技术止损参考价（跌破该价位表示趋势破坏）
+- take_profit_1/2：第一/第二止盈参考价
+
+**告警类型含义**
+- strategy_stop_loss：价格已跌破技术止损线，趋势可能反转
+- strategy_take_profit_1：价格触达第一止盈位（盈利约5%）
+- strategy_take_profit_2：价格触达第二止盈位（盈利约10%）
+- signal_buy/signal_sell：量化模型发出的买卖信号
+- strategy_buy_zone：价格进入策略建仓区间
+
+**候选股字段含义**
+- action：选股强度（强买信号 > 积极建仓 > 轻仓试探 > 关注等买点）
+- buy_zone_low/high：建议买入的价格区间
+- buy_reason：量化模型给出的买入理由
+
+## 决策输出格式（严格遵守JSON，不输出任何其他文字）
+单个动作：{"action": "sell"|"buy"|"hold", "symbol": "股票代码(如600036.SH)", "reason": "简短理由(20字内)"}
+多个动作：{"actions": [{"action": "sell"|"buy"|"hold", "symbol": "股票代码(如600036.SH)", "reason": "简短理由(20字内)"}]}
+
+如果action是hold，symbol填null。每次决策最多5个动作。"""
 
     user_prompt = f"""当前时间：{time.strftime('%Y-%m-%d %H:%M', time.localtime(now))} 北京时间
 
-## Agent KPI考核
-- 目标收益率：{target_return_pct:.1f}%（净收益/本金）
-- 当前净收益率：{(managed_net_pnl / capital * 100) if capital > 0 else 0:.2f}%，{'未达标' if managed_net_pnl < capital * target_return_pct / 100 else '已达标'}
-- 资金使用效率：{(1 - available_capital / capital) * 100 if capital > 0 else 0:.1f}%（已用市值/本金），{'资金闲置过多' if available_capital / capital > 0.7 else '正常'}
+## 大盘状态
+{_market_brief}
 
-## Agent资金状态
-- 本金：{capital:,.0f}
-- 已用市值：{agent_holdings_mv:,.0f}
-- 可用资金：{available_capital:,.0f}
-- 已实现收益：{managed_realized:,.0f}
-- 未实现收益：{managed_unrealized:,.0f}
-- 净收益：{managed_net_pnl:,.0f}
-- 净收益率：{(managed_net_pnl / capital * 100) if capital > 0 else 0:.2f}%
+## 资金状态
+- 本金：{capital:,.0f} | 已用市值：{agent_holdings_mv:,.0f} | 可用资金：{available_capital:,.0f}
+- 已实现：{managed_realized:,.0f} | 未实现：{managed_unrealized:,.0f} | 净收益：{managed_net_pnl:,.0f}（{(managed_net_pnl / capital * 100) if capital > 0 else 0:.2f}%）
+- 目标收益率：{target_return_pct:.1f}% → {'已达标' if target_return_pct > 0 and managed_net_pnl >= capital * target_return_pct / 100 else '未达标'}
 
 ## 当前持仓
 {json.dumps(holdings_info, ensure_ascii=False, indent=2) if holdings_info else "无持仓"}
@@ -3848,19 +4017,19 @@ def _run_llm_agent_once(
 ## 当前告警
 {chr(10).join(alert_lines) if alert_lines else "无告警"}
 
-## 候选股列表（仅可从这里选择买入）
+## 候选股（买入必须从此列表选）
 {json.dumps(candidates, ensure_ascii=False, indent=2) if candidates else "无候选股"}
 
 ## 最近10笔交易
-{chr(10).join(recent_lines) if recent_lines else "无交易"}
+{chr(10).join(recent_lines) if recent_lines else "无交易记录"}
 
-请给出你的决策："""
+请基于以上信息给出你的交易决策："""
 
     if allow_new_pick:
         _log_agent_pick_event(agent_id, pick_slot_key or "unknown", "slot_entered")
 
     try:
-        llm_response = call_llm(system_prompt, user_prompt, temperature=0.1, max_tokens=240, model="qwen-plus")
+        llm_response = call_llm(system_prompt, user_prompt, temperature=0.1, max_tokens=800, model="deepseek-chat")
     except Exception as e:
         with session_scope() as s:
             c = _get_or_create_agent_config(s, agent_id)
@@ -3951,12 +4120,6 @@ def _run_llm_agent_once(
             held_symbol = next((s for s in held_symbols if s.split(".")[0].upper() == symbol_base), None)
             if held_symbol is not None:
                 symbol = held_symbol
-            # Don't buy into a position that is already manually held
-            resolved_symbol = symbol.upper()
-            if resolved_symbol in manually_held_symbols and held_symbol is None:
-                _log_agent_pick_event(agent_id, slot_key, "llm_buy_rejected", symbol=symbol, detail="manual_position_protected")
-                last_status = f"llm_buy_rejected:manual_position_protected:{symbol}"
-                continue
             committed_trade: Optional[PortfolioTradeResponse] = None
             queued_order: Optional[PortfolioAutoTradeResponse] = None
             with session_scope() as s:
@@ -3969,15 +4132,13 @@ def _run_llm_agent_once(
                 )).scalars().first()
                 sp = get_stock_price(symbol=symbol, market="CN")
                 buy_price = float(getattr(sp, "price", 0) or 0)
-                candidate_action = str((candidate or {}).get("action") or "轻仓试探")
                 if buy_price <= 0:
                     last_status = f"llm_buy_no_price:{symbol}"
                     continue
                 min_qty = float(cfg.min_buy_quantity or 1000.0)
-                buy_rejection = _agent_b_buy_rejection_reason(candidate, buy_price, available_capital, min_qty)
-                if buy_rejection is not None:
-                    _log_agent_pick_event(agent_id, slot_key, "llm_buy_rejected", symbol=symbol, detail=buy_rejection)
-                    last_status = f"llm_buy_rejected:{buy_rejection}:{symbol}"
+                if available_capital < min_qty * buy_price:
+                    _log_agent_pick_event(agent_id, slot_key, "llm_buy_rejected", symbol=symbol, detail="insufficient_capital")
+                    last_status = f"llm_buy_rejected:insufficient_capital:{symbol}"
                     continue
                 if pos is None:
                     name = (candidate or {}).get("name") or symbol
@@ -3988,14 +4149,7 @@ def _run_llm_agent_once(
                     s.add(pos)
                     s.flush()
                     _log_agent_pick_event(agent_id, slot_key, "llm_buy_created_position", symbol=symbol, detail="agent created new position")
-                qty = _agent_dynamic_buy_quantity(
-                    min_qty,
-                    cfg.target_profit,
-                    cfg.deadline_ts,
-                    managed_net_pnl,
-                    candidate_action,
-                    available_capital,
-                )
+                qty = min_qty
                 if trading_now:
                     trade = _create_trade_at_price(pos.id, "BUY", qty, buy_price, _agent_id_to_source(agent_id), session=s)
                     committed_trade = trade
@@ -4119,6 +4273,7 @@ def _run_portfolio_agent_once(
                 if trade is None:
                     continue
                 executed_trade = trade
+                _log_agent_pick_event(agent_id, pick_slot_key or "alert", "alert_sell", symbol=alert.symbol or "", detail=f"{alert_type}@{alert.trigger_price:.2f}")
                 with session_scope() as s:
                     cfg = _get_or_create_agent_config(s, agent_id)
                     cfg.last_action = f"{trade.side}:{trade.symbol}:{trade.quantity}@{trade.price:.2f}"
@@ -4139,6 +4294,7 @@ def _run_portfolio_agent_once(
                     if trade is None:
                         continue
                     executed_trade = trade
+                    _log_agent_pick_event(agent_id, pick_slot_key or "alert", "alert_buy", symbol=alert.symbol or "", detail=f"{alert_type}@{alert.trigger_price:.2f}")
                     with session_scope() as s:
                         cfg = _get_or_create_agent_config(s, agent_id)
                         cfg.last_action = f"{trade.side}:{trade.symbol}:{trade.quantity}@{trade.price:.2f}"
@@ -4174,14 +4330,10 @@ def _run_portfolio_agent_once(
     with session_scope() as s:
         cfg = _get_or_create_agent_config(s, agent_id)
         if not candidates:
-            if executed_trade is not None:
-                _log_agent_pick_event(agent_id, slot_key, "no_candidate", detail="alert_trade_executed")
-                result = {"ok": True, "message": "trade_executed", "trade": executed_trade.model_dump()}
-            else:
-                _log_agent_pick_event(agent_id, slot_key, "no_candidate")
-                cfg.last_status = "no_candidate"
-                cfg.updated_at = now
-                result = {"ok": True, "message": "no_candidate"}
+            _log_agent_pick_event(agent_id, slot_key, "no_candidate")
+            cfg.last_status = "no_candidate"
+            cfg.updated_at = now
+            result = {"ok": True, "message": "no_candidate"}
         else:
             picked_trades: list[dict] = []
             capital_reserve = capital * 0.2
@@ -4216,7 +4368,12 @@ def _run_portfolio_agent_once(
                         continue
                     existing = _get_or_create_position_for_symbol(s, market, symbol, name, now)
                     _log_agent_pick_event(agent_id, slot_key, "candidate_processing", symbol=symbol, detail=f"action={action} price={scan_price} pos_id={existing.id}")
-                    _fresh_pos = float(existing.quantity or 0.0) <= 0
+                    # A "fresh" position is truly new with no trade history — safe to delete on failure.
+                    # Positions with qty=0 due to previous sells must NOT be deleted (they have trade history).
+                    _has_prior_trades = s.execute(
+                        select(PortfolioTrade.id).where(PortfolioTrade.position_id == existing.id).limit(1)
+                    ).scalar() is not None
+                    _fresh_pos = float(existing.quantity or 0.0) <= 0 and not _has_prior_trades
                     sp = get_stock_price(symbol=symbol, market=market)
                     current_price = float(getattr(sp, "price", 0) or 0)
                     if current_price <= 0:
@@ -4259,7 +4416,7 @@ def _run_portfolio_agent_once(
                         trade = _create_trade_at_price(existing.id, "BUY", dynamic_qty, buy_price, _agent_id_to_source(agent_id), session=s)
                         if trade is None:
                             _log_agent_pick_event(agent_id, slot_key, "pick_trade_failed", symbol=symbol, detail=f"buy_price={buy_price} qty={dynamic_qty}")
-                            if float(existing.quantity or 0.0) <= 0:
+                            if _fresh_pos:
                                 s.delete(existing)
                             continue
                         committed_trades.append(trade)
@@ -4270,7 +4427,7 @@ def _run_portfolio_agent_once(
                         queued = _queue_auto_trade(s, existing.id, "BUY", buy_price, dynamic_qty, _agent_id_to_source(agent_id))
                         if queued is None:
                             _log_agent_pick_event(agent_id, slot_key, "pick_queue_failed", symbol=symbol, detail=f"buy_price={buy_price} qty={dynamic_qty}")
-                            if float(existing.quantity or 0.0) <= 0:
+                            if _fresh_pos:
                                 s.delete(existing)
                             continue
                         queued_orders.append(queued.model_dump())
@@ -4623,12 +4780,16 @@ def _execute_auto_trade(at_id: str):
 
             p.updated_at = now
 
+            pos_name = (p.name or "").strip() or None
             trade = PortfolioTrade(
                 position_id=p.id, side=at.side, price=exec_price,
                 quantity=actual_qty if at.side == "SELL" else qty,
                 amount=exec_price * (actual_qty if at.side == "SELL" else qty),
                 fee=trade_fee * ((actual_qty if at.side == "SELL" else qty) / qty) if qty > 0 else 0.0,
                 source=(at.source or "auto_order"),
+                symbol=symbol,
+                name=pos_name,
+                market=market,
                 created_at=now,
             )
             s.add(trade)
@@ -4637,7 +4798,6 @@ def _execute_auto_trade(at_id: str):
             at.executed_at = now
             at.executed_price = exec_price
 
-            pos_name = (p.name or "").strip() or None
             _send_feishu_trade_notify(p.id, at.side, exec_price,
                 actual_qty if at.side == "SELL" else qty,
                 symbol, pos_name, market, (at.source or "auto_order"), trade_type="委托成交")

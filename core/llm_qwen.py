@@ -9,6 +9,7 @@ from dataclasses import asdict
 
 
 QWEN_API_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
+DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "qwen").strip().lower()
 LLM_LOCAL_URL = os.environ.get("LLM_LOCAL_URL", "http://localhost:11434/v1").strip().rstrip("/")
@@ -19,13 +20,20 @@ def get_api_key() -> str:
     return os.environ.get("DASHSCOPE_API_KEY", "")
 
 
+def _get_deepseek_api_key() -> str:
+    return os.environ.get("DEEPSEEK_API_KEY", "")
+
+
 def call_llm(system_prompt: str, user_prompt: str,
              temperature: float = 0.3, max_tokens: int = 2000,
              api_key: Optional[str] = None,
              model: Optional[str] = None) -> str:
-    """统一 LLM 调用入口，支持 Qwen 和本地模型(Ollama/vLLM)"""
+    """统一 LLM 调用入口，支持 Qwen、DeepSeek 和本地模型(Ollama/vLLM)"""
     if LLM_PROVIDER == "local":
         return _call_local_llm(system_prompt, user_prompt, temperature, max_tokens)
+    _model = (model or "").strip().lower()
+    if _model.startswith("deepseek"):
+        return _call_deepseek_llm(system_prompt, user_prompt, temperature, max_tokens, api_key, model)
     return _call_qwen_llm(system_prompt, user_prompt, temperature, max_tokens, api_key, model)
 
 
@@ -51,6 +59,40 @@ def _call_local_llm(system_prompt: str, user_prompt: str,
         return data["choices"][0]["message"]["content"]
     except Exception as e:
         print(f"[llm] local LLM error: {e}")
+        raise
+
+
+def _call_deepseek_llm(system_prompt: str, user_prompt: str,
+                       temperature: float = 0.3, max_tokens: int = 800,
+                       api_key: Optional[str] = None,
+                       model: Optional[str] = None) -> str:
+    key = api_key or _get_deepseek_api_key()
+    if not key:
+        raise RuntimeError("missing_deepseek_api_key")
+    ds_model = (model or "deepseek-chat").strip()
+    try:
+        resp = httpx.post(
+            DEEPSEEK_API_URL,
+            headers={
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": ds_model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            },
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data["choices"][0]["message"]["content"]
+    except Exception as e:
+        print(f"[llm] deepseek error: {e}")
         raise
 
 
