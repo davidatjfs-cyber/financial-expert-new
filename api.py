@@ -3837,7 +3837,7 @@ def _run_llm_agent_once(
         _log_agent_pick_event(agent_id, pick_slot_key or "unknown", "slot_entered")
 
     try:
-        llm_response = call_llm(system_prompt, user_prompt, temperature=0.1, max_tokens=800, model="deepseek-chat")
+        llm_response = call_llm(system_prompt, user_prompt, temperature=0.1, max_tokens=800, model="deepseek-v4-flash")
     except Exception as e:
         with session_scope() as s:
             c = _get_or_create_agent_config(s, agent_id)
