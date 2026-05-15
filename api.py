@@ -70,8 +70,8 @@ _FEISHU_SENT_ALERTS: dict[str, tuple[float, str]] = {}
 _FEISHU_SENT_TTL = 6 * 3600
 _CN_MARKET_STATE_CACHE: tuple[float, str] = (0.0, "unknown")
 _AGENT_NEW_PICK_SCHEDULE: dict[str, tuple[tuple[int, int], ...]] = {
-    "a": ((13, 0),),
-    "b": ((13, 10),),
+    "a": ((9, 15), (12, 30)),
+    "b": ((9, 30), (12, 45)),
 }
 _AGENT_NEW_PICK_CHECKED: dict[tuple[str, str], bool] = {}
 _AGENT_NEW_PICK_LOCK = threading.Lock()
@@ -646,7 +646,7 @@ def _feishu_tenant_token(app_id: str, app_secret: str) -> Optional[str]:
 def _send_feishu_portfolio_alert(alert: PortfolioAlertResponse):
     mkt = (alert.market or "").strip().upper()
     if mkt == "CN":
-        if _cn_market_closed():
+        if not _cn_market_trading_now():
             return
     elif mkt == "HK":
         if _hk_market_closed():
@@ -811,7 +811,7 @@ def _send_feishu_trade_notify(position_id: str, side: str, price: float, quantit
                                symbol: str, name: str | None, market: str, source: str, trade_type: str = "直接成交"):
     mkt = (market or "").strip().upper()
     if mkt == "CN":
-        if _cn_market_closed():
+        if not _cn_market_trading_now():
             return
     elif mkt == "HK":
         if _hk_market_closed():
