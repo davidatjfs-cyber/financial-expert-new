@@ -1005,14 +1005,6 @@ def _execute_strategy_alert_trade(alert: PortfolioAlertResponse, agent_id: str =
         symbol = (alert_pos.symbol or "").strip().upper()
         market = (alert_pos.market or "CN").strip().upper()
         name = (alert_pos.name or "").strip() or None
-        all_positions = s.execute(select(PortfolioPosition)).scalars().all()
-        manual_held = any(
-            (p.symbol or "").strip().upper() == symbol and (p.source or "").strip() == "manual" and float(p.quantity or 0.0) > 0
-            for p in all_positions
-        )
-        if manual_held and alert.alert_type in {"target_buy", "strategy_buy_zone", "signal_buy"}:
-            _log_agent_pick_event(agent_id, "alert", "alert_buy_skipped_manual_position", symbol=symbol, detail=f"{alert.alert_type}@{alert.trigger_price:.2f}")
-            return None
         agent_positions = s.execute(
             select(PortfolioPosition).where(
                 PortfolioPosition.market == market,
@@ -3932,18 +3924,6 @@ def _run_llm_agent_once(
             if not allow_new_pick:
                 last_status = f"llm_buy_outside_pick_slot:{symbol}"
                 continue
-            with session_scope() as s:
-                _manual_pos = s.execute(
-                    select(PortfolioPosition).where(
-                        PortfolioPosition.source == "manual",
-                        PortfolioPosition.quantity > 0,
-                    )
-                ).scalars().all()
-                _manual_syms = {(p.symbol or "").strip().upper() for p in _manual_pos}
-            if symbol.split(".")[0].upper() in _manual_syms or symbol.strip().upper() in _manual_syms:
-                _log_agent_pick_event(agent_id, pick_slot_key or "unknown", "llm_buy_skipped_manual_position", symbol=symbol, detail="manual_position_protected")
-                last_status = f"llm_buy_skipped_manual_position:{symbol}"
-                continue
             slot_key = pick_slot_key or "unknown"
             symbol_base = symbol.split(".")[0].upper()
             held_symbol = next((s for s in held_symbols if s.split(".")[0].upper() == symbol_base), None)
@@ -4191,25 +4171,7 @@ def _run_portfolio_agent_once(
                 cfg.updated_at = now
                 result = {"ok": True, "message": "capital_exhausted"}
             else:
-                # Build set of manually-held symbols to protect them from agent picks
-                _all_trades_for_manual = s.execute(select(PortfolioTrade)).scalars().all()
-                _all_pos_for_manual = s.execute(select(PortfolioPosition)).scalars().all()
-                _, _manual_holdings = _portfolio_source_breakdown(
-                    _all_trades_for_manual, _all_pos_for_manual, {p.id: 0.0 for p in _all_pos_for_manual}
-                )
-                _pid_to_pos = {p.id: p for p in _all_pos_for_manual}
-                _manual_symbols = {
-                    (_pid_to_pos[pid].symbol or "").strip().upper()
-                    for pid, qty in _manual_holdings.get("manual", {}).items()
-                    if float(qty or 0.0) > 0 and pid in _pid_to_pos
-                }
                 for market, symbol, name, scan_price, action in candidates[:5]:
-                    if available_capital <= 0:
-                        _log_agent_pick_event(agent_id, slot_key, "capital_exhausted", symbol=symbol, detail=f"available={available_capital:.2f}")
-                        break
-                    if symbol.strip().upper() in _manual_symbols:
-                        _log_agent_pick_event(agent_id, slot_key, "buy_skipped_manual_position", symbol=symbol, detail="manual_position_protected")
-                        continue
                     existing = _get_or_create_position_for_symbol(s, market, symbol, name, now, source=agent_id)
                     _log_agent_pick_event(agent_id, slot_key, "candidate_processing", symbol=symbol, detail=f"action={action} price={scan_price} pos_id={existing.id}")
                     # A "fresh" position is truly new with no trade history — safe to delete on failure.
