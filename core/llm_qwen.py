@@ -90,7 +90,35 @@ def _call_deepseek_llm(system_prompt: str, user_prompt: str,
         )
         resp.raise_for_status()
         data = resp.json()
-        return data["choices"][0]["message"]["content"]
+        content = (data["choices"][0]["message"].get("content") or "").strip()
+        if not content:
+            reasoning = (data["choices"][0]["message"].get("reasoning_content") or "").strip()
+            if reasoning:
+                print(f"[llm] deepseek V4 returned empty content but has reasoning_content ({len(reasoning)} chars), retrying without reasoning")
+                resp2 = httpx.post(
+                    DEEPSEEK_API_URL,
+                    headers={
+                        "Authorization": f"Bearer {key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": ds_model,
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt + "\n\n重要：直接返回JSON，不要思考过程。"},
+                        ],
+                        "temperature": temperature,
+                        "max_tokens": max_tokens,
+                        "reasoning_effort": 0,
+                    },
+                    timeout=30.0,
+                )
+                resp2.raise_for_status()
+                data2 = resp2.json()
+                content = (data2["choices"][0]["message"].get("content") or "").strip()
+                if not content:
+                    raise RuntimeError(f"deepseek V4 returned empty content twice (finish_reason={data2['choices'][0].get('finish_reason')})")
+        return content
     except Exception as e:
         print(f"[llm] deepseek error: {e}")
         raise
