@@ -4924,9 +4924,13 @@ def _portfolio_feishu_notifier():
             slot_a = _claim_agent_new_pick_slot("a")
             slot_b = _claim_agent_new_pick_slot("b")
             if slot_a is not None:
-                _run_portfolio_agent_once("a", allow_new_pick=True, pick_slot_key=slot_a, precomputed_alerts=alerts)
+                threading.Thread(target=_run_portfolio_agent_once, args=("a",),
+                    kwargs={"allow_new_pick": True, "pick_slot_key": slot_a, "precomputed_alerts": alerts},
+                    daemon=True).start()
             if slot_b is not None:
-                _run_portfolio_agent_once("b", allow_new_pick=True, pick_slot_key=slot_b, precomputed_alerts=alerts)
+                threading.Thread(target=_run_portfolio_agent_once, args=("b",),
+                    kwargs={"allow_new_pick": True, "pick_slot_key": slot_b, "precomputed_alerts": alerts},
+                    daemon=True).start()
         except Exception as e:
             print(f"[FEISHU] trade/agent worker error: {e}")
         time.sleep(interval)
