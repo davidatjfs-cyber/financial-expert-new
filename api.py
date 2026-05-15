@@ -4722,13 +4722,15 @@ def _process_live_auto_trades(market: str = "CN"):
                 ).update({"status": "CANCELLED"})
                 if count:
                     print(f"[AUTO_TRADE] Close-clear: cancelled {count} pending orders")
-        # Clean up orphaned positions (qty=0, no executed trades)
+        # Clean up orphaned positions (qty=0, no executed trades, no pending auto-trades)
         with session_scope() as s:
             trade_pos_ids = select(PortfolioTrade.position_id).distinct()
+            auto_trade_pos_ids = select(PortfolioAutoTrade.position_id).distinct()
             orphaned = s.execute(
                 select(PortfolioPosition).where(
                     PortfolioPosition.quantity == 0,
-                    ~PortfolioPosition.id.in_(trade_pos_ids)
+                    ~PortfolioPosition.id.in_(trade_pos_ids),
+                    ~PortfolioPosition.id.in_(auto_trade_pos_ids),
                 )
             ).scalars().all()
             for pos in orphaned:
@@ -4921,8 +4923,10 @@ def _portfolio_feishu_notifier():
             _process_live_auto_trades("CN")
             slot_a = _claim_agent_new_pick_slot("a")
             slot_b = _claim_agent_new_pick_slot("b")
-            _run_portfolio_agent_once("a", allow_new_pick=slot_a is not None, pick_slot_key=slot_a, precomputed_alerts=alerts)
-            _run_portfolio_agent_once("b", allow_new_pick=slot_b is not None, pick_slot_key=slot_b, precomputed_alerts=alerts)
+            if slot_a is not None:
+                _run_portfolio_agent_once("a", allow_new_pick=True, pick_slot_key=slot_a, precomputed_alerts=alerts)
+            if slot_b is not None:
+                _run_portfolio_agent_once("b", allow_new_pick=True, pick_slot_key=slot_b, precomputed_alerts=alerts)
         except Exception as e:
             print(f"[FEISHU] trade/agent worker error: {e}")
         time.sleep(interval)
