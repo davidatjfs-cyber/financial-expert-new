@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ────────────────────────────────────────────────────────────────────
+# 部署脚本
+# 警告: .env 文件包含飞书/DASHSCOPE/DEEPSEEK 等敏感凭证
+# 部署时 .env 会被保留（git clean -fd 不删除 .env）
+# 如需修改 .env 请使用:  echo "KEY=VALUE" >> /opt/financial-expert/.env
+# 切勿用 echo "..." > .env 覆盖（会丢失全部凭证）
+# ────────────────────────────────────────────────────────────────────
+
 # Run from repo root (e.g. /opt/financial-expert)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -25,7 +33,15 @@ if [ "${DEPLOY_SKIP_GIT}" != "1" ]; then
   echo "[deploy] sync source"
   git fetch --all
   git reset --hard origin/main
+  # 保留 .env 配置文件（包含飞书/API 凭证）
+  if [ -f .env ]; then
+    cp .env /tmp/_deploy_env_backup
+  fi
   git clean -fd
+  if [ -f /tmp/_deploy_env_backup ]; then
+    mv /tmp/_deploy_env_backup .env
+    echo "[deploy] restored .env from backup"
+  fi
 else
   echo "[deploy] skip git sync (DEPLOY_SKIP_GIT=1)"
 fi

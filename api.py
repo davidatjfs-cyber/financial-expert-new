@@ -3972,6 +3972,12 @@ def _run_llm_agent_once(
                     continue
                 if pos is None:
                     name = (candidate or {}).get("name") or symbol
+                    if name == symbol:
+                        try:
+                            _sp = get_stock_price(symbol=symbol, market="CN")
+                            name = str(getattr(_sp, "name", "") or name)
+                        except Exception:
+                            pass
                     pos = PortfolioPosition(
                         market="CN", symbol=symbol, name=name or symbol,
                         source=agent_id,
@@ -3996,7 +4002,14 @@ def _run_llm_agent_once(
                         post_commit_events.append(("llm_buy_trade_failed", symbol, None))
                         last_status = f"llm_buy_trade_failed:{symbol}"
                 else:
-                    pos = pos or _get_or_create_position_for_symbol(s, "CN", symbol, str((candidate or {}).get("name") or symbol), now, source=agent_id)
+                    _pos_name = str((candidate or {}).get("name") or symbol)
+                    if _pos_name == symbol:
+                        try:
+                            _sp = get_stock_price(symbol=symbol, market="CN")
+                            _pos_name = str(getattr(_sp, "name", "") or _pos_name)
+                        except Exception:
+                            pass
+                    pos = pos or _get_or_create_position_for_symbol(s, "CN", symbol, _pos_name, now, source=agent_id)
                     queued_order = _queue_auto_trade(s, pos.id, "BUY", buy_price, qty, _agent_id_to_source(agent_id))
                     if queued_order is not None:
                         post_commit_events.append(("llm_buy_queued", symbol, f"qty={qty}@<= {buy_price:.2f} reason={reason}"))
