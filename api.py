@@ -71,7 +71,7 @@ _FEISHU_SENT_TTL = 6 * 3600
 _CN_MARKET_STATE_CACHE: tuple[float, str] = (0.0, "unknown")
 _AGENT_NEW_PICK_SCHEDULE: dict[str, tuple[tuple[int, int], ...]] = {
     "a": ((9, 20), (12, 30)),
-    "b": ((9, 25), (9, 50), (12, 35)),
+    "b": ((10, 5),),
 }
 _AGENT_NEW_PICK_CHECKED: dict[tuple[str, str], bool] = {}
 _AGENT_NEW_PICK_LOCK = threading.Lock()
