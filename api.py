@@ -3542,10 +3542,16 @@ def _portfolio_agent_candidate_score(item: dict) -> tuple[float, float, float, f
 def _portfolio_agent_pick_candidates(min_buy_quantity: float, limit: int = 5) -> list[tuple[str, str, str, float, str]]:
     from core.recommend import get_latest_scan, run_scan, save_scan_result
 
-    latest = get_latest_scan() or []
+    latest = []
+    try:
+        latest = run_scan(top_n=20, get_indicators_fn=get_stock_indicators)
+        if latest:
+            save_scan_result(latest)
+    except Exception:
+        latest = get_latest_scan(max_age_seconds=1800) or []
     if not latest:
         try:
-            latest = run_scan(top_n=20, get_indicators_fn=get_stock_indicators)
+            latest = get_latest_scan() or []
             if latest:
                 save_scan_result(latest)
         except Exception:
@@ -3712,14 +3718,12 @@ def _run_llm_agent_once(
 
     latest = []
     if allow_new_pick:
-        latest = get_latest_scan() or []
-        if not latest:
-            try:
-                latest = run_scan(top_n=10, get_indicators_fn=get_stock_indicators)
-                if latest:
-                    save_scan_result(latest)
-            except Exception:
-                latest = []
+        try:
+            latest = run_scan(top_n=10, get_indicators_fn=get_stock_indicators)
+            if latest:
+                save_scan_result(latest)
+        except Exception:
+            latest = get_latest_scan(max_age_seconds=1800) or []
     candidates = []
     for item in latest:
         market = (item.get("market") or "CN").strip().upper()

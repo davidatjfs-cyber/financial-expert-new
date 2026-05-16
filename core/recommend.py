@@ -310,7 +310,7 @@ def _score_value(pe: Optional[float], pb: Optional[float] = None,
             score += 2.0
     else:
         count += 1
-        score += 10.0
+        score += 4.0
 
     if pb is not None and pb > 0:
         count += 1
@@ -328,7 +328,7 @@ def _score_value(pe: Optional[float], pb: Optional[float] = None,
             score += 3.0
     else:
         count += 1
-        score += 10.0
+        score += 4.0
 
     if ps is not None and ps > 0:
         count += 1
@@ -344,34 +344,39 @@ def _score_value(pe: Optional[float], pb: Optional[float] = None,
             score += 4.0
     else:
         count += 1
-        score += 10.0
+        score += 4.0
 
     return score / count if count > 0 else 12.5
 
 
 def _score_growth(rev_growth: Optional[float], profit_growth: Optional[float]) -> float:
+    if rev_growth is None and profit_growth is None:
+        return 4.0
     r = rev_growth if rev_growth is not None else 0.0
     p = profit_growth if profit_growth is not None else 0.0
     avg = (r + p) / 2.0
 
+    penalty = 4.0 if rev_growth is None or profit_growth is None else 0.0
     if avg >= 30:
-        return 25.0
+        return max(0.0, 25.0 - penalty)
     if avg >= 20:
-        return 22.0
+        return max(0.0, 22.0 - penalty)
     if avg >= 10:
-        return 18.0
+        return max(0.0, 18.0 - penalty)
     if avg >= 5:
-        return 14.0
+        return max(0.0, 14.0 - penalty)
     if avg >= 0:
-        return 10.0
+        return max(0.0, 10.0 - penalty)
     if avg >= -10:
-        return 6.0
-    return 3.0
+        return max(0.0, 6.0 - penalty)
+    return max(0.0, 3.0 - penalty)
 
 
 def _score_quality(roe: Optional[float], gross_margin: Optional[float],
                    debt_ratio: Optional[float],
                    cashflow_ratio: Optional[float] = None) -> float:
+    if roe is None and gross_margin is None and debt_ratio is None and cashflow_ratio is None:
+        return 6.0
     score = 12.5
 
     if roe is not None:
@@ -1066,7 +1071,7 @@ def _apply_risk_controls(scores: list[StockScore]) -> list[StockScore]:
     for s in scores:
         code = s.symbol.split(".")[0]
         sec = _STOCK_SECTOR_MAP.get(code, "其他")
-        if sector_counts.get(sec, 0) >= 5:
+        if sector_counts.get(sec, 0) >= 2:
             continue
         sector_counts[sec] = sector_counts.get(sec, 0) + 1
         filtered.append(s)
@@ -1106,6 +1111,15 @@ def _compute_total_score(s: StockScore, weights: dict[str, float]) -> float:
         + s.momentum_score * weights.get("momentum", 0.12)
         + s.sentiment_score * weights.get("sentiment", 0.08)
     )
+
+
+def _compute_final_total_score(s: StockScore, weights: dict[str, float], quality_threshold: float) -> float:
+    factor_score_pct = _compute_total_score(s, weights) / 25.0 * 100.0
+    sector_strength = s.sector_strength_score if s.sector_strength_score is not None else 50.0
+    total = factor_score_pct * 0.85 + sector_strength * 0.15
+    if (s.quality_score_total or 0.0) < quality_threshold:
+        total -= 10.0
+    return total
 
 
 # ==================== Main Scan ====================
@@ -1308,25 +1322,11 @@ def run_scan(top_n: int = 20,
     cn_market_state = _cn_index_market_state()
     cn_market_allows_strong_buy = cn_market_state in ("weak", "unknown")
 
-    qualified = [s for s in scores if (s.quality_score_total or 0) >= QUALITY_THRESHOLD]
-    unqualified = [s for s in scores if (s.quality_score_total or 0) < QUALITY_THRESHOLD]
+    for s in scores:
+        s.total_score = _compute_final_total_score(s, weights, QUALITY_THRESHOLD)
 
-    for s in qualified:
-        qt = (s.quality_score_total or 0) / 75.0 * 100
-        tt = max(0, (s.timing_score_total or 0) + 40) / 140.0 * 100
-        st = s.sector_strength_score if s.sector_strength_score is not None else 50.0
-        s.total_score = qt * 0.30 + tt * 0.55 + st * 0.15
-
-    for s in unqualified:
-        qt = (s.quality_score_total or 0) / 75.0 * 100
-        tt = max(0, (s.timing_score_total or 0) + 40) / 140.0 * 100
-        st = s.sector_strength_score if s.sector_strength_score is not None else 50.0
-        s.total_score = qt * 0.10 + tt * 0.30 + st * 0.10 - 10
-
-    qualified.sort(key=lambda x: x.total_score, reverse=True)
-    unqualified.sort(key=lambda x: x.total_score, reverse=True)
-
-    scores = _apply_risk_controls(qualified + unqualified)
+    scores.sort(key=lambda x: x.total_score, reverse=True)
+    scores = _apply_risk_controls(scores)
 
     results = []
     for i, s in enumerate(scores[:top_n]):
@@ -1410,12 +1410,14 @@ def _dummy_indicators_fn(symbol: str, market: str) -> dict:
     return {}
 
 
-def get_latest_scan() -> Optional[list[dict]]:
+def get_latest_scan(max_age_seconds: float = 86400) -> Optional[list[dict]]:
     global _LATEST_SCAN_RESULT, _LATEST_SCAN_TIME
     with _SCAN_LOCK:
         if _LATEST_SCAN_RESULT is None:
             return None
-        if time.time() - _LATEST_SCAN_TIME > 86400:
+        if max_age_seconds <= 0:
+            return None
+        if time.time() - _LATEST_SCAN_TIME > max_age_seconds:
             return None
         return _LATEST_SCAN_RESULT
 

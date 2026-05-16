@@ -1,8 +1,9 @@
 # Financial Expert 部署指南
 
+**本地源码路径**: `/Users/xieding/financial-expert-new`  
 **服务器**: 8.153.95.62  
 **SSH Key**: `~/.ssh/aliyun_ecs`  
-**项目路径**: `/opt/financial-expert`  
+**服务器项目路径**: `/opt/financial-expert`  
 **架构**: Docker Compose（API + Frontend + Nginx）
 
 ---
