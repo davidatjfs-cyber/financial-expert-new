@@ -44,6 +44,7 @@ class AgentRuntimeTests(unittest.TestCase):
 
     def setUp(self):
         self.api._AGENT_NEW_PICK_CHECKED.clear()
+        self.api._strategy_exec_today.clear()
         with self.db._engine.begin() as conn:
             for table in [
                 "portfolio_agent_pick_logs",
@@ -247,8 +248,91 @@ class AgentRuntimeTests(unittest.TestCase):
 
         with patch.object(self.api._dt, "datetime", FixedDateTime):
             slot = self.api._claim_agent_new_pick_slot("a")
-
         self.assertEqual(slot, "2026-05-07:16:00")
+
+    def test_strategy_alert_trade_retries_after_failed_first_attempt(self):
+        now = int(time.time())
+        with self.db.session_scope() as s:
+            pos = self.models.PortfolioPosition(
+                market="CN",
+                symbol="600690.SH",
+                name="海尔智家",
+                source="a",
+                quantity=10000.0,
+                avg_cost=23.0,
+                created_at=now,
+                updated_at=now,
+            )
+            s.add(pos)
+            s.flush()
+            s.add(self.models.PortfolioTrade(
+                position_id=pos.id,
+                side="BUY",
+                price=23.0,
+                quantity=10000.0,
+                amount=230000.0,
+                fee=0.0,
+                source="auto_strategy_a",
+                created_at=now,
+            ))
+            position_id = pos.id
+
+        alert = self.api.PortfolioAlertResponse(
+            key=f"{position_id}:strategy_stop_loss:211600",
+            position_id=position_id,
+            market="CN",
+            symbol="600690.SH",
+            name="海尔智家",
+            alert_type="strategy_stop_loss",
+            message="已跌破严格止损价",
+            current_price=21.0,
+            trigger_price=21.16,
+        )
+
+        with patch.object(self.api, "_create_trade_at_price", return_value=None):
+            first = self.api._execute_strategy_alert_trade(alert, "a")
+        second = self.api._execute_strategy_alert_trade(alert, "a")
+
+        self.assertIsNone(first)
+        self.assertIsNotNone(second)
+        self.assertEqual(second.side, "SELL")
+
+    def test_portfolio_alerts_use_intraday_low_and_effective_stop_loss(self):
+        now = int(time.time())
+        with self.db.session_scope() as s:
+            pos = self.models.PortfolioPosition(
+                market="CN",
+                symbol="600690.SH",
+                name="海尔智家",
+                source="a",
+                quantity=1000.0,
+                avg_cost=100.0,
+                created_at=now,
+                updated_at=now,
+            )
+            s.add(pos)
+
+        price = types.SimpleNamespace(price=93.0, high=95.0, low=91.0)
+        indicators = types.SimpleNamespace(
+            strategy_buy_zone_low=None,
+            strategy_buy_zone_high=None,
+            strategy_stop_loss=90.0,
+            strategy_take_profit_1=None,
+            strategy_take_profit_2=None,
+            buy_price_aggressive_ok=False,
+            buy_price_aggressive=None,
+            sell_price_ok=False,
+            sell_price=None,
+        )
+
+        with patch("concurrent.futures.ThreadPoolExecutor", side_effect=RuntimeError("no threadpool")), \
+             patch.object(self.api, "get_stock_price", return_value=price), \
+             patch.object(self.api, "get_stock_indicators", return_value=indicators):
+            alerts = self.api.get_portfolio_alerts()
+
+        stop_alerts = [a for a in alerts if a.alert_type == "strategy_stop_loss"]
+        self.assertEqual(len(stop_alerts), 1)
+        self.assertAlmostEqual(stop_alerts[0].trigger_price, 92.0)
 
     def test_create_trade_at_price_supports_existing_session(self):
         now = int(time.time())

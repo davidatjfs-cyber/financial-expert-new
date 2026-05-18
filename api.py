@@ -985,17 +985,62 @@ def _create_trade_at_price(position_id: str, side: str, quantity: float, price: 
 _strategy_exec_today: dict[str, str] = {}
 
 
-def _should_skip_strategy_exec(exec_key: str) -> bool:
+def _strategy_exec_already_done(exec_key: str) -> bool:
     today = time.strftime("%Y-%m-%d")
-    if _strategy_exec_today.get(exec_key) == today:
-        return True
-    _strategy_exec_today[exec_key] = today
-    return False
+    return _strategy_exec_today.get(exec_key) == today
+
+
+def _mark_strategy_exec_done(exec_key: str):
+    _strategy_exec_today[exec_key] = time.strftime("%Y-%m-%d")
+
+
+def _effective_strategy_levels(position: "PortfolioPosition", indicators) -> tuple[Optional[float], Optional[float], Optional[float]]:
+    def _si_get(si, key: str):
+        if si is None:
+            return None
+        if isinstance(si, dict):
+            return si.get(key)
+        return getattr(si, key, None)
+
+    stop_loss = _si_get(indicators, "strategy_stop_loss")
+    take_profit_1 = _si_get(indicators, "strategy_take_profit_1")
+    take_profit_2 = _si_get(indicators, "strategy_take_profit_2")
+
+    try:
+        stop_loss = float(stop_loss) if stop_loss is not None else None
+    except Exception:
+        stop_loss = None
+    try:
+        take_profit_1 = float(take_profit_1) if take_profit_1 is not None else None
+    except Exception:
+        take_profit_1 = None
+    try:
+        take_profit_2 = float(take_profit_2) if take_profit_2 is not None else None
+    except Exception:
+        take_profit_2 = None
+
+    avg_cost = float(getattr(position, "avg_cost", 0.0) or 0.0)
+    has_position = float(getattr(position, "quantity", 0.0) or 0.0) > 0 and avg_cost > 0
+    if not has_position:
+        return stop_loss, take_profit_1, take_profit_2
+
+    cost_take_profit_1 = avg_cost * 1.05
+    cost_take_profit_2 = avg_cost * 1.10
+    cost_stop_loss = avg_cost * 0.92
+
+    if take_profit_1 is None or take_profit_1 < cost_take_profit_1:
+        take_profit_1 = cost_take_profit_1
+    if take_profit_2 is None or take_profit_2 < cost_take_profit_2:
+        take_profit_2 = cost_take_profit_2
+    if stop_loss is None or stop_loss < cost_stop_loss:
+        stop_loss = cost_stop_loss
+
+    return stop_loss, take_profit_1, take_profit_2
 
 
 def _execute_strategy_alert_trade(alert: PortfolioAlertResponse, agent_id: str = "a") -> Optional[PortfolioTradeResponse]:
     exec_key = f"{agent_id}:{alert.position_id}:{alert.alert_type}"
-    if _should_skip_strategy_exec(exec_key):
+    if alert.alert_type not in {"target_buy", "strategy_buy_zone", "signal_buy"} and _strategy_exec_already_done(exec_key):
         return None
 
     with session_scope() as s:
@@ -1056,9 +1101,15 @@ def _execute_strategy_alert_trade(alert: PortfolioAlertResponse, agent_id: str =
     if held_qty <= 0:
         return None
     if alert.alert_type == "strategy_take_profit_1":
-        return _create_trade_at_price(agent_pos_id, "SELL", max(1.0, held_qty / 2.0), trade_price, _agent_id_to_source(agent_id))
+        trade = _create_trade_at_price(agent_pos_id, "SELL", max(1.0, held_qty / 2.0), trade_price, _agent_id_to_source(agent_id))
+        if trade is not None:
+            _mark_strategy_exec_done(exec_key)
+        return trade
     if alert.alert_type in {"target_sell", "signal_sell", "strategy_take_profit_2", "strategy_stop_loss"}:
-        return _create_trade_at_price(agent_pos_id, "SELL", held_qty, trade_price, _agent_id_to_source(agent_id))
+        trade = _create_trade_at_price(agent_pos_id, "SELL", held_qty, trade_price, _agent_id_to_source(agent_id))
+        if trade is not None:
+            _mark_strategy_exec_done(exec_key)
+        return trade
     return None
 
 
@@ -3676,6 +3727,7 @@ def _run_llm_agent_once(
             indicators = get_stock_indicators(symbol=symbol, market=market)
         except Exception:
             indicators = None
+        stop_loss, take_profit_1, take_profit_2 = _effective_strategy_levels(pos, indicators)
         qty = agent_qty
         # Use agent-specific avg_cost from FIFO lot tracking, not the blended position avg_cost
         _agent_entry = _agent_src.get(pos.id)
@@ -3694,9 +3746,9 @@ def _run_llm_agent_once(
             "rsi14": getattr(indicators, "rsi14", None),
             "trend": getattr(indicators, "trend", None),
             "strategy_action": getattr(indicators, "strategy_action", None),
-            "stop_loss": getattr(indicators, "strategy_stop_loss", None),
-            "take_profit_1": getattr(indicators, "strategy_take_profit_1", None),
-            "take_profit_2": getattr(indicators, "strategy_take_profit_2", None),
+            "stop_loss": stop_loss,
+            "take_profit_1": take_profit_1,
+            "take_profit_2": take_profit_2,
         })
 
     alert_source = precomputed_alerts if precomputed_alerts is not None else get_portfolio_alerts()
@@ -4961,12 +5013,25 @@ def get_portfolio_alerts():
             current_price = None if cp is None else float(cp)
         except Exception:
             pass
+        day_high = None
+        day_low = None
+        if sp is not None:
+            try:
+                hp = getattr(sp, "high", None)
+                day_high = None if hp is None else float(hp)
+            except Exception:
+                day_high = None
+            try:
+                lp = getattr(sp, "low", None)
+                day_low = None if lp is None else float(lp)
+            except Exception:
+                day_low = None
         si = None
         try:
             si = get_stock_indicators(symbol=symbol, market=market)
         except Exception:
             pass
-        return p, market, symbol, name, current_price, si
+        return p, market, symbol, name, current_price, day_high, day_low, si
 
     fetched: list[tuple] = []
     if positions:
@@ -4983,7 +5048,7 @@ def get_portfolio_alerts():
             for p in positions:
                 fetched.append(_fetch_for_position(p))
 
-    for p, market, symbol, name, current_price, si in fetched:
+    for p, market, symbol, name, current_price, day_high, day_low, si in fetched:
         if current_price is not None and p.target_buy_price is not None:
             try:
                 tb = float(p.target_buy_price)
@@ -5009,21 +5074,7 @@ def get_portfolio_alerts():
         if si is not None:
             buy_zone_low = _si_get(si, "strategy_buy_zone_low")
             buy_zone_high = _si_get(si, "strategy_buy_zone_high")
-            stop_loss = _si_get(si, "strategy_stop_loss")
-            take_profit_1 = _si_get(si, "strategy_take_profit_1")
-            take_profit_2 = _si_get(si, "strategy_take_profit_2")
-
-            # CRITICAL FIX: For positions with holdings, use avg_cost to calculate take_profit prices
-            # The original logic uses current market price (last_close/ma20) as entry_ref,
-            # which causes take_profit price to be LOWER than actual buy price, leading to losses.
-            avg_cost = float(p.avg_cost or 0.0)
-            has_position = float(p.quantity or 0) > 0 and avg_cost > 0
-            if has_position:
-                # Override take_profit prices based on actual cost
-                take_profit_1 = avg_cost * 1.05  # 5% profit target
-                take_profit_2 = avg_cost * 1.10  # 10% profit target
-                # Stop loss should also be based on cost, not market price
-                stop_loss = avg_cost * 0.92  # 8% stop loss
+            stop_loss, take_profit_1, take_profit_2 = _effective_strategy_levels(p, si)
 
             try:
                 if current_price is not None and buy_zone_high is not None:
@@ -5042,7 +5093,8 @@ def get_portfolio_alerts():
             try:
                 if current_price is not None and float(p.quantity or 0) > 0 and stop_loss is not None:
                     sl = float(stop_loss)
-                    if current_price <= sl:
+                    intraday_stop_hit = day_low is not None and day_low <= sl
+                    if current_price <= sl or intraday_stop_hit:
                         alerts.append(PortfolioAlertResponse(
                             key=f"{p.id}:strategy_stop_loss:{int(sl * 10000)}", position_id=p.id,
                             market=market, symbol=symbol, name=name, alert_type="strategy_stop_loss",
@@ -5054,7 +5106,8 @@ def get_portfolio_alerts():
             try:
                 if current_price is not None and float(p.quantity or 0) > 0 and take_profit_2 is not None:
                     tp2 = float(take_profit_2)
-                    if current_price >= tp2:
+                    intraday_tp2_hit = day_high is not None and day_high >= tp2
+                    if current_price >= tp2 or intraday_tp2_hit:
                         alerts.append(PortfolioAlertResponse(
                             key=f"{p.id}:strategy_take_profit_2:{int(tp2 * 10000)}", position_id=p.id,
                             market=market, symbol=symbol, name=name, alert_type="strategy_take_profit_2",
@@ -5064,7 +5117,10 @@ def get_portfolio_alerts():
                 if current_price is not None and float(p.quantity or 0) > 0 and take_profit_1 is not None:
                     tp1 = float(take_profit_1)
                     tp2 = float(take_profit_2) if take_profit_2 is not None else None
-                    if current_price >= tp1 and (tp2 is None or current_price < tp2):
+                    intraday_tp1_hit = day_high is not None and day_high >= tp1
+                    tp2_reached = tp2 is not None and current_price >= tp2
+                    intraday_tp2_reached = tp2 is not None and day_high is not None and day_high >= tp2
+                    if (current_price >= tp1 or intraday_tp1_hit) and not (tp2_reached or intraday_tp2_reached):
                         alerts.append(PortfolioAlertResponse(
                             key=f"{p.id}:strategy_take_profit_1:{int(tp1 * 10000)}", position_id=p.id,
                             market=market, symbol=symbol, name=name, alert_type="strategy_take_profit_1",
