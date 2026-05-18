@@ -4530,7 +4530,11 @@ def _get_today_high_low(symbol: str, market: str):
 
 
 def _execute_auto_trade(at_id: str):
-    """Execute a single triggered auto-trade order using today's high/low."""
+    """Execute a single triggered auto-trade order using today's high/low.
+
+    Once a trigger is confirmed, fill using the latest available market price.
+    Fall back to today's close if a live quote is unavailable.
+    """
     import logging
     log = logging.getLogger("auto_trade")
     try:
@@ -4553,17 +4557,28 @@ def _execute_auto_trade(at_id: str):
             if day_high is None or day_low is None:
                 return
 
+            trigger_price = float(at.trigger_price or 0.0)
+            if trigger_price <= 0:
+                return
+
             # Check if trigger price was reached intraday
             triggered = False
-            exec_price = None
-            if at.side == "BUY" and day_low <= at.trigger_price:
+            if at.side == "BUY" and day_low <= trigger_price:
                 triggered = True
-                exec_price = at.trigger_price  # assume filled at trigger price
-            elif at.side == "SELL" and day_high >= at.trigger_price:
+            elif at.side == "SELL" and day_high >= trigger_price:
                 triggered = True
-                exec_price = at.trigger_price
 
             if not triggered:
+                return
+
+            current_price = 0.0
+            try:
+                sp = get_stock_price(symbol=symbol, market=market)
+                current_price = float(getattr(sp, "price", 0) or 0.0)
+            except Exception:
+                current_price = 0.0
+            exec_price = current_price if current_price > 0 else float(day_close or 0.0)
+            if exec_price <= 0:
                 return
 
             qty = float(at.quantity)
@@ -4626,7 +4641,7 @@ def _execute_auto_trade(at_id: str):
                     PortfolioAutoTrade.id != at.id,
                 ).update({"status": "CANCELLED"})
 
-            log.info(f"Auto-trade executed: {at.side} {qty} of {symbol} @ {exec_price} (day H/L: {day_high}/{day_low})")
+            log.info(f"Auto-trade executed: {at.side} {qty} of {symbol} @ {exec_price} (trigger={trigger_price}, day H/L/C: {day_high}/{day_low}/{day_close})")
     except Exception as e:
         import logging
         logging.getLogger("auto_trade").error(f"Auto-trade error: {e}")
@@ -6440,14 +6455,22 @@ def _tencent_fetch_history_df(symbol: str, market: str, count: int = 420):
         disable_proxies_for_process()
         import httpx
 
-        url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={q},day,,,{count},qfq"
+        market_upper = (market or "").upper()
+        # Use unadjusted daily bars for CN so indicator price levels stay on the
+        # same scale as live spot quotes. Using qfq here can mix 复权价 with
+        # real-time 现价 around ex-right / ex-div dates and produce bad entries.
+        adjust_suffix = "" if market_upper == "CN" else "qfq"
+        url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={q},day,,,{count},{adjust_suffix}"
         with httpx.Client(timeout=6, follow_redirects=True) as client:
             resp = client.get(url)
             resp.raise_for_status()
             data = resp.json()
 
         qdata = ((data or {}).get("data") or {}).get(q) or {}
-        kdata = qdata.get("day") or qdata.get("qfqday")
+        if market_upper == "CN":
+            kdata = qdata.get("day") or qdata.get("qfqday")
+        else:
+            kdata = qdata.get("qfqday") or qdata.get("day")
         if not kdata:
             return None
 
