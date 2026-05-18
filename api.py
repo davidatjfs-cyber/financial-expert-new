@@ -3617,7 +3617,9 @@ def _portfolio_agent_pick_candidates(min_buy_quantity: float, limit: int = 5) ->
         if market != "CN" or not symbol:
             continue
         action = (item.get("action") or "").strip()
-        if action not in {"强买信号", "积极建仓", "轻仓试探", "关注等买点"}:
+        # Agent A is configured for hit rate over coverage: only open new positions
+        # when the scanner marks the stock as the strongest bucket.
+        if action != "强买信号":
             continue
         buy_price = item.get("current_price") or item.get("buy_price_aggressive")
         try:
