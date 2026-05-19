@@ -3926,6 +3926,11 @@ def _run_llm_agent_once(
     post_commit_events: list[tuple[str, str, str | None]] = []
     last_status = "llm_hold"
     last_action = "hold"
+
+    def _log_llm_event(event: str, symbol: str | None = None, detail: str | None = None):
+        if allow_new_pick:
+            _log_agent_pick_event(agent_id, pick_slot_key or "unknown", event, symbol=symbol, detail=detail)
+
     for item in actions[:5]:
         action = item.get("action") or ""
         symbol = item.get("symbol") or ""
@@ -3934,16 +3939,17 @@ def _run_llm_agent_once(
         if action == "hold" or not action:
             last_status = f"llm_hold:{reason}"
             last_action = "hold"
+            _log_llm_event("llm_hold", detail=reason[:50] if reason else None)
             continue
 
         if action == "sell" and symbol:
             if not trading_now:
                 last_status = f"llm_sell_market_closed:{symbol}"
+                _log_llm_event("llm_sell_rejected", symbol=symbol, detail="market_closed")
                 continue
             symbol_base = symbol.split(".")[0].upper()
             symbol = next((s for s in held_symbols if s.split(".")[0].upper() == symbol_base), symbol)
-            if allow_new_pick:
-                _log_agent_pick_event(agent_id, pick_slot_key or "unknown", "llm_sell", symbol=symbol, detail=reason[:50] if reason else None)
+            _log_llm_event("llm_sell", symbol=symbol, detail=reason[:50] if reason else None)
             committed_trade: Optional[PortfolioTradeResponse] = None
             with session_scope() as s:
                 pos = next((
@@ -3951,17 +3957,19 @@ def _run_llm_agent_once(
                         PortfolioPosition.market == "CN",
                         PortfolioPosition.symbol == symbol,
                         PortfolioPosition.source == agent_id,
-                    )).scalars().all()
+                )).scalars().all()
                     if float(agent_position_qty.get(p.id, 0.0) or 0.0) > 0
                 ), None)
                 if pos is None:
                     last_status = f"llm_sell_no_position:{symbol}"
+                    _log_llm_event("llm_sell_rejected", symbol=symbol, detail="no_position")
                     continue
                 qty = float(agent_position_qty.get(pos.id, 0.0) or 0.0)
                 sp = get_stock_price(symbol=symbol, market="CN")
                 sell_price = float(getattr(sp, "price", 0) or 0)
                 if sell_price <= 0:
                     last_status = f"llm_sell_no_price:{symbol}"
+                    _log_llm_event("llm_sell_rejected", symbol=symbol, detail="no_price")
                     continue
                 trade = _create_trade_at_price(pos.id, "SELL", qty, sell_price, _agent_id_to_source(agent_id), session=s)
                 committed_trade = trade
@@ -3972,6 +3980,7 @@ def _run_llm_agent_once(
                     agent_position_qty[pos.id] = 0.0
                 else:
                     last_status = f"llm_sell_trade_failed:{symbol}"
+                    _log_llm_event("llm_sell_rejected", symbol=symbol, detail="trade_failed")
             if committed_trade is not None:
                 committed_trades.append(committed_trade)
                 continue
@@ -4002,10 +4011,11 @@ def _run_llm_agent_once(
                 buy_price = float(getattr(sp, "price", 0) or 0)
                 if buy_price <= 0:
                     last_status = f"llm_buy_no_price:{symbol}"
+                    _log_llm_event("llm_buy_rejected", symbol=symbol, detail="no_price")
                     continue
                 min_qty = float(cfg.min_buy_quantity or 1000.0)
                 if available_capital < min_qty * buy_price:
-                    _log_agent_pick_event(agent_id, slot_key, "llm_buy_rejected", symbol=symbol, detail="insufficient_capital")
+                    _log_llm_event("llm_buy_rejected", symbol=symbol, detail="insufficient_capital")
                     last_status = f"llm_buy_rejected:insufficient_capital:{symbol}"
                     continue
                 if pos is None:
@@ -4039,6 +4049,7 @@ def _run_llm_agent_once(
                     else:
                         post_commit_events.append(("llm_buy_trade_failed", symbol, None))
                         last_status = f"llm_buy_trade_failed:{symbol}"
+                        _log_llm_event("llm_buy_rejected", symbol=symbol, detail="trade_failed")
                 else:
                     _pos_name = str((candidate or {}).get("name") or symbol)
                     if _pos_name == symbol:
@@ -4060,6 +4071,7 @@ def _run_llm_agent_once(
                     else:
                         post_commit_events.append(("llm_buy_queue_failed", symbol, None))
                         last_status = f"llm_buy_queue_failed:{symbol}"
+                        _log_llm_event("llm_buy_rejected", symbol=symbol, detail="queue_failed")
             if committed_trade is not None:
                 committed_trades.append(committed_trade)
                 continue
@@ -4069,6 +4081,7 @@ def _run_llm_agent_once(
             continue
 
         last_status = f"llm_unknown_action:{action}"
+        _log_llm_event("llm_unknown_action", symbol=symbol or None, detail=action[:50] if action else None)
 
     result_message = last_status.split(":", 1)[0] if last_status else "llm_hold"
     with session_scope() as s:
@@ -4965,9 +4978,6 @@ def _portfolio_feishu_notifier():
         try:
             print(f"[FEISHU] checking portfolio alerts and agents...")
             alerts = get_portfolio_alerts()
-            if _cn_market_trading_now():
-                for alert in alerts:
-                    _send_feishu_portfolio_alert(alert)
             _process_live_auto_trades("CN")
             slot_a = _claim_agent_new_pick_slot("a")
             slot_b = _claim_agent_new_pick_slot("b")

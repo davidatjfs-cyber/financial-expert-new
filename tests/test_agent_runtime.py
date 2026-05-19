@@ -514,6 +514,84 @@ class AgentRuntimeTests(unittest.TestCase):
         with patch.object(self.api, "session_scope", return_value=BrokenContext()):
             self.api._log_agent_pick_event("a", "2026-05-07:17:30", "slot_entered")
 
+    def test_llm_hold_is_logged_for_agent_b(self):
+        now = int(time.time())
+        with self.db.session_scope() as s:
+            cfg = s.get(self.models.PortfolioAgentConfig, "b")
+            if cfg is None:
+                cfg = self.models.PortfolioAgentConfig(id="b")
+                s.add(cfg)
+                s.flush()
+            cfg.enabled = "1"
+            cfg.agent_type = "llm"
+            cfg.capital = 10_000_000.0
+            cfg.min_buy_quantity = 10000.0
+
+        fake_qwen = types.ModuleType("core.llm_qwen")
+        fake_qwen.call_llm = lambda *args, **kwargs: json.dumps({
+            "action": "hold",
+            "symbol": None,
+            "reason": "继续观察",
+        }, ensure_ascii=False)
+        sys.modules["core.llm_qwen"] = fake_qwen
+
+        fake_recommend = types.ModuleType("core.recommend")
+        fake_recommend.get_latest_scan = lambda: []
+        fake_recommend.run_scan = lambda *args, **kwargs: []
+        fake_recommend.save_scan_result = lambda results: None
+        sys.modules["core.recommend"] = fake_recommend
+
+        summary_obj = types.SimpleNamespace(
+            agent_a=types.SimpleNamespace(total_market_value=0.0),
+            agent_b=types.SimpleNamespace(total_market_value=0.0),
+        )
+
+        with patch.object(self.api, "get_portfolio_alerts", return_value=[]), \
+             patch.object(self.api, "get_portfolio_summary", return_value=summary_obj), \
+             patch.object(self.api, "_cn_market_trading_now", return_value=True):
+            with self.db.session_scope() as s:
+                cfg = s.get(self.models.PortfolioAgentConfig, "b")
+            result = self.api._run_llm_agent_once("b", cfg, allow_new_pick=True, pick_slot_key="2026-05-07:09:30", precomputed_alerts=[])
+
+        self.assertEqual(result.get("message"), "llm_hold")
+        with self.db.session_scope() as s:
+            rows = s.execute(self.api.select(self.models.PortfolioAgentPickLog).where(
+                self.models.PortfolioAgentPickLog.agent_id == "b",
+                self.models.PortfolioAgentPickLog.event == "llm_hold",
+            )).scalars().all()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].detail, "继续观察")
+
+    def test_feishu_notifier_does_not_send_non_trade_alerts(self):
+        alert = self.api.PortfolioAlertResponse(
+            key="k",
+            position_id="p",
+            market="CN",
+            symbol="600690.SH",
+            name="海尔智家",
+            alert_type="strategy_buy_zone",
+            message="已进入策略买入区间",
+            current_price=21.0,
+            trigger_price=22.0,
+        )
+
+        sleep_calls = iter([None, RuntimeError("stop")])
+
+        def fake_sleep(_seconds):
+            result = next(sleep_calls)
+            if isinstance(result, Exception):
+                raise result
+
+        with patch.object(self.api, "get_portfolio_alerts", return_value=[alert]), \
+             patch.object(self.api, "_process_live_auto_trades"), \
+             patch.object(self.api, "_claim_agent_new_pick_slot", return_value=None), \
+             patch.object(self.api, "_send_feishu_portfolio_alert") as mock_send, \
+             patch.object(self.api.time, "sleep", side_effect=fake_sleep):
+            with self.assertRaisesRegex(RuntimeError, "stop"):
+                self.api._portfolio_feishu_notifier()
+
+        mock_send.assert_not_called()
+
     def test_agent_b_returns_use_agent_owned_lots_only(self):
         now = int(time.time())
         with self.db.session_scope() as s:

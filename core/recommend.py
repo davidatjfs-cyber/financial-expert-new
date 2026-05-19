@@ -958,18 +958,45 @@ def _fetch_batch_financials(stocks: list[dict]) -> dict[str, dict]:
 def _fetch_north_flow() -> dict[str, float]:
     disable_proxies_for_process()
     result = {}
+
+    def _extract_from_df(df):
+        if df is None or getattr(df, "empty", True):
+            return False
+        code_col = next((c for c in ["股票代码", "代码", "证券代码"] if c in df.columns), None)
+        pct_col = next((c for c in ["持股占比", "持股占流通股比", "持股占总股本比"] if c in df.columns), None)
+        if code_col is None or pct_col is None:
+            return False
+        for _, row in df.iterrows():
+            code = str(row.get(code_col, "") or "").strip()
+            hold_pct = row.get(pct_col, None)
+            if not code or hold_pct is None:
+                continue
+            try:
+                result[code] = float(str(hold_pct).replace("%", "").strip())
+            except (ValueError, TypeError):
+                continue
+        return bool(result)
+
     try:
         import akshare as ak
-        df = ak.stock_hsgt_individual_em(symbol="北向资金")
-        if df is not None and not df.empty:
-            for _, row in df.iterrows():
-                code = str(row.get("股票代码", "")).strip()
-                hold_pct = row.get("持股占比", None)
-                if code and hold_pct is not None:
-                    try:
-                        result[code] = float(hold_pct)
-                    except (ValueError, TypeError):
-                        pass
+        try:
+            df = ak.stock_hsgt_individual_em(symbol="北向资金")
+            if _extract_from_df(df):
+                return result
+        except Exception:
+            pass
+
+        # Fallback for newer/alternate AkShare schemas.
+        for kwargs in (
+            {"market": "北向", "indicator": "今日排行"},
+            {"market": "北向资金", "indicator": "今日排行"},
+        ):
+            try:
+                df = ak.stock_hsgt_hold_stock_em(**kwargs)
+            except Exception:
+                continue
+            if _extract_from_df(df):
+                return result
     except Exception as e:
         print(f"[recommend] north flow error: {e}")
     return result
