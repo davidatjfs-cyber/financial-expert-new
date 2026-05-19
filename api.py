@@ -4142,13 +4142,6 @@ def _run_portfolio_agent_once(
     with session_scope() as s:
         cfg = _get_or_create_agent_config(s, agent_id)
         capital = float(cfg.capital or 10000000.0)
-        managed_capital, _, _, managed_net_pnl = _compute_agent_managed_financials(
-            s.execute(select(PortfolioTrade)).scalars().all(),
-            s.execute(select(PortfolioPosition)).scalars().all(),
-            agent_id,
-            capital,
-        )
-        target_return_pct = float(cfg.target_profit or 0.0)
         cfg.last_run_at = now
         cfg.updated_at = now
         if (cfg.enabled or "0") != "1":
@@ -4161,11 +4154,6 @@ def _run_portfolio_agent_once(
             cfg.enabled = "0"
             cfg.last_status = "deadline_reached"
             return {"ok": True, "message": "deadline_reached"}
-        if managed_capital > 0 and target_return_pct > 0 and managed_net_pnl >= managed_capital * target_return_pct / 100.0:
-            cfg.enabled = "0"
-            cfg.last_status = f"target_reached:{managed_net_pnl:.2f}"
-            cfg.updated_at = now
-            return {"ok": True, "message": "target_reached", "net_pnl": managed_net_pnl}
 
     with session_scope() as s:
         cfg = _get_or_create_agent_config(s, agent_id)
