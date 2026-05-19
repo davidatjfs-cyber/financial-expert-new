@@ -516,10 +516,12 @@ def _score_timing(rsi14: Optional[float], boll_position: Optional[float],
     below_ma60_5pct = dist_ma60_pct is None or dist_ma60_pct < -5
     if big_drop_5d and vol_spike and below_ma60_5pct:
         return 100.0
-    if steep_drop and oversold and vol_spike:
-        return 98.0
     if big_drop_10d and below_ma60_10pct:
         return 96.0
+    if steep_drop and oversold and vol_spike:
+        # Backtests show this looks scary/cheap but often keeps falling unless
+        # it also has a broader 5d/10d capitulation or MA60 distance signal.
+        return 74.0
     if steep_drop and oversold and big_drop_5d:
         return 94.0
     if steep_drop and oversold:
@@ -1347,7 +1349,7 @@ def run_scan(top_n: int = 20,
 
     QUALITY_THRESHOLD = 30.0
     cn_market_state = _cn_index_market_state()
-    cn_market_allows_strong_buy = cn_market_state in ("weak", "unknown")
+    cn_market_allows_new_buy = cn_market_state == "weak"
 
     for s in scores:
         s.total_score = _compute_final_total_score(s, weights, QUALITY_THRESHOLD)
@@ -1361,14 +1363,10 @@ def run_scan(top_n: int = 20,
         s.reason = _generate_factor_reason(s)
         qt = s.quality_score_total or 0
         tt = s.timing_score_total or 0
-        if qt >= QUALITY_THRESHOLD and tt >= 96 and cn_market_allows_strong_buy:
+        if qt >= QUALITY_THRESHOLD and tt >= 96 and cn_market_allows_new_buy:
             s.action = "强买信号"
-        elif qt >= QUALITY_THRESHOLD and tt >= 80 and cn_market_allows_strong_buy:
-            s.action = "积极建仓"
         elif qt >= QUALITY_THRESHOLD and tt >= 80:
             s.action = "关注等买点"
-        elif qt >= QUALITY_THRESHOLD and tt >= 60:
-            s.action = "轻仓试探"
         elif qt >= QUALITY_THRESHOLD and tt >= 0:
             s.action = "关注等买点"
         elif tt >= 80:

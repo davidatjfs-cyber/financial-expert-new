@@ -70,8 +70,8 @@ _FEISHU_SENT_ALERTS: dict[str, tuple[float, str]] = {}
 _FEISHU_SENT_TTL = 6 * 3600
 _CN_MARKET_STATE_CACHE: tuple[float, str] = (0.0, "unknown")
 _AGENT_NEW_PICK_SCHEDULE: dict[str, tuple[tuple[int, int], ...]] = {
-    "a": ((9, 15), (12, 30)),
-    "b": ((9, 30), (12, 45)),
+    "a": ((9, 15), (12, 0), (16, 0)),
+    "b": ((9, 30), (12, 45), (16, 20)),
 }
 _AGENT_NEW_PICK_CHECKED: dict[tuple[str, str], bool] = {}
 _AGENT_NEW_PICK_LOCK = threading.Lock()
@@ -3152,11 +3152,32 @@ def _agent_live_position_quantities(
     if positions is None:
         with session_scope() as s:
             positions = s.execute(select(PortfolioPosition)).scalars().all()
-    return {
+            trades = s.execute(select(PortfolioTrade)).scalars().all()
+    result = {
         p.id: float(p.quantity or 0.0)
         for p in (positions or [])
         if (p.source or "manual") == agent_id and float(p.quantity or 0.0) > 1e-9
     }
+    if trades is None:
+        return result
+    agent_source = _agent_id_to_source(agent_id)
+    by_position: dict[str, float] = {}
+    for trade in trades or []:
+        if (getattr(trade, "source", "") or "").strip() != agent_source:
+            continue
+        side = (getattr(trade, "side", "") or "").strip().upper()
+        qty = float(getattr(trade, "quantity", 0.0) or 0.0)
+        if side == "BUY":
+            by_position[trade.position_id] = by_position.get(trade.position_id, 0.0) + qty
+        elif side == "SELL":
+            by_position[trade.position_id] = by_position.get(trade.position_id, 0.0) - qty
+    position_map = {p.id: p for p in (positions or [])}
+    for position_id, qty in by_position.items():
+        if qty <= 1e-9:
+            continue
+        live_qty = float(getattr(position_map.get(position_id), "quantity", 0.0) or 0.0)
+        result[position_id] = min(qty, live_qty) if live_qty > 0 else qty
+    return result
 
 
 def _trade_realized_pnl_map(
@@ -3391,6 +3412,10 @@ def _compute_agent_position_unrealized_pnl(
         avg_cost = float(p.avg_cost or 0.0)
         total += qty * (current_price - avg_cost)
     return float(total)
+
+
+def _orphan_agent_sell_realized_adjustment(*args, **kwargs) -> float:
+    return 0.0
 
 
 def _compute_period_returns(
@@ -3680,6 +3705,26 @@ def _normalize_llm_actions(decision: dict) -> list[dict]:
     }]
 
 
+def _normalize_cn_symbol(symbol: str, known_symbols: set[str]) -> str:
+    symbol = (symbol or "").strip().upper()
+    if not symbol:
+        return ""
+    base = symbol.split(".")[0]
+    for known in known_symbols:
+        if known.split(".")[0].upper() == base:
+            return known
+    if re.fullmatch(r"\d{6}", base):
+        return f"{base}.SH" if base.startswith("6") else f"{base}.SZ"
+    return symbol
+
+
+def _get_latest_scan_compat(get_latest_scan_fn, max_age_seconds: float = 1800) -> list:
+    try:
+        return get_latest_scan_fn(max_age_seconds=max_age_seconds) or []
+    except TypeError:
+        return get_latest_scan_fn() or []
+
+
 def _run_llm_agent_once(
     agent_id: str,
     cfg: "PortfolioAgentConfig",
@@ -3781,7 +3826,9 @@ def _run_llm_agent_once(
             if latest:
                 save_scan_result(latest)
         except Exception:
-            latest = get_latest_scan(max_age_seconds=1800) or []
+            latest = _get_latest_scan_compat(get_latest_scan, max_age_seconds=1800)
+        if not latest:
+            latest = _get_latest_scan_compat(get_latest_scan, max_age_seconds=1800)
     candidates = []
     for item in latest:
         market = (item.get("market") or "CN").strip().upper()
@@ -3804,6 +3851,11 @@ def _run_llm_agent_once(
             "ma60": item.get("ma60"),
             "rsi14": item.get("rsi14"),
             "trend": item.get("trend"),
+            "quality_score": item.get("quality_score_total"),
+            "timing_score": item.get("timing_score_total"),
+            "timing_reason": item.get("timing_signal_reason"),
+            "sector": item.get("sector_name"),
+            "sector_strength": item.get("sector_strength_score"),
             "buy_reason": item.get("buy_reason"),
         })
         if len(candidates) >= 5:
@@ -3811,6 +3863,7 @@ def _run_llm_agent_once(
     candidate_symbols = {str(item.get("symbol") or "").upper() for item in candidates}
     held_symbols = {(h.get("symbol") or "").upper() for h in holdings_info}
     held_symbols_base = {s.split(".")[0] for s in held_symbols}
+    known_buy_symbols = candidate_symbols | held_symbols
 
     # --- Market context for LLM decision (HS300 trend + 20d return) ---
     _hs300_state = "unknown"
@@ -3833,10 +3886,18 @@ def _run_llm_agent_once(
     )
     _market_brief = f"HS300状态：{_hs300_state} | 最新点位：{_hs300_latest or '未知'} | 近20日涨跌：{_ret_str}"
 
-    system_prompt = """你是一个专业的A股量化交易AI，目标是在可用资金范围内最大化净收益率。
+    system_prompt = """你是一个专业的A股量化交易AI，目标是在可用资金范围内最大化净收益率，但第一优先级是提高已执行交易胜率。
 
 ## 唯一硬性限制
 买入新股票时，symbol必须来自候选股列表。已持仓股票的加仓和卖出不受此限制。
+
+## 高胜率交易纪律
+- 新开仓只允许选择 action=强买信号 的候选股；其他候选只观察。
+- HS300状态不是 weak 时，不做新开仓，除非已有持仓触发止损或止盈。
+- 候选 timing_score 低于96时不新开仓；quality_score 低于30时不新开仓。
+- 单日或短期浮亏不是卖出理由；只有跌破 stop_loss、触达 take_profit_2、或出现明确 signal_sell/strategy_stop_loss 才卖。
+- 新买入后的预期持有窗口是20-30个交易日，避免因噪声频繁交易。
+- 可用资金不足时直接 hold，不要强行输出买入。
 
 ## 数据解读指南
 
@@ -3899,7 +3960,8 @@ def _run_llm_agent_once(
         _log_agent_pick_event(agent_id, pick_slot_key or "unknown", "slot_entered")
 
     try:
-        llm_response = call_llm(system_prompt, user_prompt, temperature=0.1, max_tokens=800, model="qwen-max")
+        agent_b_model = (os.environ.get("AGENT_B_LLM_MODEL") or "qwen-max-latest").strip()
+        llm_response = call_llm(system_prompt, user_prompt, temperature=0.05, max_tokens=800, model=agent_b_model)
     except Exception as e:
         with session_scope() as s:
             c = _get_or_create_agent_config(s, agent_id)
@@ -3955,6 +4017,7 @@ def _run_llm_agent_once(
                 last_status = f"llm_sell_market_closed:{symbol}"
                 _log_llm_event("llm_sell_rejected", symbol=symbol, detail="market_closed")
                 continue
+            symbol = _normalize_cn_symbol(symbol, held_symbols)
             symbol_base = symbol.split(".")[0].upper()
             symbol = next((s for s in held_symbols if s.split(".")[0].upper() == symbol_base), symbol)
             _log_llm_event("llm_sell", symbol=symbol, detail=reason[:50] if reason else None)
@@ -4000,6 +4063,7 @@ def _run_llm_agent_once(
                 last_status = f"llm_buy_outside_pick_slot:{symbol}"
                 continue
             slot_key = pick_slot_key or "unknown"
+            symbol = _normalize_cn_symbol(symbol, known_buy_symbols)
             symbol_base = symbol.split(".")[0].upper()
             held_symbol = next((s for s in held_symbols if s.split(".")[0].upper() == symbol_base), None)
             if held_symbol is not None:
@@ -4010,6 +4074,12 @@ def _run_llm_agent_once(
                 candidate = next((cand for cand in candidates if (cand.get("symbol") or "").split(".")[0].upper() == symbol_base), None)
                 if candidate is not None:
                     symbol = str(candidate.get("symbol") or symbol).strip().upper() or symbol
+                if held_symbol is None:
+                    candidate_action = str((candidate or {}).get("action") or "").strip()
+                    if candidate is None or candidate_action not in {"强买信号", "积极建仓"}:
+                        last_status = f"llm_buy_not_in_high_confidence_candidates:{symbol}"
+                        _log_llm_event("llm_buy_not_in_candidates", symbol=symbol, detail="not_high_confidence_candidate")
+                        continue
                 pos = s.execute(select(PortfolioPosition).where(
                     PortfolioPosition.market == "CN",
                     PortfolioPosition.symbol == symbol,
