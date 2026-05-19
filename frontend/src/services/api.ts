@@ -260,6 +260,16 @@ export interface PortfolioAgentStatus {
   last_status?: string | null;
 }
 
+export interface PortfolioAgentPickLog {
+  id: string;
+  agent_id: string;
+  slot_key: string;
+  event: string;
+  symbol?: string | null;
+  detail?: string | null;
+  created_at: number;
+}
+
 export interface PortfolioReturns {
   today_pnl: number;
   week_pnl: number;
@@ -590,6 +600,10 @@ export async function getPortfolioAgentConfig(agentId: string = 'a') {
 
 export async function getPortfolioAgentStatus(agentId: string = 'a') {
   return fetchAPI<PortfolioAgentStatus>(`/api/portfolio/agent/status?agent_id=${agentId}`);
+}
+
+export async function getPortfolioAgentPickLogs(agentId: string = 'a', limit: number = 20) {
+  return fetchAPI<PortfolioAgentPickLog[]>(`/api/portfolio/agent/pick-logs?agent_id=${agentId}&limit=${limit}`);
 }
 
 export async function getPortfolioReturns() {

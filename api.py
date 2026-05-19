@@ -147,17 +147,21 @@ def _log_agent_pick_event(agent_id: str, slot_key: str, event: str, symbol: str 
     det = f" detail={detail}" if detail else ""
     try:
         with session_scope() as s:
-            s.add(PortfolioAgentPickLog(
-                agent_id=agent_id,
-                slot_key=slot_key,
-                event=event,
-                symbol=symbol,
-                detail=detail,
-                created_at=now,
-            ))
+            _persist_agent_pick_event(s, agent_id, slot_key, event, symbol=symbol, detail=detail, created_at=now)
     except Exception as e:
         print(f"[AGENT_PICK] persist_failed agent={agent_id} slot={slot_key} event={event} error={e}")
     print(f"[AGENT_PICK] agent={agent_id} slot={slot_key} event={event} symbol={name_or_sym}{det}")
+
+
+def _persist_agent_pick_event(session, agent_id: str, slot_key: str, event: str, symbol: str | None = None, detail: str | None = None, created_at: Optional[int] = None):
+    session.add(PortfolioAgentPickLog(
+        agent_id=agent_id,
+        slot_key=slot_key,
+        event=event,
+        symbol=symbol,
+        detail=detail,
+        created_at=int(created_at or time.time()),
+    ))
 
 HK_HOLIDAYS_2025 = {
     _dt.date(2025, 1, 1),
@@ -3924,12 +3928,16 @@ def _run_llm_agent_once(
     committed_trades: list[PortfolioTradeResponse] = []
     queued_orders: list[dict] = []
     post_commit_events: list[tuple[str, str, str | None]] = []
+    pending_pick_logs: list[tuple[str, str | None, str | None]] = []
     last_status = "llm_hold"
     last_action = "hold"
 
     def _log_llm_event(event: str, symbol: str | None = None, detail: str | None = None):
         if allow_new_pick:
-            _log_agent_pick_event(agent_id, pick_slot_key or "unknown", event, symbol=symbol, detail=detail)
+            pending_pick_logs.append((event, symbol, detail))
+            name_or_sym = symbol or ""
+            det = f" detail={detail}" if detail else ""
+            print(f"[AGENT_PICK] agent={agent_id} slot={pick_slot_key or 'unknown'} event={event} symbol={name_or_sym}{det}")
 
     for item in actions[:5]:
         action = item.get("action") or ""
@@ -4033,7 +4041,7 @@ def _run_llm_agent_once(
                     )
                     s.add(pos)
                     s.flush()
-                    _log_agent_pick_event(agent_id, slot_key, "llm_buy_created_position", symbol=symbol, detail="agent created new position")
+                    _log_llm_event("llm_buy_created_position", symbol=symbol, detail="agent created new position")
                 qty = min_qty
                 if trading_now:
                     trade = _create_trade_at_price(pos.id, "BUY", qty, buy_price, _agent_id_to_source(agent_id), session=s)
@@ -4089,6 +4097,9 @@ def _run_llm_agent_once(
         c.last_action = last_action
         c.last_status = last_status
         c.updated_at = now
+        if allow_new_pick:
+            for event, symbol, detail in pending_pick_logs:
+                _persist_agent_pick_event(s, agent_id, pick_slot_key or "unknown", event, symbol=symbol, detail=detail, created_at=now)
     for event, symbol, detail in post_commit_events:
         _log_agent_pick_event(agent_id, pick_slot_key or "unknown", event, symbol=symbol, detail=detail)
     for trade in committed_trades:

@@ -7,6 +7,7 @@ import {
   getPortfolioSummary,
   getPortfolioReturns,
   getPortfolioAgentConfig,
+  getPortfolioAgentPickLogs,
   getPortfolioAgentStatus,
   updatePortfolioAgentConfig,
   runPortfolioAgentNow,
@@ -14,6 +15,7 @@ import {
   type PortfolioSummary,
   type PortfolioReturns,
   type PortfolioAgentConfig,
+  type PortfolioAgentPickLog,
   type PortfolioAgentStatus,
 } from '@/services/api';
 
@@ -27,6 +29,7 @@ export default function ReturnsPage() {
   const [activeAgent, setActiveAgent] = useState<'a' | 'b'>('a');
   const [agentConfigs, setAgentConfigs] = useState<Record<string, PortfolioAgentConfig>>({});
   const [agentStatuses, setAgentStatuses] = useState<Record<string, PortfolioAgentStatus>>({});
+  const [agentPickLogs, setAgentPickLogs] = useState<Record<string, PortfolioAgentPickLog[]>>({});
   const [agentCapital, setAgentCapital] = useState('10000000');
   const [agentTargetProfit, setAgentTargetProfit] = useState('');
   const [agentDeadline, setAgentDeadline] = useState('');
@@ -39,6 +42,7 @@ export default function ReturnsPage() {
 
   const agentConfig = agentConfigs[activeAgent] ?? null;
   const agentStatus = agentStatuses[activeAgent] ?? null;
+  const activePickLogs = agentPickLogs[activeAgent] ?? [];
 
   const fmt = (v: number | null | undefined, digits = 2) => (v == null ? '-' : v.toFixed(digits));
   const fmtSigned = (v: number | null | undefined, digits = 2) => {
@@ -109,7 +113,7 @@ export default function ReturnsPage() {
 
   const loadData = async () => {
     try {
-      const [ts, sm, rt, acA, asA, acB, asB] = await Promise.all([
+      const [ts, sm, rt, acA, asA, acB, asB, logsA, logsB] = await Promise.all([
         getPortfolioTrades(undefined, 200),
         getPortfolioSummary(),
         getPortfolioReturns(),
@@ -117,12 +121,15 @@ export default function ReturnsPage() {
         getPortfolioAgentStatus('a'),
         getPortfolioAgentConfig('b'),
         getPortfolioAgentStatus('b'),
+        getPortfolioAgentPickLogs('a', 12),
+        getPortfolioAgentPickLogs('b', 12),
       ]);
       setTrades(ts);
       setSummary(sm);
       setReturnsData(rt);
       setAgentConfigs({ a: acA, b: acB });
       setAgentStatuses({ a: asA, b: asB });
+      setAgentPickLogs({ a: logsA, b: logsB });
     } finally {
       setLoading(false);
     }
@@ -326,6 +333,22 @@ export default function ReturnsPage() {
               <div>最近状态：{agentStatus.last_status || '-'}</div>
               <div>最近动作：{agentStatus.last_action || '-'}</div>
               <div>最近运行：{fmtTs(agentStatus.last_run_at)}</div>
+            </div>
+          )}
+          {!!activePickLogs.length && (
+            <div className="mt-4 rounded-lg bg-[var(--bg-elevated)] p-3">
+              <div className="text-[var(--text-primary)] text-xs font-bold mb-2">最近运行日志</div>
+              <div className="space-y-2 text-[11px] text-[var(--text-secondary)]">
+                {activePickLogs.slice(0, 6).map((log) => (
+                  <div key={log.id} className="flex flex-col gap-0.5 border-b border-[var(--border-color)]/50 pb-2 last:border-b-0 last:pb-0">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="font-medium text-[var(--text-primary)]">{log.event}</span>
+                      <span>{fmtTs(log.created_at)}</span>
+                    </div>
+                    <div>{[log.symbol, log.detail].filter(Boolean).join(' | ') || '-'}</div>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
         </div>
