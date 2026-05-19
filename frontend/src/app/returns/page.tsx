@@ -73,6 +73,11 @@ export default function ReturnsPage() {
       llm_buy_queue_failed: 'LLM 排队买入失败',
       llm_buy_trade_failed: 'LLM 买入失败',
       llm_unknown_action: 'LLM 返回未知动作',
+      cn_market_closed: '当前休市',
+      target_reached: '达到目标收益率',
+      deadline_reached: '达到截止时间',
+      agent_disabled: 'Agent 已关闭',
+      no_action: '无操作',
     };
     return event ? (map[event] || event) : '-';
   };
