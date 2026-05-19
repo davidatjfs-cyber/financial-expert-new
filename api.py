@@ -4042,7 +4042,23 @@ def _run_llm_agent_once(
                     s.add(pos)
                     s.flush()
                     _log_llm_event("llm_buy_created_position", symbol=symbol, detail="agent created new position")
-                qty = min_qty
+                candidate_action = str((candidate or {}).get("action") or "").strip() or "关注等买点"
+                qty = _agent_dynamic_buy_quantity(
+                    min_qty,
+                    cfg.target_profit,
+                    cfg.deadline_ts,
+                    managed_net_pnl,
+                    candidate_action,
+                    available_capital,
+                )
+                max_qty = int(available_capital / buy_price) if buy_price > 0 else 0
+                if qty > max_qty:
+                    qty = float(max_qty)
+                qty = math.floor(float(qty) / 100) * 100 if qty >= 100 else float(qty)
+                if qty < 100:
+                    _log_llm_event("llm_buy_rejected", symbol=symbol, detail="insufficient_capital")
+                    last_status = f"llm_buy_rejected:insufficient_capital:{symbol}"
+                    continue
                 if trading_now:
                     trade = _create_trade_at_price(pos.id, "BUY", qty, buy_price, _agent_id_to_source(agent_id), session=s)
                     committed_trade = trade

@@ -51,6 +51,54 @@ export default function ReturnsPage() {
     return v > 0 ? `+${s}` : s;
   };
   const pnlColor = (v: number | null | undefined) => (v == null ? 'text-[var(--text-secondary)]' : v >= 0 ? 'text-emerald-400' : 'text-red-400');
+  const translateAgentEvent = (event?: string | null) => {
+    const map: Record<string, string> = {
+      slot_entered: '进入执行窗口',
+      candidates_count: '候选数量统计',
+      no_candidate: '无可执行候选',
+      capital_exhausted: '可用资金耗尽',
+      available_capital: '计算可用资金',
+      candidate_processing: '处理候选股票',
+      picked_new_stock: '已买入新股票',
+      queued_new_stock: '已排队买入',
+      alert_buy: '告警触发买入',
+      alert_sell: '告警触发卖出',
+      llm_hold: 'LLM 决定继续持有',
+      llm_sell: 'LLM 决定卖出',
+      llm_sell_rejected: 'LLM 卖出未执行',
+      llm_buy_rejected: 'LLM 买入未执行',
+      llm_buy_created_position: 'LLM 创建持仓记录',
+      llm_buy_executed: 'LLM 已执行买入',
+      llm_buy_queued: 'LLM 已排队买入',
+      llm_buy_queue_failed: 'LLM 排队买入失败',
+      llm_buy_trade_failed: 'LLM 买入失败',
+      llm_unknown_action: 'LLM 返回未知动作',
+    };
+    return event ? (map[event] || event) : '-';
+  };
+  const translateAgentDetail = (detail?: string | null) => {
+    if (!detail) return '-';
+    return detail
+      .replace('insufficient_capital', '资金不足')
+      .replace('market_closed', '休市')
+      .replace('no_position', '无持仓')
+      .replace('no_price', '无价格')
+      .replace('trade_failed', '成交失败')
+      .replace('queue_failed', '排队失败')
+      .replace('agent created new position', '已创建持仓记录');
+  };
+  const translateAgentStatus = (status?: string | null) => {
+    if (!status) return '-';
+    const [code, rest = ''] = status.split(':', 2);
+    const translated = translateAgentEvent(code);
+    const tail = translateAgentDetail(rest || null);
+    return tail === '-' ? translated : `${translated}：${tail}`;
+  };
+  const translateAgentAction = (action?: string | null) => {
+    if (!action) return '-';
+    if (action === 'hold') return '继续持有';
+    return action.replace(/^BUY:/, '买入：').replace(/^SELL:/, '卖出：').replace(/^QUEUE_BUY:/, '排队买入：');
+  };
   const fmtTs = (ts?: number | null) => {
     if (!ts) return '-';
     return new Intl.DateTimeFormat('zh-CN', {
@@ -330,8 +378,9 @@ export default function ReturnsPage() {
           )}
           {agentStatus && (
             <div className="mt-4 text-xs text-[var(--text-secondary)] flex flex-col gap-1">
-              <div>最近状态：{agentStatus.last_status || '-'}</div>
-              <div>最近动作：{agentStatus.last_action || '-'}</div>
+              <div>KPI执行：目标收益率、截止时间、本金上限、20%资金预留、最小买入量已生效；资金使用效率是结果指标，不是硬性约束。</div>
+              <div>最近状态：{translateAgentStatus(agentStatus.last_status)}</div>
+              <div>最近动作：{translateAgentAction(agentStatus.last_action)}</div>
               <div>最近运行：{fmtTs(agentStatus.last_run_at)}</div>
             </div>
           )}
@@ -342,10 +391,10 @@ export default function ReturnsPage() {
                 {activePickLogs.slice(0, 6).map((log) => (
                   <div key={log.id} className="flex flex-col gap-0.5 border-b border-[var(--border-color)]/50 pb-2 last:border-b-0 last:pb-0">
                     <div className="flex items-center justify-between gap-3">
-                      <span className="font-medium text-[var(--text-primary)]">{log.event}</span>
+                      <span className="font-medium text-[var(--text-primary)]">{translateAgentEvent(log.event)}</span>
                       <span>{fmtTs(log.created_at)}</span>
                     </div>
-                    <div>{[log.symbol, log.detail].filter(Boolean).join(' | ') || '-'}</div>
+                    <div>{[log.symbol, translateAgentDetail(log.detail)].filter(Boolean).join(' | ') || '-'}</div>
                   </div>
                 ))}
               </div>
