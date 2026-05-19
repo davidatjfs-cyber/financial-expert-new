@@ -1079,7 +1079,10 @@ def _execute_strategy_alert_trade(alert: PortfolioAlertResponse, agent_id: str =
 
     current_price = float(alert.current_price or 0.0)
     trigger_price = float(alert.trigger_price or 0.0)
-    trade_price = current_price if current_price > 0 else trigger_price
+    sp = get_stock_price(symbol=symbol, market=market)
+    trade_price = float(getattr(sp, "price", 0) or 0)
+    if trade_price <= 0:
+        trade_price = current_price if current_price > 0 else trigger_price
     if trade_price <= 0:
         return None
 
@@ -4217,9 +4220,10 @@ def _run_portfolio_agent_once(
         if (cfg.enabled or "0") != "1":
             cfg.last_status = "agent_disabled"
             return {"ok": True, "message": "agent_disabled"}
-        if not trading_now and not allow_new_pick:
+        if not trading_now:
             cfg.last_status = "cn_market_closed"
-            return {"ok": True, "message": "cn_market_closed"}
+            if not allow_new_pick:
+                return {"ok": True, "message": "cn_market_closed"}
         if cfg.deadline_ts is not None and now > int(cfg.deadline_ts):
             cfg.enabled = "0"
             cfg.last_status = "deadline_reached"
@@ -5063,7 +5067,9 @@ def _portfolio_feishu_notifier():
     while True:
         try:
             print(f"[FEISHU] checking portfolio alerts and agents...")
-            alerts = get_portfolio_alerts()
+            alerts = []
+            if not _cn_market_closed():
+                alerts = get_portfolio_alerts()
             _process_live_auto_trades("CN")
             slot_a = _claim_agent_new_pick_slot("a")
             slot_b = _claim_agent_new_pick_slot("b")
