@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Brain, PiggyBank, Wallet, RefreshCw, CircleHelp, ChevronDown, ChevronRight } from 'lucide-react';
 import {
   getPortfolioTrades,
@@ -10,7 +10,7 @@ import {
   getPortfolioAgentPickLogs,
   getPortfolioAgentStatus,
   updatePortfolioAgentConfig,
-  runPortfolioAgentNow,
+  runPortfolioAgentHealthCheck,
   type PortfolioTrade,
   type PortfolioSummary,
   type PortfolioReturns,
@@ -188,14 +188,14 @@ export default function ReturnsPage() {
     }
   };
 
-  const syncFormFromConfig = (id: 'a' | 'b') => {
+  const syncFormFromConfig = useCallback((id: 'a' | 'b') => {
     const cfg = agentConfigs[id];
     if (cfg) {
       setAgentCapital(cfg.capital != null ? String(cfg.capital) : '10000000');
       setAgentTargetProfit(cfg.target_profit != null ? String(cfg.target_profit) : '');
       setAgentDeadline(fmtShanghaiInput(cfg.deadline_ts));
     }
-  };
+  }, [agentConfigs]);
 
   useEffect(() => {
     loadData();
@@ -205,7 +205,7 @@ export default function ReturnsPage() {
 
   useEffect(() => {
     syncFormFromConfig(activeAgent);
-  }, [activeAgent, agentConfigs]);
+  }, [activeAgent, syncFormFromConfig]);
 
   const handleSaveAgent = async () => {
     try {
@@ -236,11 +236,13 @@ export default function ReturnsPage() {
   const handleRunAgent = async () => {
     try {
       setRunning(true);
-      const resp = await runPortfolioAgentNow(activeAgent);
+      const resp = await runPortfolioAgentHealthCheck(activeAgent);
       await loadData();
-      setMessage(`Agent ${activeAgent.toUpperCase()} 运行完成：${resp.message}`);
+      const marketPart = resp.market_closed ? '休市' : (resp.trading_now ? '交易中' : '非交易时段');
+      const slotPart = resp.active_pick_slot ? `，当前窗口 ${resp.active_pick_slot}` : '';
+      setMessage(`Agent ${activeAgent.toUpperCase()} 健康检查完成：${marketPart}${slotPart}`);
     } catch {
-      setMessage('Agent 运行失败');
+      setMessage('Agent 健康检查失败');
     } finally {
       setRunning(false);
       setTimeout(() => setMessage(null), 3000);
@@ -360,7 +362,7 @@ export default function ReturnsPage() {
               开启自动操作（仅A股）
             </label>
             <button onClick={handleSaveAgent} disabled={saving} className="px-3 py-1.5 rounded-full bg-emerald-500/15 text-emerald-400 text-xs font-bold disabled:opacity-50">{saving ? '保存中...' : '保存配置'}</button>
-            <button onClick={handleRunAgent} disabled={running} className="px-3 py-1.5 rounded-full bg-blue-500/15 text-blue-400 text-xs font-bold disabled:opacity-50">{running ? '运行中...' : `运行 Agent ${activeAgent.toUpperCase()}`}</button>
+            <button onClick={handleRunAgent} disabled={running} className="px-3 py-1.5 rounded-full bg-blue-500/15 text-blue-400 text-xs font-bold disabled:opacity-50">{running ? '检查中...' : `检查 Agent ${activeAgent.toUpperCase()}`}</button>
           </div>
 
           {agentStatus && (

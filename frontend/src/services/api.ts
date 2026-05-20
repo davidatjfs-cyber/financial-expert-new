@@ -260,6 +260,21 @@ export interface PortfolioAgentStatus {
   last_status?: string | null;
 }
 
+export interface PortfolioAgentHealth {
+  ok: boolean;
+  agent_id: string;
+  enabled: boolean;
+  agent_type: string;
+  trading_now: boolean;
+  market_closed: boolean;
+  market_state: string;
+  active_pick_slot?: string | null;
+  last_run_at?: number | null;
+  last_action?: string | null;
+  last_status?: string | null;
+  message: string;
+}
+
 export interface PortfolioAgentPickLog {
   id: string;
   agent_id: string;
@@ -618,8 +633,8 @@ export async function updatePortfolioAgentConfig(req: PortfolioAgentConfig) {
   });
 }
 
-export async function runPortfolioAgentNow(agentId: string = 'a') {
-  return fetchAPI<{ ok: boolean; message: string; trade?: PortfolioTrade }>(`/api/portfolio/agent/run?agent_id=${agentId}`, {
+export async function runPortfolioAgentHealthCheck(agentId: string = 'a') {
+  return fetchAPI<PortfolioAgentHealth>(`/api/portfolio/agent/run?agent_id=${agentId}`, {
     method: 'POST',
   });
 }

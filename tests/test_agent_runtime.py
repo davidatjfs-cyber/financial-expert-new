@@ -562,6 +562,70 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].detail, "继续观察")
 
+    def test_run_endpoint_is_health_check_only(self):
+        now = int(time.time())
+        with self.db.session_scope() as s:
+            cfg = s.get(self.models.PortfolioAgentConfig, "a")
+            if cfg is None:
+                cfg = self.models.PortfolioAgentConfig(id="a")
+                s.add(cfg)
+                s.flush()
+            cfg.enabled = "1"
+            cfg.agent_type = "rules"
+            pos = self.models.PortfolioPosition(
+                market="CN",
+                symbol="600690.SH",
+                name="海尔智家",
+                quantity=10000.0,
+                avg_cost=23.0,
+                created_at=now,
+                updated_at=now,
+            )
+            s.add(pos)
+            s.flush()
+            position_id = pos.id
+
+        with patch.object(self.api, "_cn_market_trading_now", return_value=True), \
+             patch.object(self.api, "_cn_market_closed", return_value=False), \
+             patch.object(self.api, "_cn_index_market_state", return_value="weak"):
+            result = self.api.run_portfolio_agent_now("a")
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.message, "health_checked")
+        with self.db.session_scope() as s:
+            trades = s.execute(self.api.select(self.models.PortfolioTrade)).scalars().all()
+        self.assertEqual(len(trades), 0)
+
+    def test_execute_endpoint_still_allows_explicit_trading(self):
+        now = int(time.time())
+        with self.db.session_scope() as s:
+            cfg = s.get(self.models.PortfolioAgentConfig, "a")
+            if cfg is None:
+                cfg = self.models.PortfolioAgentConfig(id="a")
+                s.add(cfg)
+                s.flush()
+            cfg.enabled = "1"
+            cfg.agent_type = "rules"
+            cfg.capital = 10_000_000.0
+            cfg.min_buy_quantity = 1000.0
+
+        summary_obj = types.SimpleNamespace(
+            agent_a=types.SimpleNamespace(total_market_value=0.0),
+            agent_b=types.SimpleNamespace(total_market_value=0.0),
+        )
+
+        with patch.object(self.api, "get_portfolio_alerts", return_value=[]), \
+             patch.object(self.api, "get_portfolio_summary", return_value=summary_obj), \
+             patch.object(self.api, "_portfolio_agent_pick_candidates", return_value=[("CN", "600010.SH", "测试一号", 10.0, "积极建仓")]), \
+             patch.object(self.api, "_cn_market_trading_now", return_value=True), \
+             patch.object(self.api, "_send_feishu_trade_notify"):
+            result = self.api.execute_portfolio_agent_now("a")
+
+        self.assertEqual(result.get("message"), "picked_new_stock")
+        trade = ((result.get("trades") or [None])[0] or {})
+        self.assertEqual(trade.get("symbol"), "600010.SH")
+        self.assertEqual(trade.get("side"), "BUY")
+
     def test_feishu_notifier_does_not_send_non_trade_alerts(self):
         alert = self.api.PortfolioAlertResponse(
             key="k",

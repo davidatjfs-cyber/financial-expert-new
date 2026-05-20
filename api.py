@@ -141,6 +141,18 @@ def _claim_agent_new_pick_slot(agent_id: str) -> Optional[str]:
     return None
 
 
+def _peek_agent_new_pick_slot(agent_id: str) -> Optional[str]:
+    if _cn_market_closed():
+        return None
+    now_bj = _dt.datetime.now(_ZoneInfo("Asia/Shanghai"))
+    for hour, minute in _AGENT_NEW_PICK_SCHEDULE.get(agent_id, ()):
+        slot_dt = now_bj.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        delta = (now_bj - slot_dt).total_seconds()
+        if 0 <= delta < 600:
+            return f"{now_bj.date().isoformat()}:{hour:02d}:{minute:02d}"
+    return None
+
+
 def _log_agent_pick_event(agent_id: str, slot_key: str, event: str, symbol: str | None = None, detail: str | None = None):
     now = int(time.time())
     name_or_sym = symbol or ""
@@ -591,6 +603,21 @@ class PortfolioAgentStatusResponse(BaseModel):
     last_run_at: Optional[int] = None
     last_action: Optional[str] = None
     last_status: Optional[str] = None
+
+
+class PortfolioAgentHealthResponse(BaseModel):
+    ok: bool = True
+    agent_id: str = "a"
+    enabled: bool = False
+    agent_type: str = "rules"
+    trading_now: bool = False
+    market_closed: bool = False
+    market_state: str = "unknown"
+    active_pick_slot: Optional[str] = None
+    last_run_at: Optional[int] = None
+    last_action: Optional[str] = None
+    last_status: Optional[str] = None
+    message: str = "health_checked"
 
 
 class PortfolioReturnsResponse(BaseModel):
@@ -4204,6 +4231,30 @@ def _agent_id_to_bucket(agent_id: str) -> str:
     return "b" if agent_id == "b" else "a"
 
 
+def _get_portfolio_agent_health(agent_id: str = "a") -> PortfolioAgentHealthResponse:
+    agent_id = agent_id.strip() or "a"
+    trading_now = _cn_market_trading_now()
+    market_closed = _cn_market_closed()
+    active_pick_slot = _peek_agent_new_pick_slot(agent_id)
+    market_state = "closed" if market_closed else _cn_index_market_state()
+    with session_scope() as s:
+        cfg = _get_or_create_agent_config(s, agent_id)
+        return PortfolioAgentHealthResponse(
+            ok=True,
+            agent_id=agent_id,
+            enabled=(cfg.enabled or "0") == "1",
+            agent_type=getattr(cfg, "agent_type", "rules") or "rules",
+            trading_now=trading_now,
+            market_closed=market_closed,
+            market_state=market_state,
+            active_pick_slot=active_pick_slot,
+            last_run_at=cfg.last_run_at,
+            last_action=cfg.last_action,
+            last_status=cfg.last_status,
+            message="health_checked",
+        )
+
+
 def _run_portfolio_agent_once(
     agent_id: str = "a",
     allow_new_pick: bool = True,
@@ -4581,13 +4632,25 @@ def update_portfolio_agent_config(req: PortfolioAgentConfigRequest):
             capital=float(cfg.capital or 10000000.0),
             min_buy_quantity=float(cfg.min_buy_quantity or 1000.0),
             last_run_at=cfg.last_run_at,
-            last_action=cfg.last_action,
-            last_status=cfg.last_status,
-        )
+        last_action=cfg.last_action,
+        last_status=cfg.last_status,
+    )
 
 
-@app.post("/api/portfolio/agent/run")
+@app.get("/api/portfolio/agent/health", response_model=PortfolioAgentHealthResponse)
+def get_portfolio_agent_health(agent_id: str = "a"):
+    return _get_portfolio_agent_health(agent_id)
+
+
+@app.post("/api/portfolio/agent/run", response_model=PortfolioAgentHealthResponse)
 def run_portfolio_agent_now(agent_id: str = "a"):
+    # Backward-compatible safety shim: older callers used /run for "check一下".
+    # Keep the route, but make it side-effect free so health checks can never place trades.
+    return _get_portfolio_agent_health(agent_id)
+
+
+@app.post("/api/portfolio/agent/execute")
+def execute_portfolio_agent_now(agent_id: str = "a"):
     return _run_portfolio_agent_once(agent_id.strip() or "a")
 
 
