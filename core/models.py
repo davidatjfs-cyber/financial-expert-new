@@ -104,6 +104,11 @@ class PortfolioPosition(Base):
     target_buy_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     target_sell_price: Mapped[float | None] = mapped_column(Float, nullable=True)
 
+    # Highest observed close since entry. Drives the trailing-stop logic in
+    # _effective_strategy_levels — once peak exceeds the TP1 zone we lift the
+    # stop to peak * trailing_drawdown so profits don't round-trip.
+    peak_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+
     created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
     updated_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
 

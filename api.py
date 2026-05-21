@@ -1025,6 +1025,14 @@ def _mark_strategy_exec_done(exec_key: str):
     _strategy_exec_today[exec_key] = time.strftime("%Y-%m-%d")
 
 
+# Trailing-stop activates once peak >= avg_cost * (1 + TRAILING_ACTIVATION_PCT).
+# Once active, effective stop = max(original stop, peak * (1 - TRAILING_DRAWDOWN_PCT)).
+# 5% activation matches TP1; 5% trailing drawdown is wide enough to survive
+# normal A-share intraday noise (~2-3%) but tight enough to capture pullbacks.
+TRAILING_ACTIVATION_PCT = 0.05
+TRAILING_DRAWDOWN_PCT = 0.05
+
+
 def _effective_strategy_levels(position: "PortfolioPosition", indicators) -> tuple[Optional[float], Optional[float], Optional[float]]:
     def _si_get(si, key: str):
         if si is None:
@@ -1066,7 +1074,52 @@ def _effective_strategy_levels(position: "PortfolioPosition", indicators) -> tup
     if stop_loss is None or stop_loss < cost_stop_loss:
         stop_loss = cost_stop_loss
 
+    # Trailing stop: once peak has gone past TP1 zone, lift the stop to a
+    # fraction below peak. This protects gains on positions that rally beyond
+    # TP1 without forcing them to be sold at the fixed TP2 level — the rest of
+    # the position keeps running until the trailing stop is hit.
+    peak = getattr(position, "peak_price", None)
+    try:
+        peak = float(peak) if peak is not None else None
+    except Exception:
+        peak = None
+    if peak is not None and peak >= avg_cost * (1.0 + TRAILING_ACTIVATION_PCT):
+        trailing_stop = peak * (1.0 - TRAILING_DRAWDOWN_PCT)
+        if stop_loss is None or trailing_stop > stop_loss:
+            stop_loss = trailing_stop
+
     return stop_loss, take_profit_1, take_profit_2
+
+
+def _update_position_peak_price(position: "PortfolioPosition", current_price: Optional[float], day_high: Optional[float] = None) -> Optional[float]:
+    """Return the updated peak price for a position. Caller persists the value.
+
+    Uses intraday high when available (so an intraday spike that lifts the
+    trailing stop sticks even if price closes lower), falling back to the
+    spot price. Idempotent and safe to call repeatedly.
+    """
+    qty = float(getattr(position, "quantity", 0.0) or 0.0)
+    if qty <= 0:
+        return getattr(position, "peak_price", None)
+    candidates: list[float] = []
+    for v in (current_price, day_high):
+        if v is None:
+            continue
+        try:
+            candidates.append(float(v))
+        except Exception:
+            continue
+    if not candidates:
+        return getattr(position, "peak_price", None)
+    obs = max(candidates)
+    existing = getattr(position, "peak_price", None)
+    try:
+        existing = float(existing) if existing is not None else None
+    except Exception:
+        existing = None
+    if existing is None or obs > existing:
+        return obs
+    return existing
 
 
 def _execute_strategy_alert_trade(alert: PortfolioAlertResponse, agent_id: str = "a") -> Optional[PortfolioTradeResponse]:
@@ -1139,7 +1192,37 @@ def _execute_strategy_alert_trade(alert: PortfolioAlertResponse, agent_id: str =
         if trade is not None:
             _mark_strategy_exec_done(exec_key)
         return trade
-    if alert.alert_type in {"target_sell", "signal_sell", "strategy_take_profit_2", "strategy_stop_loss"}:
+    # signal_sell is a momentum-reversal hint (RSI/MACD/KDJ), not a structural
+    # break — selling the full position on it whipsawed too often in backtest.
+    # Treat it like a TP1: trim half. strategy_stop_loss and TP2 keep full-exit
+    # semantics because they reflect price actually breaching defined risk levels.
+    if alert.alert_type == "signal_sell":
+        # Cool-down: don't let a freshly-entered position get trimmed by a noise
+        # reversal signal within the first 5 trading days. structural stops
+        # (strategy_stop_loss / TP2) still apply — only signal_sell is gated.
+        agent_source_value = _agent_id_to_source(agent_id)
+        last_buy_ts = 0
+        for t in trades:
+            if (getattr(t, "position_id", None) != agent_pos_id
+                    or (getattr(t, "side", "") or "").strip().upper() != "BUY"
+                    or (getattr(t, "source", "") or "").strip() != agent_source_value):
+                continue
+            ts = int(getattr(t, "created_at", 0) or 0)
+            if ts > last_buy_ts:
+                last_buy_ts = ts
+        if last_buy_ts > 0:
+            days_held = (time.time() - last_buy_ts) / 86400.0
+            if days_held < 5:
+                _log_agent_pick_event(
+                    agent_id, "alert", "signal_sell_blocked_too_recent",
+                    symbol=symbol, detail=f"days_held={days_held:.1f}",
+                )
+                return None
+        trade = _create_trade_at_price(agent_pos_id, "SELL", max(1.0, held_qty / 2.0), trade_price, _agent_id_to_source(agent_id))
+        if trade is not None:
+            _mark_strategy_exec_done(exec_key)
+        return trade
+    if alert.alert_type in {"target_sell", "strategy_take_profit_2", "strategy_stop_loss"}:
         trade = _create_trade_at_price(agent_pos_id, "SELL", held_qty, trade_price, _agent_id_to_source(agent_id))
         if trade is not None:
             _mark_strategy_exec_done(exec_key)
@@ -3253,32 +3336,95 @@ def _trade_realized_pnl_map(
     return realized_by_trade
 
 
-def _agent_dynamic_buy_quantity(min_buy_quantity: float, target_profit: Optional[float], deadline_ts: Optional[int], net_pnl: float, action: str, managed_capital: float) -> float:
+# Position-size targets as a fraction of total capital, by signal strength.
+# Backtests showed the original fixed-share sizing produced single-trade
+# contributions of <0.2% to total return — too granular to move the dial even
+# with a high hit rate. These percentages target meaningful single-trade impact
+# while staying inside the AGENT_SINGLE_STOCK_CAP risk limit.
+_AGENT_ACTION_TARGET_PCT = {
+    "强买信号": 0.08,    # ~8% — confident reversal trade
+    "积极建仓": 0.04,    # ~4% — second-tier conviction
+    "轻仓试探": 0.02,    # ~2% — exploratory
+    "关注等买点": 0.01,  # ~1% — token starter position
+}
+# Hard cap on per-symbol holdings as a fraction of total capital. Stops a
+# single bad pick from doing real damage even when KPI pressure is on.
+AGENT_SINGLE_STOCK_CAP_PCT = 0.15
+
+
+def _agent_dynamic_buy_quantity(
+    min_buy_quantity: float,
+    target_profit: Optional[float],
+    deadline_ts: Optional[int],
+    net_pnl: float,
+    action: str,
+    managed_capital: float,
+    *,
+    buy_price: Optional[float] = None,
+    capital: Optional[float] = None,
+    existing_symbol_value: float = 0.0,
+) -> float:
+    """Compute share quantity for a new buy.
+
+    Old contract: returns a share count, based on min_buy_quantity * units.
+    Kept intact when buy_price/capital are not supplied (backward compatible).
+
+    New contract (when both buy_price and capital are provided): sizes by
+    target % of capital, then converts to shares. Honors min_buy_quantity as
+    a floor, AGENT_SINGLE_STOCK_CAP_PCT as a hard ceiling for the symbol.
+    """
     base = max(1000.0, float(min_buy_quantity or 1000.0))
-    units = 1.0
-    action = (action or "").strip()
-    if action == "强买信号":
-        units += 1.0
-    elif action == "积极建仓":
-        units += 0.5
+    action_key = (action or "").strip()
+
+    # KPI/time-pressure multipliers — same intent as before, but reused for
+    # both the legacy share-count path and the new percentage path.
+    pressure_mult = 1.0
+    if action_key == "强买信号":
+        pressure_mult += 1.0
+    elif action_key == "积极建仓":
+        pressure_mult += 0.5
 
     if target_profit is not None and float(target_profit) > 0 and managed_capital > 0:
         target_profit_amount = managed_capital * float(target_profit) / 100.0
         progress = net_pnl / target_profit_amount if target_profit_amount > 0 else 0.0
         if progress < 0.2:
-            units += 1.0
+            pressure_mult += 1.0
         elif progress < 0.5:
-            units += 0.5
+            pressure_mult += 0.5
 
     if deadline_ts:
         days_left = max(0.0, (float(deadline_ts) - time.time()) / 86400.0)
         if days_left <= 3:
-            units += 1.0
+            pressure_mult += 1.0
         elif days_left <= 7:
-            units += 0.5
+            pressure_mult += 0.5
 
-    units = max(1.0, min(3.0, units))
-    return base * units
+    pressure_mult = max(1.0, min(3.0, pressure_mult))
+
+    # Legacy path — caller didn't supply a price reference. Keep the previous
+    # share-count semantics so non-agent callers (and old tests) still work.
+    if buy_price is None or capital is None or buy_price <= 0 or capital <= 0:
+        return base * pressure_mult
+
+    # Percentage-based sizing. Action drives baseline % of capital; KPI/time
+    # pressure scales it up to 2x. Then cap by AGENT_SINGLE_STOCK_CAP_PCT after
+    # accounting for what we already hold of the same symbol.
+    target_pct = _AGENT_ACTION_TARGET_PCT.get(action_key, _AGENT_ACTION_TARGET_PCT["关注等买点"])
+    target_pct = target_pct * pressure_mult / 2.0  # baseline×1 (no pressure) ≈ target_pct/2; ×3 (max pressure) ≈ 1.5×target_pct
+    target_pct = min(target_pct, AGENT_SINGLE_STOCK_CAP_PCT)
+
+    target_amount = float(capital) * target_pct
+    # If we already hold some of this symbol, only top up to the cap.
+    head_room = max(0.0, float(capital) * AGENT_SINGLE_STOCK_CAP_PCT - float(existing_symbol_value or 0.0))
+    target_amount = min(target_amount, head_room)
+    if target_amount <= 0:
+        return 0.0
+
+    qty_from_pct = target_amount / float(buy_price)
+    # Take the larger of: percentage-sized quantity, legacy min_buy floor.
+    # This way the new logic never under-buys vs. the old behavior.
+    qty = max(qty_from_pct, base)
+    return float(qty)
 
 
 def _compute_period_realized_pnl(trades: list[PortfolioTrade], today_ts: int, week_ts: int, month_ts: int, positions: list[PortfolioPosition] | None = None) -> dict[str, dict[str, float]]:
@@ -3789,6 +3935,46 @@ def _run_llm_agent_once(
     _src_holdings = _position_source_holdings(all_trades, positions, {p.id: 0.0 for p in positions})
     _agent_src = _src_holdings.get(agent_id, {})
 
+    # Cache of agent-source BUY trade timestamps per position_id, used to compute
+    # how long each held position has been open. Cheaper than re-iterating
+    # `all_trades` for every holding.
+    agent_source_value = _agent_id_to_source(agent_id)
+    earliest_buy_ts_by_pos: dict[str, int] = {}
+    for t in all_trades:
+        if (getattr(t, "source", "") or "").strip() != agent_source_value:
+            continue
+        if (getattr(t, "side", "") or "").strip().upper() != "BUY":
+            continue
+        pid = getattr(t, "position_id", None)
+        if not pid:
+            continue
+        ts = int(getattr(t, "created_at", 0) or 0)
+        if ts <= 0:
+            continue
+        existing = earliest_buy_ts_by_pos.get(pid)
+        if existing is None or ts < existing:
+            earliest_buy_ts_by_pos[pid] = ts
+
+    def _pct(num, den):
+        try:
+            num_f = float(num)
+            den_f = float(den)
+        except Exception:
+            return None
+        if den_f == 0:
+            return None
+        return round((num_f / den_f - 1.0) * 100.0, 2)
+
+    def _dist_pct(target, ref):
+        try:
+            target_f = float(target)
+            ref_f = float(ref)
+        except Exception:
+            return None
+        if ref_f == 0:
+            return None
+        return round((target_f - ref_f) / ref_f * 100.0, 2)
+
     holdings_info = []
     for pos in positions:
         agent_qty = float(agent_position_qty.get(pos.id, 0.0) or 0.0)
@@ -3817,19 +4003,41 @@ def _run_llm_agent_once(
         else:
             avg_cost = float(pos.avg_cost or 0)
         pnl_pct = ((current_price - avg_cost) / avg_cost * 100) if avg_cost > 0 else 0
+
+        # Extra decision context for the LLM. None values are tolerated downstream
+        # — we'd rather show "unknown" than fabricate.
+        earliest_ts = earliest_buy_ts_by_pos.get(pos.id)
+        days_held = round((time.time() - float(earliest_ts)) / 86400.0, 1) if earliest_ts else None
+        peak = None
+        try:
+            peak = float(pos.peak_price) if getattr(pos, "peak_price", None) is not None else None
+        except Exception:
+            peak = None
+        peak_pct_from_entry = _pct(peak, avg_cost) if (peak and avg_cost > 0) else None
+        ma20_val = getattr(indicators, "ma20", None)
+        ma60_val = getattr(indicators, "ma60", None)
+        dist_to_stop_pct = _dist_pct(stop_loss, current_price) if (stop_loss and current_price > 0) else None
+        dist_to_tp2_pct = _dist_pct(take_profit_2, current_price) if (take_profit_2 and current_price > 0) else None
+
         holdings_info.append({
             "symbol": symbol, "name": name, "market": market,
             "quantity": qty, "avg_cost": avg_cost, "current_price": current_price,
             "pnl_pct": round(pnl_pct, 2),
             "ma5": getattr(indicators, "ma5", None),
-            "ma20": getattr(indicators, "ma20", None),
-            "ma60": getattr(indicators, "ma60", None),
+            "ma20": ma20_val,
+            "ma60": ma60_val,
             "rsi14": getattr(indicators, "rsi14", None),
             "trend": getattr(indicators, "trend", None),
             "strategy_action": getattr(indicators, "strategy_action", None),
             "stop_loss": stop_loss,
             "take_profit_1": take_profit_1,
             "take_profit_2": take_profit_2,
+            # New decision-context fields below — empty values mean unavailable.
+            "days_held": days_held,
+            "peak_pct_from_entry": peak_pct_from_entry,
+            "dist_to_stop_pct": dist_to_stop_pct,
+            "dist_to_tp2_pct": dist_to_tp2_pct,
+            "price_vs_ma20_pct": _pct(current_price, ma20_val) if (current_price > 0 and ma20_val) else None,
         })
 
     alert_source = precomputed_alerts if precomputed_alerts is not None else get_portfolio_alerts()
@@ -3866,13 +4074,55 @@ def _run_llm_agent_once(
         action = (item.get("action") or "").strip()
         if market != "CN" or not symbol or action not in {"强买信号", "积极建仓", "轻仓试探", "关注等买点"}:
             continue
+        # Classify where current price sits in the buy zone — lets the LLM
+        # decide "wait for a pullback" vs "enter now at the high of the zone".
+        cp = item.get("current_price")
+        bz_low = item.get("strategy_buy_zone_low")
+        bz_high = item.get("strategy_buy_zone_high")
+        price_in_zone = None
+        try:
+            if cp is not None and bz_low is not None and bz_high is not None and float(bz_high) > float(bz_low):
+                pos_pct = (float(cp) - float(bz_low)) / (float(bz_high) - float(bz_low)) * 100.0
+                if pos_pct < 0:
+                    price_in_zone = "below"      # already cheaper than buy zone — usually a strong dip
+                elif pos_pct < 25:
+                    price_in_zone = "lower"
+                elif pos_pct < 75:
+                    price_in_zone = "middle"
+                elif pos_pct <= 100:
+                    price_in_zone = "upper"
+                else:
+                    price_in_zone = "above"      # above the zone — wait for pullback
+        except Exception:
+            price_in_zone = None
+        # 20-day momentum is the scanner's existing readout — "is this a dip
+        # within an uptrend, or a falling knife?". Surface it so LLM can judge
+        # whether the reversal candidate is the right kind of weakness.
+        mom_20d = None
+        try:
+            mv20 = item.get("momentum_20d")
+            mom_20d = round(float(mv20), 2) if mv20 is not None else None
+        except Exception:
+            mom_20d = None
+        # Reward/risk math — if dist_to_stop and dist_to_tp1/tp2 are known,
+        # surface their ratio so LLM can refuse trades with thin upside.
+        upside_to_tp2_pct = _dist_pct(item.get("strategy_take_profit_2"), cp) if (item.get("strategy_take_profit_2") and cp) else None
+        downside_to_stop_pct = _dist_pct(item.get("strategy_stop_loss"), cp) if (item.get("strategy_stop_loss") and cp) else None
+        rr_ratio = None
+        try:
+            if (upside_to_tp2_pct is not None and downside_to_stop_pct is not None
+                    and downside_to_stop_pct < 0):
+                rr_ratio = round(upside_to_tp2_pct / abs(downside_to_stop_pct), 2)
+        except Exception:
+            rr_ratio = None
+
         candidates.append({
             "symbol": symbol,
             "name": (item.get("name") or symbol).strip(),
             "action": action,
-            "current_price": item.get("current_price"),
-            "buy_zone_low": item.get("strategy_buy_zone_low"),
-            "buy_zone_high": item.get("strategy_buy_zone_high"),
+            "current_price": cp,
+            "buy_zone_low": bz_low,
+            "buy_zone_high": bz_high,
             "stop_loss": item.get("strategy_stop_loss"),
             "take_profit_1": item.get("strategy_take_profit_1"),
             "take_profit_2": item.get("strategy_take_profit_2"),
@@ -3887,6 +4137,12 @@ def _run_llm_agent_once(
             "sector": item.get("sector_name"),
             "sector_strength": item.get("sector_strength_score"),
             "buy_reason": item.get("buy_reason"),
+            # Decision-context additions:
+            "price_in_zone": price_in_zone,
+            "upside_to_tp2_pct": upside_to_tp2_pct,
+            "downside_to_stop_pct": downside_to_stop_pct,
+            "reward_risk_ratio": rr_ratio,
+            "momentum_20d_pct": mom_20d,
         })
         if len(candidates) >= 5:
             break
@@ -3937,24 +4193,43 @@ def _run_llm_agent_once(
 - unknown：数据不足，谨慎判断
 
 **持仓字段含义**
-- pnl_pct：该仓位的浮动盈亏百分比
+- pnl_pct：该仓位的浮动盈亏百分比（已实现+浮动）
 - trend：技术趋势（up/down/sideways）
 - rsi14：相对强弱指数，>70超买，<30超卖
 - ma5/ma20/ma60：5日/20日/60日均线价格
-- stop_loss：技术止损参考价（跌破该价位表示趋势破坏）
+- stop_loss：技术止损参考价（含移动止损，跌破该价位表示趋势破坏）
 - take_profit_1/2：第一/第二止盈参考价
+- days_held：该仓位已持有的天数（<5天慎卖，避免被噪声止损）
+- peak_pct_from_entry：该仓位从入场以来的最高浮盈百分比
+- dist_to_stop_pct：当前价距止损线还有多少百分比（负值=已跌破）
+- dist_to_tp2_pct：当前价距第二止盈位还有多少百分比（正值=未触达）
+- price_vs_ma20_pct：当前价相对MA20的百分比偏离
 
 **告警类型含义**
-- strategy_stop_loss：价格已跌破技术止损线，趋势可能反转
-- strategy_take_profit_1：价格触达第一止盈位（盈利约5%）
-- strategy_take_profit_2：价格触达第二止盈位（盈利约10%）
-- signal_buy/signal_sell：量化模型发出的买卖信号
+- strategy_stop_loss：价格已跌破技术止损线，趋势可能反转（执行=清仓）
+- strategy_take_profit_1：价格触达第一止盈位（执行=减半仓）
+- strategy_take_profit_2：价格触达第二止盈位（执行=清仓）
+- signal_buy/signal_sell：量化模型发出的买卖信号（signal_sell仅触发减半仓）
 - strategy_buy_zone：价格进入策略建仓区间
 
 **候选股字段含义**
 - action：选股强度（强买信号 > 积极建仓 > 轻仓试探 > 关注等买点）
 - buy_zone_low/high：建议买入的价格区间
 - buy_reason：量化模型给出的买入理由
+- price_in_zone：当前价在买入区间的位置（below/lower/middle/upper/above）
+  · below/lower：价格已回调到区间下半部，是较好的入场时机
+  · upper/above：价格偏高，可等待回调到 middle 或更低
+- upside_to_tp2_pct：从当前价到第二止盈的上涨空间（%）
+- downside_to_stop_pct：从当前价到止损线的下跌空间（负值，绝对值越小风险越低）
+- reward_risk_ratio：上涨空间/下跌空间的比值（≥2.0视为优质机会，<1.5谨慎）
+- momentum_20d_pct：20日动量百分比（极负且 timing_score 高=深度回调，反弹概率大）
+
+## 决策辅助原则
+- 若 candidate.price_in_zone == "above"（价格已脱离买入区间向上），建议等待回调，不要追高。
+- 若 candidate.reward_risk_ratio < 1.5，跳过该候选（性价比不足）。
+- 若 holding.days_held < 5 且未触发硬止损（dist_to_stop_pct > -2），不要因为浮亏而卖出，给波动一些时间。
+- 若 holding.peak_pct_from_entry >= 5 且 dist_to_tp2_pct < 2，可考虑主动 sell（已经接近TP2，避免冲高回落）。
+- 若 candidate.momentum_20d_pct <= -15 且 timing_score >= 96，说明已经深度回调到反弹临界点，是较好的买点。
 
 ## 决策输出格式（严格遵守JSON，不输出任何其他文字）
 单个动作：{"action": "sell"|"buy"|"hold", "symbol": "股票代码(如600036.SH)", "reason": "简短理由(20字内)"}
@@ -4143,6 +4418,25 @@ def _run_llm_agent_once(
                     s.flush()
                     _log_llm_event("llm_buy_created_position", symbol=symbol, detail="agent created new position")
                 candidate_action = str((candidate or {}).get("action") or "").strip() or "关注等买点"
+                # Compute how much of this symbol the agent already holds, so the
+                # sizing function can respect AGENT_SINGLE_STOCK_CAP_PCT.
+                existing_symbol_value = 0.0
+                try:
+                    for _exp in s.execute(select(PortfolioPosition).where(
+                        PortfolioPosition.market == "CN",
+                        PortfolioPosition.symbol == symbol,
+                        PortfolioPosition.source == agent_id,
+                    )).scalars().all():
+                        existing_qty = float(_exp.quantity or 0.0)
+                        if existing_qty > 0:
+                            try:
+                                _esp = get_stock_price(symbol=symbol, market="CN")
+                                _eprice = float(getattr(_esp, "price", 0) or 0)
+                            except Exception:
+                                _eprice = float(_exp.avg_cost or buy_price or 0)
+                            existing_symbol_value += existing_qty * _eprice
+                except Exception:
+                    existing_symbol_value = 0.0
                 qty = _agent_dynamic_buy_quantity(
                     min_qty,
                     cfg.target_profit,
@@ -4150,13 +4444,16 @@ def _run_llm_agent_once(
                     managed_net_pnl,
                     candidate_action,
                     available_capital,
+                    buy_price=buy_price,
+                    capital=capital,
+                    existing_symbol_value=existing_symbol_value,
                 )
                 max_qty = int(available_capital / buy_price) if buy_price > 0 else 0
                 if qty > max_qty:
                     qty = float(max_qty)
                 qty = math.floor(float(qty) / 100) * 100 if qty >= 100 else float(qty)
                 if qty < 100:
-                    _log_llm_event("llm_buy_rejected", symbol=symbol, detail="insufficient_capital")
+                    _log_llm_event("llm_buy_rejected", symbol=symbol, detail="insufficient_capital_or_capped")
                     last_status = f"llm_buy_rejected:insufficient_capital:{symbol}"
                     continue
                 if trading_now:
@@ -4413,6 +4710,14 @@ def _run_portfolio_agent_once(
                         agent_id,
                         capital,
                     )
+                    # Existing same-symbol holdings count toward the single-stock cap.
+                    existing_symbol_value = 0.0
+                    try:
+                        existing_qty = float(existing.quantity or 0.0)
+                        if existing_qty > 0:
+                            existing_symbol_value = existing_qty * buy_price
+                    except Exception:
+                        existing_symbol_value = 0.0
                     dynamic_qty = _agent_dynamic_buy_quantity(
                         float(cfg.min_buy_quantity or 1000.0),
                         cfg.target_profit,
@@ -4420,6 +4725,9 @@ def _run_portfolio_agent_once(
                         managed_net_pnl,
                         action,
                         available_capital,
+                        buy_price=buy_price,
+                        capital=capital,
+                        existing_symbol_value=existing_symbol_value,
                     )
                     max_qty = int(available_capital / buy_price) if buy_price > 0 else 0
                     if dynamic_qty > max_qty:
@@ -5214,6 +5522,33 @@ def get_portfolio_alerts():
         except Exception:
             for p in positions:
                 fetched.append(_fetch_for_position(p))
+
+    # Update peak_price for held positions before computing strategy levels.
+    # Trailing stop reads peak_price, so we want it fresh for this evaluation.
+    peak_updates: dict[str, float] = {}
+    for p, market, symbol, name, current_price, day_high, day_low, si in fetched:
+        new_peak = _update_position_peak_price(p, current_price, day_high)
+        try:
+            old_peak = float(p.peak_price) if p.peak_price is not None else None
+        except Exception:
+            old_peak = None
+        if new_peak is not None and (old_peak is None or new_peak > old_peak):
+            peak_updates[p.id] = float(new_peak)
+            # Reflect on the in-memory object so _effective_strategy_levels sees it.
+            p.peak_price = float(new_peak)
+    if peak_updates:
+        try:
+            with session_scope() as s:
+                for pid, peak_val in peak_updates.items():
+                    p_db = s.get(PortfolioPosition, pid)
+                    if p_db is None:
+                        continue
+                    cur = float(p_db.peak_price) if p_db.peak_price is not None else None
+                    if cur is None or peak_val > cur:
+                        p_db.peak_price = peak_val
+                        p_db.updated_at = int(time.time())
+        except Exception:
+            pass
 
     for p, market, symbol, name, current_price, day_high, day_low, si in fetched:
         if current_price is not None and p.target_buy_price is not None:
@@ -8890,7 +9225,12 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
 
         buy_price_aggressive_ok=aggressive_ok,
         buy_price_stable_ok=stable_ok,
-        sell_price_ok=sell_score >= 50 if sell_score else None,
+        # signal_sell drives auto-trim in _execute_strategy_alert_trade. Backtests
+        # showed score>=50 was too eager — a single MACD weakness plus mild MA20
+        # crack would fire it. Raise to >=55 (matches "强烈卖出" grade ≈65% of max)
+        # so the signal requires a genuine reversal pattern (e.g. RSI overbought
+        # AND MACD bar flipping red AND a clean MA20 break).
+        sell_price_ok=sell_score >= 55 if sell_score else None,
         signal_golden_cross=signal_golden_cross,
         signal_death_cross=signal_death_cross,
         signal_macd_bullish=signal_macd_bullish,

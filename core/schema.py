@@ -60,6 +60,14 @@ def _ensure_portfolio_schema() -> None:
         pass
 
     try:
+        pos_columns = {c["name"] for c in inspector.get_columns("portfolio_positions")}
+        if "peak_price" not in pos_columns:
+            with _engine.begin() as conn:
+                conn.execute(text("ALTER TABLE portfolio_positions ADD COLUMN peak_price FLOAT"))
+    except Exception:
+        pass
+
+    try:
         with _engine.begin() as conn:
             conn.execute(text("UPDATE portfolio_agent_configs SET id='a' WHERE id='default'"))
     except Exception:
@@ -131,6 +139,7 @@ def _migrate_position_source_split() -> None:
                 avg_cost FLOAT DEFAULT 0.0,
                 target_buy_price FLOAT,
                 target_sell_price FLOAT,
+                peak_price FLOAT,
                 created_at INTEGER,
                 updated_at INTEGER,
                 PRIMARY KEY (id),

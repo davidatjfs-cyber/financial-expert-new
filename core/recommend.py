@@ -126,6 +126,12 @@ class StockScore:
     turnover_rate: Optional[float] = None
     north_holding_pct: Optional[float] = None
 
+    # Breakout-style timing — complements timing_score_total (which models
+    # mean-reversion / oversold-bounce). breakout_score is high when a stock
+    # is trending up with confirming volume; it's the trigger used when the
+    # broader HS300 regime is "not_weak" and the dip-buy path is unavailable.
+    breakout_score: Optional[float] = None
+
     reason: str = ""
     rank: int = 0
 
@@ -574,6 +580,117 @@ def _score_timing(rsi14: Optional[float], boll_position: Optional[float],
     if vol_spike:
         score += 5.0
     return max(-20.0, score)
+
+
+def _score_breakout_timing(
+    rsi14: Optional[float],
+    ma5: Optional[float],
+    ma20: Optional[float],
+    ma60: Optional[float],
+    close: Optional[float],
+    ret_5d: Optional[float],
+    ret_10d: Optional[float],
+    vol_ratio: Optional[float],
+    kdj_golden: Optional[bool],
+    macd_golden: Optional[bool],
+    dist_ma60_pct: Optional[float],
+) -> float:
+    """Breakout-style timing score (0-100).
+
+    Designed for HS300 not_weak regime where the mean-reversion timing model
+    (`_score_timing`) won't fire because nothing is deeply oversold. This
+    rewards stocks in confirmed uptrends with volume backing — the kind of
+    setup that has positive expectancy when the market regime is favorable.
+    """
+    score = 0.0
+
+    # Bullish MA alignment (MA5 > MA20 > MA60). Core requirement for a
+    # legitimate uptrend; without it we don't credit a "breakout".
+    if ma5 is not None and ma20 is not None and ma60 is not None:
+        try:
+            if float(ma5) > float(ma20) > float(ma60):
+                score += 28.0
+            elif float(ma5) > float(ma20):
+                score += 12.0
+        except Exception:
+            pass
+
+    # RSI sweet-spot: momentum without exhaustion. <50 is no momentum;
+    # >75 is exhaustion (likely to revert before continuation).
+    if rsi14 is not None:
+        try:
+            r = float(rsi14)
+            if 52.0 <= r <= 65.0:
+                score += 18.0
+            elif 65.0 < r <= 72.0:
+                score += 8.0
+            elif 45.0 <= r < 52.0:
+                score += 4.0
+            elif r > 75.0:
+                score -= 8.0
+            elif r < 40.0:
+                score -= 10.0
+        except Exception:
+            pass
+
+    # Price clear of MA60 — confirms the trend has held above the slow
+    # average. Too high above MA60 (>20%) is overextended. Below MA60 is
+    # disqualifying for a breakout setup, so we penalize it heavily.
+    if dist_ma60_pct is not None:
+        try:
+            d = float(dist_ma60_pct)
+            if 3.0 <= d <= 12.0:
+                score += 14.0
+            elif 12.0 < d <= 20.0:
+                score += 6.0
+            elif 0.0 <= d < 3.0:
+                score += 3.0
+            elif d > 20.0:
+                score -= 4.0
+            else:
+                # Below MA60 — this is fundamentally not a breakout setup;
+                # subtract enough to disqualify even with other positives.
+                score -= 14.0
+        except Exception:
+            pass
+
+    # Recent 5-day return: healthy advance, not parabolic.
+    if ret_5d is not None:
+        try:
+            r5 = float(ret_5d)
+            if 1.0 <= r5 <= 6.0:
+                score += 14.0
+            elif 6.0 < r5 <= 12.0:
+                score += 5.0
+            elif r5 > 12.0:
+                score -= 5.0      # already extended, late
+            elif -2.0 <= r5 < 1.0:
+                score += 3.0      # neutral consolidation OK
+            else:
+                score -= 8.0      # actually falling — not a breakout
+        except Exception:
+            pass
+
+    # Volume confirmation — breakouts on shrinking volume are unreliable.
+    if vol_ratio is not None:
+        try:
+            vr = float(vol_ratio)
+            if vr >= 1.5:
+                score += 14.0
+            elif vr >= 1.2:
+                score += 7.0
+            elif vr < 0.8:
+                score -= 5.0
+        except Exception:
+            pass
+
+    # Confirmation signals.
+    if macd_golden is True:
+        score += 6.0
+    if kdj_golden is True:
+        score += 6.0
+
+    return max(0.0, min(100.0, score))
 
 
 def _score_momentum(momentum_20d: Optional[float], momentum_60d: Optional[float],
@@ -1333,6 +1450,19 @@ def run_scan(top_n: int = 20,
             s.timing_score_total, tech.get("rsi14"), tech.get("slope_pct"),
             vol_ratio, ret_5d, ret_10d, dist_ma60_pct)
 
+        # Breakout-style timing: alternative entry trigger for trending markets.
+        # Reads from the same tech bundle so we don't refetch anything.
+        s.breakout_score = _score_breakout_timing(
+            rsi14=tech.get("rsi14"),
+            ma5=ma5, ma20=ma20, ma60=ma60,
+            close=close,
+            ret_5d=ret_5d, ret_10d=ret_10d,
+            vol_ratio=vol_ratio,
+            kdj_golden=kdj_golden,
+            macd_golden=tech.get("signal_golden_cross"),
+            dist_ma60_pct=dist_ma60_pct,
+        )
+
         scores.append(s)
 
     if use_neutralize:
@@ -1358,13 +1488,42 @@ def run_scan(top_n: int = 20,
     scores = _apply_risk_controls(scores)
 
     results = []
+    # In an A-share weak regime the dip-buy path (timing_score >= 96) is the
+    # main entry trigger. In not_weak regimes that path is silent by design
+    # — there is no oversold setup. Breakout path only activates outside the
+    # weak regime AND only when the sector is genuinely strong (≥60), to
+    # avoid chasing isolated breakouts in dying sectors.
+    BREAKOUT_HARD_THRESHOLD = 75.0
+    BREAKOUT_SECTOR_THRESHOLD = 60.0
+
     for i, s in enumerate(scores[:top_n]):
         s.rank = i + 1
         s.reason = _generate_factor_reason(s)
         qt = s.quality_score_total or 0
         tt = s.timing_score_total or 0
+        bt = s.breakout_score or 0
+        sector_strength_score = s.sector_strength_score if s.sector_strength_score is not None else 50.0
         if qt >= QUALITY_THRESHOLD and tt >= 96 and cn_market_allows_new_buy:
+            s.action = "强买信号"  # mean-reversion bucket (weak regime)
+        elif (
+            qt >= QUALITY_THRESHOLD
+            and not cn_market_allows_new_buy
+            and bt >= BREAKOUT_HARD_THRESHOLD
+            and sector_strength_score >= BREAKOUT_SECTOR_THRESHOLD
+        ):
+            # Trend-continuation bucket (not_weak regime). Requires strong
+            # sector backing because breakout strategies depend on the broader
+            # group being in motion.
             s.action = "强买信号"
+        elif (
+            qt >= QUALITY_THRESHOLD
+            and not cn_market_allows_new_buy
+            and bt >= 60.0
+            and sector_strength_score >= 50.0
+        ):
+            # Softer breakout setup — surface as "积极建仓" so it appears in
+            # candidates but doesn't auto-execute as a strong-buy.
+            s.action = "积极建仓"
         elif qt >= QUALITY_THRESHOLD and tt >= 80:
             s.action = "关注等买点"
         elif qt >= QUALITY_THRESHOLD and tt >= 0:
@@ -1375,7 +1534,6 @@ def run_scan(top_n: int = 20,
             s.action = "优质远离买点"
         else:
             s.action = "暂不关注"
-        sector_strength_score = s.sector_strength_score if s.sector_strength_score is not None else 50.0
         if sector_strength_score < 25:
             s.action = _downgrade_action(s.action, 2)
         elif sector_strength_score < 35:
