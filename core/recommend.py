@@ -1211,13 +1211,22 @@ def _fetch_batch_technicals(stocks: list[dict], get_indicators_fn,
 
 # ==================== Risk Control ====================
 
+# Per-sector cap on candidates returned by the scanner. 2 was too restrictive
+# in practice: when a sector is genuinely strong (e.g. semiconductors, AI),
+# all the worthwhile setups cluster there and we'd discard 3rd-best of a strong
+# sector in favor of a 1st-best of a weak sector. 3 gives the LLM room to pick
+# the best of a strong group; downstream agent-level checks still enforce
+# per-symbol and per-bucket exposure caps.
+_PER_SECTOR_CANDIDATE_CAP = 3
+
+
 def _apply_risk_controls(scores: list[StockScore]) -> list[StockScore]:
     sector_counts: dict[str, int] = {}
     filtered = []
     for s in scores:
         code = s.symbol.split(".")[0]
         sec = _STOCK_SECTOR_MAP.get(code, "其他")
-        if sector_counts.get(sec, 0) >= 2:
+        if sector_counts.get(sec, 0) >= _PER_SECTOR_CANDIDATE_CAP:
             continue
         sector_counts[sec] = sector_counts.get(sec, 0) + 1
         filtered.append(s)

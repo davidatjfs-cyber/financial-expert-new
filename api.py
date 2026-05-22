@@ -3795,6 +3795,15 @@ def _portfolio_agent_candidate_score(item: dict) -> tuple[float, float, float, f
     return action_score, total_score, buy_score, trend_score, rsi_score - rank / 10000.0
 
 
+# Agent-A secondary-candidate gate. When the scanner produces zero
+# "强买信号"-bucket candidates (e.g. HS300 is not_weak and no stock clears the
+# strict breakout bar), fall back to "积极建仓" candidates that are individually
+# strong on quality AND sit in a strong sector. This keeps Agent A from sitting
+# idle for days at a time without lowering the quality bar on what it does buy.
+AGENT_A_SECONDARY_MIN_SECTOR_STRENGTH = 70.0
+AGENT_A_SECONDARY_MIN_QUALITY = 35.0
+
+
 def _portfolio_agent_pick_candidates(min_buy_quantity: float, limit: int = 5) -> list[tuple[str, str, str, float, str]]:
     from core.recommend import get_latest_scan, run_scan, save_scan_result
 
@@ -3813,7 +3822,8 @@ def _portfolio_agent_pick_candidates(min_buy_quantity: float, limit: int = 5) ->
         except Exception:
             latest = []
 
-    candidates: list[tuple[tuple[float, float, float, float, float], tuple[str, str, str, float, str]]] = []
+    primary: list[tuple[tuple, tuple[str, str, str, float, str]]] = []
+    secondary: list[tuple[tuple, tuple[str, str, str, float, str]]] = []
     for item in latest:
         market = (item.get("market") or "CN").strip().upper()
         symbol = (item.get("symbol") or "").strip().upper()
@@ -3822,10 +3832,6 @@ def _portfolio_agent_pick_candidates(min_buy_quantity: float, limit: int = 5) ->
         if market != "CN" or not symbol:
             continue
         action = (item.get("action") or "").strip()
-        # Agent A is configured for hit rate over coverage: only open new positions
-        # when the scanner marks the stock as the strongest bucket.
-        if action != "强买信号":
-            continue
         buy_price = item.get("current_price") or item.get("buy_price_aggressive")
         try:
             buy_price = float(buy_price)
@@ -3833,14 +3839,31 @@ def _portfolio_agent_pick_candidates(min_buy_quantity: float, limit: int = 5) ->
             buy_price = 0.0
         if buy_price <= 0:
             continue
-        candidates.append((
-            _portfolio_agent_candidate_score(item),
-            (market, symbol, name, buy_price, action),
-        ))
-    if not candidates:
+        score = _portfolio_agent_candidate_score(item)
+        entry = (market, symbol, name, buy_price, action)
+        if action == "强买信号":
+            primary.append((score, entry))
+        elif action == "积极建仓":
+            try:
+                sector_strength = float(item.get("sector_strength_score") or 0.0)
+            except Exception:
+                sector_strength = 0.0
+            try:
+                quality = float(item.get("quality_score_total") or 0.0)
+            except Exception:
+                quality = 0.0
+            # Only admit as secondary if both gates are met. These thresholds
+            # are deliberately stricter than the scanner's own "积极建仓" gate
+            # to compensate for the lower bucket label.
+            if (sector_strength >= AGENT_A_SECONDARY_MIN_SECTOR_STRENGTH
+                    and quality >= AGENT_A_SECONDARY_MIN_QUALITY):
+                secondary.append((score, entry))
+
+    chosen = primary if primary else secondary
+    if not chosen:
         return []
-    candidates.sort(key=lambda item: item[0], reverse=True)
-    return [item[1] for item in candidates[: max(1, min(int(limit or 1), 5))]]
+    chosen.sort(key=lambda item: item[0], reverse=True)
+    return [item[1] for item in chosen[: max(1, min(int(limit or 1), 5))]]
 
 
 def _portfolio_agent_pick_candidate(min_buy_quantity: float) -> Optional[tuple[str, str, str, float, str]]:
@@ -4060,13 +4083,19 @@ def _run_llm_agent_once(
     latest = []
     if allow_new_pick:
         try:
-            latest = run_scan(top_n=10, get_indicators_fn=get_stock_indicators)
+            # Widened from top_n=10 to 20 so the LLM has room to be selective.
+            # See AGENT_B_CANDIDATES_MAX below for the prompt-side cap.
+            latest = run_scan(top_n=20, get_indicators_fn=get_stock_indicators)
             if latest:
                 save_scan_result(latest)
         except Exception:
             latest = _get_latest_scan_compat(get_latest_scan, max_age_seconds=1800)
         if not latest:
             latest = _get_latest_scan_compat(get_latest_scan, max_age_seconds=1800)
+    # Cap the candidate list shown to the LLM. 15 gives the model meaningful
+    # breadth (e.g. 3 strong sectors × ~5 stocks each) without bloating the
+    # prompt to the point where it stops reading carefully.
+    AGENT_B_CANDIDATES_MAX = 15
     candidates = []
     for item in latest:
         market = (item.get("market") or "CN").strip().upper()
@@ -4144,7 +4173,7 @@ def _run_llm_agent_once(
             "reward_risk_ratio": rr_ratio,
             "momentum_20d_pct": mom_20d,
         })
-        if len(candidates) >= 5:
+        if len(candidates) >= AGENT_B_CANDIDATES_MAX:
             break
     candidate_symbols = {str(item.get("symbol") or "").upper() for item in candidates}
     held_symbols = {(h.get("symbol") or "").upper() for h in holdings_info}
@@ -4177,7 +4206,7 @@ def _run_llm_agent_once(
 你的核心价值是【综合判断】 — 如果一个决策可以用 if-else 完成，那就不需要你。规则能做的事，系统已经做了；你只做规则做不了的事：**权衡多个互相竞争的信号，做出最优选择**。
 
 ## 你拥有的决策权
-1. **候选股筛选**：候选股已经过质量过滤，但里面可能5个都买、也可能1个都不该买。你决定挑0~2只真正值得下注的。
+1. **候选股筛选**：候选股池（最多15只）已经过质量预筛，但里面可能多只都值得买、也可能一只都不该买。你的核心工作是从中精选出真正值得下大注的 0~2 只 —— 多了不行，宁缺毋滥比盲目分散更重要。
 2. **时机判断**：决定"立即买入"还是"等回调到 buy_zone_low 附近再买"。
 3. **加仓判断**：已持仓如果出现新的有利条件（如行业突然走强），可考虑加仓。
 4. **主动减仓**：在硬告警触发前，识别风险累积，主动减仓锁定利润或控制损失。

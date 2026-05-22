@@ -1037,6 +1037,155 @@ class AgentRuntimeTests(unittest.TestCase):
             )).scalars().first()
             self.assertAlmostEqual(float(p_db.peak_price or 0), 1650.0)
 
+    def test_agent_a_candidates_primary_uses_strong_buy_only(self):
+        """当存在强买信号时，Agent A 只用强买信号，不混入次级候选。"""
+        fake_scan = [
+            {
+                "market": "CN", "symbol": "600001.SH", "name": "A1",
+                "action": "强买信号", "current_price": 10.0,
+                "quality_score_total": 40.0, "sector_strength_score": 60.0,
+            },
+            {
+                "market": "CN", "symbol": "600002.SH", "name": "A2",
+                "action": "积极建仓", "current_price": 10.0,
+                "quality_score_total": 50.0, "sector_strength_score": 90.0,
+            },
+        ]
+        fake_recommend = types.ModuleType("core.recommend")
+        fake_recommend.get_latest_scan = lambda *a, **kw: fake_scan
+        fake_recommend.run_scan = lambda *a, **kw: fake_scan
+        fake_recommend.save_scan_result = lambda *a, **kw: None
+        sys.modules["core.recommend"] = fake_recommend
+
+        result = self.api._portfolio_agent_pick_candidates(1000.0, limit=5)
+        # 应该只有 600001.SH (强买信号)，不含 600002.SH (即使次级符合 sector/quality 阈值)
+        symbols = [c[1] for c in result]
+        self.assertIn("600001.SH", symbols)
+        self.assertNotIn("600002.SH", symbols)
+
+    def test_agent_a_candidates_falls_back_to_secondary_when_no_strong_buy(self):
+        """无强买信号时，回退到 积极建仓 + sector≥70 + quality≥35。"""
+        fake_scan = [
+            {
+                "market": "CN", "symbol": "600003.SH", "name": "B1",
+                "action": "积极建仓", "current_price": 10.0,
+                "quality_score_total": 40.0, "sector_strength_score": 75.0,
+            },
+            # 不满足 secondary 条件的 — 行业强度不足
+            {
+                "market": "CN", "symbol": "600004.SH", "name": "B2",
+                "action": "积极建仓", "current_price": 10.0,
+                "quality_score_total": 40.0, "sector_strength_score": 50.0,
+            },
+            # 不满足 secondary 条件的 — 质量不足
+            {
+                "market": "CN", "symbol": "600005.SH", "name": "B3",
+                "action": "积极建仓", "current_price": 10.0,
+                "quality_score_total": 30.0, "sector_strength_score": 80.0,
+            },
+        ]
+        fake_recommend = types.ModuleType("core.recommend")
+        fake_recommend.get_latest_scan = lambda *a, **kw: fake_scan
+        fake_recommend.run_scan = lambda *a, **kw: fake_scan
+        fake_recommend.save_scan_result = lambda *a, **kw: None
+        sys.modules["core.recommend"] = fake_recommend
+
+        result = self.api._portfolio_agent_pick_candidates(1000.0, limit=5)
+        symbols = [c[1] for c in result]
+        self.assertIn("600003.SH", symbols)
+        self.assertNotIn("600004.SH", symbols)  # sector<70
+        self.assertNotIn("600005.SH", symbols)  # quality<35
+
+    def test_agent_a_no_candidates_when_neither_strong_buy_nor_qualified_secondary(self):
+        """两档都不符合时返回空，不会乱兜底。"""
+        fake_scan = [
+            {
+                "market": "CN", "symbol": "600006.SH", "name": "C1",
+                "action": "积极建仓", "current_price": 10.0,
+                "quality_score_total": 30.0, "sector_strength_score": 60.0,
+            },
+            {
+                "market": "CN", "symbol": "600007.SH", "name": "C2",
+                "action": "轻仓试探", "current_price": 10.0,
+                "quality_score_total": 50.0, "sector_strength_score": 85.0,
+            },
+        ]
+        fake_recommend = types.ModuleType("core.recommend")
+        fake_recommend.get_latest_scan = lambda *a, **kw: fake_scan
+        fake_recommend.run_scan = lambda *a, **kw: fake_scan
+        fake_recommend.save_scan_result = lambda *a, **kw: None
+        sys.modules["core.recommend"] = fake_recommend
+
+        result = self.api._portfolio_agent_pick_candidates(1000.0, limit=5)
+        self.assertEqual(result, [])
+
+    def test_agent_b_candidates_cap_widened_to_15(self):
+        """LLM 收到的候选股池上限是 15，而不是旧的 5。"""
+        # 构造 20 支 active 候选
+        fake_scan = [
+            {
+                "market": "CN", "symbol": f"60{i:04d}.SH", "name": f"S{i}",
+                "action": "积极建仓",
+                "current_price": 10.0,
+                "strategy_buy_zone_low": 9.5,
+                "strategy_buy_zone_high": 10.5,
+                "strategy_stop_loss": 9.0,
+                "strategy_take_profit_2": 11.0,
+                "quality_score_total": 40.0,
+                "timing_score_total": 60.0,
+                "sector_strength_score": 60.0,
+                "momentum_20d_pct": -3.0,
+            }
+            for i in range(20)
+        ]
+        fake_recommend = types.ModuleType("core.recommend")
+        fake_recommend.get_latest_scan = lambda *a, **kw: fake_scan
+        fake_recommend.run_scan = lambda *a, **kw: fake_scan
+        fake_recommend.save_scan_result = lambda *a, **kw: None
+        sys.modules["core.recommend"] = fake_recommend
+
+        captured = {}
+        def _cap(sp, up, **kw):
+            captured["user"] = up
+            return json.dumps({"action": "hold", "symbol": None, "reason": "test"}, ensure_ascii=False)
+        fake_qwen = types.ModuleType("core.llm_qwen")
+        fake_qwen.call_llm = _cap
+        sys.modules["core.llm_qwen"] = fake_qwen
+
+        with self.db.session_scope() as s:
+            cfg = s.get(self.models.PortfolioAgentConfig, "b")
+            if cfg is None:
+                cfg = self.models.PortfolioAgentConfig(id="b")
+                s.add(cfg)
+                s.flush()
+            cfg.enabled = "1"
+            cfg.agent_type = "llm"
+            cfg.capital = 10_000_000.0
+
+        summary_obj = types.SimpleNamespace(
+            agent_a=types.SimpleNamespace(total_market_value=0.0),
+            agent_b=types.SimpleNamespace(total_market_value=0.0),
+        )
+        with patch.object(self.api, "get_stock_price", return_value=types.SimpleNamespace(price=10.0)), \
+             patch.object(self.api, "get_stock_indicators", return_value=None), \
+             patch.object(self.api, "get_portfolio_alerts", return_value=[]), \
+             patch.object(self.api, "get_portfolio_summary", return_value=summary_obj), \
+             patch.object(self.api, "_cn_market_trading_now", return_value=True), \
+             patch.object(self.api, "_send_feishu_trade_notify"):
+            with self.db.session_scope() as s:
+                cfg = s.get(self.models.PortfolioAgentConfig, "b")
+            self.api._run_llm_agent_once("b", cfg, allow_new_pick=True,
+                                         pick_slot_key="2026-05-22:10:00",
+                                         precomputed_alerts=[])
+
+        user_prompt = captured.get("user", "")
+        # 候选列表的 symbol 应该有 15 个（候选池上限），而不是 5 个
+        import re
+        symbols_in_prompt = re.findall(r'"60\d{4}\.SH"', user_prompt)
+        # 去重（因为持仓字段里可能也有同样的symbol）
+        unique = set(symbols_in_prompt)
+        self.assertGreaterEqual(len(unique), 15, f"prompt 应该包含至少15个候选 symbol，实际 {len(unique)}")
+
     def test_dynamic_buy_quantity_legacy_mode_unchanged(self):
         """Without buy_price/capital, behavior must match the original share-count contract."""
         # action=强买信号 → +1, target progress<20% → +1 → units=3 (capped) → 1000*3=3000
