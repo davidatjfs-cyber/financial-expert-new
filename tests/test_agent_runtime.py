@@ -421,8 +421,9 @@ class AgentRuntimeTests(unittest.TestCase):
             "market": "CN",
             "symbol": "600011.SH",
             "name": "测试二号",
-            "action": "积极建仓",
+            "action": "强买信号",
             "current_price": 12.3,
+            "auto_trade_eligible": True,
         }]
         fake_recommend.run_scan = lambda *args, **kwargs: []
         fake_recommend.save_scan_result = lambda results: None
@@ -475,8 +476,9 @@ class AgentRuntimeTests(unittest.TestCase):
             "market": "CN",
             "symbol": "600011.SH",
             "name": "测试二号",
-            "action": "积极建仓",
+            "action": "强买信号",
             "current_price": 12.3,
+            "auto_trade_eligible": True,
         }]
         fake_recommend.run_scan = lambda *args, **kwargs: []
         fake_recommend.save_scan_result = lambda results: None
@@ -561,6 +563,60 @@ class AgentRuntimeTests(unittest.TestCase):
             )).scalars().all()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].detail, "继续观察")
+
+    def test_llm_agent_rejects_watch_only_breakout_buy(self):
+        with self.db.session_scope() as s:
+            cfg = s.get(self.models.PortfolioAgentConfig, "b")
+            if cfg is None:
+                cfg = self.models.PortfolioAgentConfig(id="b")
+                s.add(cfg)
+                s.flush()
+            cfg.enabled = "1"
+            cfg.agent_type = "llm"
+            cfg.capital = 10_000_000.0
+            cfg.min_buy_quantity = 10000.0
+
+        fake_qwen = types.ModuleType("core.llm_qwen")
+        fake_qwen.call_llm = lambda *args, **kwargs: json.dumps({
+            "action": "buy",
+            "symbol": "600012",
+            "reason": "想买 breakout",
+        }, ensure_ascii=False)
+        sys.modules["core.llm_qwen"] = fake_qwen
+
+        fake_recommend = types.ModuleType("core.recommend")
+        fake_recommend.get_latest_scan = lambda: [{
+            "market": "CN",
+            "symbol": "600012.SH",
+            "name": "观察候选",
+            "action": "积极建仓",
+            "current_price": 12.8,
+            "auto_trade_eligible": False,
+        }]
+        fake_recommend.run_scan = lambda *args, **kwargs: []
+        fake_recommend.save_scan_result = lambda results: None
+        sys.modules["core.recommend"] = fake_recommend
+
+        price_obj = types.SimpleNamespace(price=12.8)
+        summary_obj = types.SimpleNamespace(
+            agent_a=types.SimpleNamespace(total_market_value=0.0),
+            agent_b=types.SimpleNamespace(total_market_value=0.0),
+        )
+
+        with patch.object(self.api, "get_stock_price", return_value=price_obj), \
+             patch.object(self.api, "get_stock_indicators", return_value=None), \
+             patch.object(self.api, "get_portfolio_alerts", return_value=[]), \
+             patch.object(self.api, "get_portfolio_summary", return_value=summary_obj), \
+             patch.object(self.api, "_cn_market_trading_now", return_value=True), \
+             patch.object(self.api, "_send_feishu_trade_notify"):
+            with self.db.session_scope() as s:
+                cfg = s.get(self.models.PortfolioAgentConfig, "b")
+            result = self.api._run_llm_agent_once("b", cfg, allow_new_pick=True, pick_slot_key="2026-05-07:17:05", precomputed_alerts=[])
+
+        self.assertEqual(result.get("message"), "llm_hold")
+        with self.db.session_scope() as s:
+            trades = s.execute(self.api.select(self.models.PortfolioTrade)).scalars().all()
+        self.assertEqual(len(trades), 0)
 
     def test_run_endpoint_is_health_check_only(self):
         now = int(time.time())
@@ -913,7 +969,7 @@ class AgentRuntimeTests(unittest.TestCase):
     def test_trailing_stop_inactive_below_tp1_zone(self):
         """Peak <5% above cost: trailing stop should not lift the stop."""
         position = types.SimpleNamespace(
-            quantity=1000.0, avg_cost=100.0, peak_price=103.0,
+            quantity=1000.0, avg_cost=100.0, peak_price=103.0, source="manual",
         )
         indicators = types.SimpleNamespace(
             strategy_stop_loss=90.0,
@@ -929,7 +985,7 @@ class AgentRuntimeTests(unittest.TestCase):
     def test_trailing_stop_lifts_stop_when_peak_above_tp1(self):
         """Peak well above TP1: stop should rise to peak*(1-trailing_pct)."""
         position = types.SimpleNamespace(
-            quantity=1000.0, avg_cost=100.0, peak_price=120.0,
+            quantity=1000.0, avg_cost=100.0, peak_price=120.0, source="manual",
         )
         indicators = types.SimpleNamespace(
             strategy_stop_loss=90.0,
@@ -944,7 +1000,7 @@ class AgentRuntimeTests(unittest.TestCase):
     def test_trailing_stop_does_not_lower_existing_stop(self):
         """When original stop is already higher than trailing, keep original."""
         position = types.SimpleNamespace(
-            quantity=1000.0, avg_cost=100.0, peak_price=106.0,
+            quantity=1000.0, avg_cost=100.0, peak_price=106.0, source="manual",
         )
         # peak=106 → trailing stop = 100.7
         # but if original stop is 102, we should keep 102 (higher).
@@ -959,7 +1015,7 @@ class AgentRuntimeTests(unittest.TestCase):
     def test_trailing_stop_inactive_for_flat_or_no_position(self):
         """No quantity → return raw stops, no trailing."""
         position = types.SimpleNamespace(
-            quantity=0.0, avg_cost=100.0, peak_price=200.0,
+            quantity=0.0, avg_cost=100.0, peak_price=200.0, source="manual",
         )
         indicators = types.SimpleNamespace(
             strategy_stop_loss=90.0,
@@ -970,6 +1026,66 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertAlmostEqual(stop, 90.0)
         self.assertAlmostEqual(tp1, 105.0)
         self.assertAlmostEqual(tp2, 110.0)
+
+    def test_agent_reversal_levels_use_wider_profit_targets(self):
+        position = types.SimpleNamespace(
+            quantity=1000.0, avg_cost=100.0, peak_price=112.0, source="a",
+        )
+        indicators = types.SimpleNamespace(
+            strategy_stop_loss=90.0,
+            strategy_take_profit_1=105.0,
+            strategy_take_profit_2=110.0,
+        )
+
+        stop, tp1, tp2 = self.api._effective_strategy_levels(position, indicators)
+
+        self.assertAlmostEqual(tp1, 110.0)
+        self.assertAlmostEqual(tp2, 118.0)
+        self.assertAlmostEqual(stop, 104.16)
+
+    def test_stock_indicators_cn_uses_breakout_score_in_shared_action_resolver(self):
+        import pandas as pd
+
+        self.api._INDICATOR_CACHE.clear()
+
+        history = pd.DataFrame({
+            "date": pd.date_range("2026-01-01", periods=80, freq="D"),
+            "open": [10.0 + i * 0.15 for i in range(80)],
+            "high": [10.2 + i * 0.15 for i in range(80)],
+            "low": [9.8 + i * 0.15 for i in range(80)],
+            "close": [10.1 + i * 0.15 for i in range(80)],
+            "volume": [1_000_000 + i * 10_000 for i in range(80)],
+            "amount": [10_000_000 + i * 100_000 for i in range(80)],
+        })
+
+        captured = {}
+
+        def _fake_resolver(**kwargs):
+            captured.update(kwargs)
+            return {
+                "action": "积极建仓",
+                "execution_mode": "breakout_watch",
+                "auto_trade_eligible": False,
+                "market_state": kwargs.get("market_state") or "not_weak",
+            }
+
+        fake_recommend = types.ModuleType("core.recommend")
+        fake_recommend._score_timing = lambda *args, **kwargs: 12.0
+        fake_recommend._score_breakout_timing = lambda *args, **kwargs: 88.0
+        fake_recommend._resolve_cn_scan_action = _fake_resolver
+
+        with patch.object(self.api, "_fetch_history_df", return_value=history), \
+             patch.object(self.api, "_tencent_fetch_pe_ratio", return_value=12.0), \
+             patch.object(self.api, "_cn_index_market_state", return_value="not_weak"), \
+             patch.dict(sys.modules, {"core.recommend": fake_recommend}):
+            payload = self.api.get_stock_indicators("600690.SH", market="CN")
+
+        self.assertIsNotNone(payload)
+        strategy_action = payload.get("strategy_action") if isinstance(payload, dict) else payload.strategy_action
+        self.assertEqual(strategy_action, "积极建仓")
+        self.assertEqual(captured["market_state"], "not_weak")
+        self.assertEqual(captured["timing_score_total"], 12.0)
+        self.assertEqual(captured["breakout_score"], 88.0)
 
     def test_update_position_peak_price_picks_intraday_high(self):
         position = types.SimpleNamespace(quantity=1000.0, peak_price=100.0)
@@ -1044,11 +1160,13 @@ class AgentRuntimeTests(unittest.TestCase):
                 "market": "CN", "symbol": "600001.SH", "name": "A1",
                 "action": "强买信号", "current_price": 10.0,
                 "quality_score_total": 40.0, "sector_strength_score": 60.0,
+                "auto_trade_eligible": True,
             },
             {
                 "market": "CN", "symbol": "600002.SH", "name": "A2",
                 "action": "积极建仓", "current_price": 10.0,
                 "quality_score_total": 50.0, "sector_strength_score": 90.0,
+                "auto_trade_eligible": False,
             },
         ]
         fake_recommend = types.ModuleType("core.recommend")
@@ -1063,25 +1181,20 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertIn("600001.SH", symbols)
         self.assertNotIn("600002.SH", symbols)
 
-    def test_agent_a_candidates_falls_back_to_secondary_when_no_strong_buy(self):
-        """无强买信号时，回退到 积极建仓 + sector≥70 + quality≥35。"""
+    def test_agent_a_candidates_require_auto_trade_eligibility(self):
+        """自动候选必须显式标记 auto_trade_eligible，watch-only breakout 不能混入。"""
         fake_scan = [
             {
                 "market": "CN", "symbol": "600003.SH", "name": "B1",
-                "action": "积极建仓", "current_price": 10.0,
+                "action": "强买信号", "current_price": 10.0,
                 "quality_score_total": 40.0, "sector_strength_score": 75.0,
+                "auto_trade_eligible": False,
             },
-            # 不满足 secondary 条件的 — 行业强度不足
             {
                 "market": "CN", "symbol": "600004.SH", "name": "B2",
-                "action": "积极建仓", "current_price": 10.0,
-                "quality_score_total": 40.0, "sector_strength_score": 50.0,
-            },
-            # 不满足 secondary 条件的 — 质量不足
-            {
-                "market": "CN", "symbol": "600005.SH", "name": "B3",
-                "action": "积极建仓", "current_price": 10.0,
-                "quality_score_total": 30.0, "sector_strength_score": 80.0,
+                "action": "强买信号", "current_price": 10.0,
+                "quality_score_total": 44.0, "sector_strength_score": 80.0,
+                "auto_trade_eligible": True,
             },
         ]
         fake_recommend = types.ModuleType("core.recommend")
@@ -1092,22 +1205,23 @@ class AgentRuntimeTests(unittest.TestCase):
 
         result = self.api._portfolio_agent_pick_candidates(1000.0, limit=5)
         symbols = [c[1] for c in result]
-        self.assertIn("600003.SH", symbols)
-        self.assertNotIn("600004.SH", symbols)  # sector<70
-        self.assertNotIn("600005.SH", symbols)  # quality<35
+        self.assertNotIn("600003.SH", symbols)
+        self.assertIn("600004.SH", symbols)
 
-    def test_agent_a_no_candidates_when_neither_strong_buy_nor_qualified_secondary(self):
-        """两档都不符合时返回空，不会乱兜底。"""
+    def test_agent_a_no_candidates_when_only_watch_candidates_exist(self):
+        """只有 watch-only breakout 时返回空，不自动兜底到积极建仓。"""
         fake_scan = [
             {
                 "market": "CN", "symbol": "600006.SH", "name": "C1",
                 "action": "积极建仓", "current_price": 10.0,
                 "quality_score_total": 30.0, "sector_strength_score": 60.0,
+                "auto_trade_eligible": False,
             },
             {
                 "market": "CN", "symbol": "600007.SH", "name": "C2",
-                "action": "轻仓试探", "current_price": 10.0,
+                "action": "积极建仓", "current_price": 10.0,
                 "quality_score_total": 50.0, "sector_strength_score": 85.0,
+                "auto_trade_eligible": False,
             },
         ]
         fake_recommend = types.ModuleType("core.recommend")
@@ -1429,6 +1543,35 @@ class AgentRuntimeTests(unittest.TestCase):
                           return_value=types.SimpleNamespace(price=1480.0, high=1490.0, low=1475.0)):
             trade = self.api._execute_strategy_alert_trade(alert, "a")
         self.assertIsNone(trade, "signal_sell within cooldown should be blocked")
+
+    def test_signal_sell_blocked_within_extended_agent_cooldown(self):
+        """Agent reversal positions keep a longer cooldown before signal_sell can trim them."""
+        recent = int(time.time()) - 6 * 86400
+        with self.db.session_scope() as s:
+            pos = self.models.PortfolioPosition(
+                market="CN", symbol="600030.SH", name="中信证券",
+                source="a", quantity=1000.0, avg_cost=20.0,
+                created_at=recent, updated_at=recent,
+            )
+            s.add(pos)
+            s.flush()
+            s.add(self.models.PortfolioTrade(
+                position_id=pos.id, side="BUY", price=20.0,
+                quantity=1000.0, amount=20000.0, fee=0.0,
+                source="auto_strategy_a", created_at=recent,
+            ))
+            position_id = pos.id
+
+        alert = self.api.PortfolioAlertResponse(
+            key=f"{position_id}:signal_sell",
+            position_id=position_id, market="CN", symbol="600030.SH",
+            name="中信证券", alert_type="signal_sell",
+            message="出现卖出信号", current_price=20.5, trigger_price=20.2,
+        )
+        with patch.object(self.api, "get_stock_price",
+                          return_value=types.SimpleNamespace(price=20.5, high=20.8, low=20.1)):
+            trade = self.api._execute_strategy_alert_trade(alert, "a")
+        self.assertIsNone(trade, "signal_sell should still be blocked before the 8-day cooldown ends")
 
     def test_strategy_stop_loss_not_blocked_by_cooldown(self):
         """5-day cooldown only gates signal_sell — hard stops must still execute immediately."""

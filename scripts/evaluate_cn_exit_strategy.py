@@ -140,10 +140,12 @@ def _add(bucket: dict[str, float], ret: float) -> None:
 
 def _finish(bucket: dict[str, float]) -> dict[str, float]:
     n = int(bucket["n"])
+    avg_return = bucket["ret"] / n if n else 0.0
     return {
         "samples": n,
         "win_rate": round(bucket["win"] / n * 100.0, 2) if n else 0.0,
-        "avg_return": round(bucket["ret"] / n, 2) if n else 0.0,
+        "avg_return": round(avg_return, 2),
+        "annualized_from_20d": round(((1.0 + avg_return / 100.0) ** (252.0 / 20.0) - 1.0) * 100.0, 2) if n else 0.0,
     }
 
 
@@ -201,19 +203,30 @@ def evaluate(limit: int, cooldown_days: int, cost_pct: float) -> dict[str, Any]:
             fixed20 = (closes[i + 20] / entry - 1.0) * 100.0 - cost_pct
             _add(results["fixed20"], fixed20)
 
-            stop = entry * 0.92
-            tp1 = max(float(ma20[i]) if not np.isnan(ma20[i]) else entry, entry * 1.05)
-            tp2 = max(float(ma60[i]) if not np.isnan(ma60[i]) else entry, entry * 1.10)
+            stop = entry * 0.90
+            tp1 = max(float(ma20[i]) if not np.isnan(ma20[i]) else entry, entry * 1.08)
+            tp2 = max(float(ma60[i]) if not np.isnan(ma60[i]) else entry, entry * 1.15)
+            wide_stop_floor = entry * 0.90
+            wide_tp1 = max(float(ma20[i]) if not np.isnan(ma20[i]) else entry, entry * 1.12)
+            wide_tp2 = max(float(ma60[i]) if not np.isnan(ma60[i]) else entry, entry * 1.20)
 
             cash_tp = None
             half_tp = False
             cash_tp_rev = None
             half_tp_rev = False
             reversed_half = False
+            cash_agent_wide = None
+            half_agent_wide = False
+            peak_agent_wide = entry
             for j in range(i + 1, i + 21):
                 reversal = False
                 if j >= 1 and not np.isnan(ma20[j]) and not np.isnan(ma20[j - 1]) and not np.isnan(hist[j]) and not np.isnan(hist[j - 1]) and not np.isnan(rsi14[j]):
                     reversal = closes[j] < ma20[j] and ma20[j] < ma20[j - 1] and hist[j - 1] > 0 > hist[j] and rsi14[j] < 55
+
+                peak_agent_wide = max(peak_agent_wide, highs[j])
+                wide_stop = wide_stop_floor
+                if peak_agent_wide >= entry * 1.12:
+                    wide_stop = max(wide_stop, peak_agent_wide * 0.92)
 
                 if cash_tp is None:
                     if lows[j] <= stop:
@@ -239,7 +252,17 @@ def evaluate(limit: int, cooldown_days: int, cost_pct: float) -> dict[str, Any]:
                     elif highs[j] >= tp1 and not half_tp_rev:
                         half_tp_rev = True
 
-                if cash_tp is not None and cash_tp_rev is not None:
+                if cash_agent_wide is None:
+                    if lows[j] <= wide_stop:
+                        leg = (wide_stop / entry - 1.0) * 100.0
+                        cash_agent_wide = ((wide_tp1 / entry - 1.0) * 100.0 + leg) / 2.0 - cost_pct if half_agent_wide else leg - cost_pct
+                    elif highs[j] >= wide_tp2:
+                        leg = (wide_tp2 / entry - 1.0) * 100.0
+                        cash_agent_wide = ((wide_tp1 / entry - 1.0) * 100.0 + leg) / 2.0 - cost_pct if half_agent_wide else leg - cost_pct
+                    elif highs[j] >= wide_tp1 and not half_agent_wide:
+                        half_agent_wide = True
+
+                if cash_tp is not None and cash_tp_rev is not None and cash_agent_wide is not None:
                     break
 
             if cash_tp is None:
@@ -248,9 +271,13 @@ def evaluate(limit: int, cooldown_days: int, cost_pct: float) -> dict[str, Any]:
             if cash_tp_rev is None:
                 end_ret = (closes[i + 20] / entry - 1.0) * 100.0
                 cash_tp_rev = (((tp1 / entry - 1.0) * 100.0 + end_ret) / 2.0 - cost_pct) if (half_tp_rev or reversed_half) else (end_ret - cost_pct)
+            if cash_agent_wide is None:
+                end_ret = (closes[i + 20] / entry - 1.0) * 100.0
+                cash_agent_wide = (((wide_tp1 / entry - 1.0) * 100.0 + end_ret) / 2.0 - cost_pct) if half_agent_wide else (end_ret - cost_pct)
 
             _add(results["tp_sl20"], cash_tp)
             _add(results["tp_sl_trend_reversal20"], cash_tp_rev)
+            _add(results["agent_wide_trailing20"], cash_agent_wide)
             next_allowed = i + cooldown_days
 
         print(f"{idx + 1}/{len(stocks)} {stock['symbol']}")

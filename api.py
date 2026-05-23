@@ -1027,10 +1027,15 @@ def _mark_strategy_exec_done(exec_key: str):
 
 # Trailing-stop activates once peak >= avg_cost * (1 + TRAILING_ACTIVATION_PCT).
 # Once active, effective stop = max(original stop, peak * (1 - TRAILING_DRAWDOWN_PCT)).
-# 5% activation matches TP1; 5% trailing drawdown is wide enough to survive
-# normal A-share intraday noise (~2-3%) but tight enough to capture pullbacks.
-TRAILING_ACTIVATION_PCT = 0.05
-TRAILING_DRAWDOWN_PCT = 0.05
+# 8% activation gives room before trailing engages; 7% drawdown survives A-share
+# normal pullback noise (~3-5%) while protecting gains.
+TRAILING_ACTIVATION_PCT = 0.08
+TRAILING_DRAWDOWN_PCT = 0.07
+AGENT_REVERSAL_TP1_PCT = 0.12
+AGENT_REVERSAL_TP2_PCT = 0.20
+AGENT_REVERSAL_TRAILING_ACTIVATION_PCT = 0.12
+AGENT_REVERSAL_TRAILING_DRAWDOWN_PCT = 0.08
+AGENT_REVERSAL_SIGNAL_SELL_COOLDOWN_DAYS = 8.0
 
 
 def _effective_strategy_levels(position: "PortfolioPosition", indicators) -> tuple[Optional[float], Optional[float], Optional[float]]:
@@ -1059,13 +1064,20 @@ def _effective_strategy_levels(position: "PortfolioPosition", indicators) -> tup
         take_profit_2 = None
 
     avg_cost = float(getattr(position, "avg_cost", 0.0) or 0.0)
+    position_source = (getattr(position, "source", "") or "").strip().lower()
+    is_agent_reversal_position = position_source in {"a", "b"}
     has_position = float(getattr(position, "quantity", 0.0) or 0.0) > 0 and avg_cost > 0
     if not has_position:
         return stop_loss, take_profit_1, take_profit_2
 
-    cost_take_profit_1 = avg_cost * 1.05
-    cost_take_profit_2 = avg_cost * 1.10
-    cost_stop_loss = avg_cost * 0.92
+    tp1_pct = AGENT_REVERSAL_TP1_PCT if is_agent_reversal_position else 0.08
+    tp2_pct = AGENT_REVERSAL_TP2_PCT if is_agent_reversal_position else 0.15
+    trailing_activation_pct = AGENT_REVERSAL_TRAILING_ACTIVATION_PCT if is_agent_reversal_position else TRAILING_ACTIVATION_PCT
+    trailing_drawdown_pct = AGENT_REVERSAL_TRAILING_DRAWDOWN_PCT if is_agent_reversal_position else TRAILING_DRAWDOWN_PCT
+
+    cost_take_profit_1 = avg_cost * (1.0 + tp1_pct)
+    cost_take_profit_2 = avg_cost * (1.0 + tp2_pct)
+    cost_stop_loss = avg_cost * 0.90
 
     if take_profit_1 is None or take_profit_1 < cost_take_profit_1:
         take_profit_1 = cost_take_profit_1
@@ -1083,8 +1095,8 @@ def _effective_strategy_levels(position: "PortfolioPosition", indicators) -> tup
         peak = float(peak) if peak is not None else None
     except Exception:
         peak = None
-    if peak is not None and peak >= avg_cost * (1.0 + TRAILING_ACTIVATION_PCT):
-        trailing_stop = peak * (1.0 - TRAILING_DRAWDOWN_PCT)
+    if peak is not None and peak >= avg_cost * (1.0 + trailing_activation_pct):
+        trailing_stop = peak * (1.0 - trailing_drawdown_pct)
         if stop_loss is None or trailing_stop > stop_loss:
             stop_loss = trailing_stop
 
@@ -1210,12 +1222,12 @@ def _execute_strategy_alert_trade(alert: PortfolioAlertResponse, agent_id: str =
             ts = int(getattr(t, "created_at", 0) or 0)
             if ts > last_buy_ts:
                 last_buy_ts = ts
-        if last_buy_ts > 0:
-            days_held = (time.time() - last_buy_ts) / 86400.0
-            if days_held < 5:
-                _log_agent_pick_event(
-                    agent_id, "alert", "signal_sell_blocked_too_recent",
-                    symbol=symbol, detail=f"days_held={days_held:.1f}",
+            if last_buy_ts > 0:
+                days_held = (time.time() - last_buy_ts) / 86400.0
+                if days_held < AGENT_REVERSAL_SIGNAL_SELL_COOLDOWN_DAYS:
+                    _log_agent_pick_event(
+                        agent_id, "alert", "signal_sell_blocked_too_recent",
+                        symbol=symbol, detail=f"days_held={days_held:.1f}",
                 )
                 return None
         trade = _create_trade_at_price(agent_pos_id, "SELL", max(1.0, held_qty / 2.0), trade_price, _agent_id_to_source(agent_id))
@@ -3337,16 +3349,27 @@ def _trade_realized_pnl_map(
 
 
 # Position-size targets as a fraction of total capital, by signal strength.
-# Backtests showed the original fixed-share sizing produced single-trade
-# contributions of <0.2% to total return — too granular to move the dial even
-# with a high hit rate. These percentages target meaningful single-trade impact
-# while staying inside the AGENT_SINGLE_STOCK_CAP risk limit.
-_AGENT_ACTION_TARGET_PCT = {
-    "强买信号": 0.08,    # ~8% — confident reversal trade
-    "积极建仓": 0.04,    # ~4% — second-tier conviction
-    "轻仓试探": 0.02,    # ~2% — exploratory
-    "关注等买点": 0.01,  # ~1% — token starter position
-}
+# Higher timing_score = stronger conviction = larger position.
+AGENT_SINGLE_STOCK_CAP_PCT = 0.15
+
+
+def _agent_buy_target_pct(action: str, timing_score: Optional[float] = None) -> float:
+    ts = float(timing_score or 0.0)
+    if ts >= 100:
+        return 0.10
+    if ts >= 96:
+        return 0.06
+    if ts >= 90:
+        return 0.04
+    if ts >= 80:
+        return 0.03
+    action_map = {
+        "强买信号": 0.025,
+        "积极建仓": 0.02,
+        "轻仓试探": 0.015,
+        "关注等买点": 0.01,
+    }
+    return action_map.get(str(action or "").strip(), 0.01)
 # Hard cap on per-symbol holdings as a fraction of total capital. Stops a
 # single bad pick from doing real damage even when KPI pressure is on.
 AGENT_SINGLE_STOCK_CAP_PCT = 0.15
@@ -3363,6 +3386,7 @@ def _agent_dynamic_buy_quantity(
     buy_price: Optional[float] = None,
     capital: Optional[float] = None,
     existing_symbol_value: float = 0.0,
+    timing_score: Optional[float] = None,
 ) -> float:
     """Compute share quantity for a new buy.
 
@@ -3409,7 +3433,7 @@ def _agent_dynamic_buy_quantity(
     # Percentage-based sizing. Action drives baseline % of capital; KPI/time
     # pressure scales it up to 2x. Then cap by AGENT_SINGLE_STOCK_CAP_PCT after
     # accounting for what we already hold of the same symbol.
-    target_pct = _AGENT_ACTION_TARGET_PCT.get(action_key, _AGENT_ACTION_TARGET_PCT["关注等买点"])
+    target_pct = _agent_buy_target_pct(action_key, timing_score)
     target_pct = target_pct * pressure_mult / 2.0  # baseline×1 (no pressure) ≈ target_pct/2; ×3 (max pressure) ≈ 1.5×target_pct
     target_pct = min(target_pct, AGENT_SINGLE_STOCK_CAP_PCT)
 
@@ -3795,15 +3819,6 @@ def _portfolio_agent_candidate_score(item: dict) -> tuple[float, float, float, f
     return action_score, total_score, buy_score, trend_score, rsi_score - rank / 10000.0
 
 
-# Agent-A secondary-candidate gate. When the scanner produces zero
-# "强买信号"-bucket candidates (e.g. HS300 is not_weak and no stock clears the
-# strict breakout bar), fall back to "积极建仓" candidates that are individually
-# strong on quality AND sit in a strong sector. This keeps Agent A from sitting
-# idle for days at a time without lowering the quality bar on what it does buy.
-AGENT_A_SECONDARY_MIN_SECTOR_STRENGTH = 70.0
-AGENT_A_SECONDARY_MIN_QUALITY = 35.0
-
-
 def _portfolio_agent_pick_candidates(min_buy_quantity: float, limit: int = 5) -> list[tuple[str, str, str, float, str]]:
     from core.recommend import get_latest_scan, run_scan, save_scan_result
 
@@ -3841,23 +3856,11 @@ def _portfolio_agent_pick_candidates(min_buy_quantity: float, limit: int = 5) ->
             continue
         score = _portfolio_agent_candidate_score(item)
         entry = (market, symbol, name, buy_price, action)
-        if action == "强买信号":
+        auto_trade_eligible = bool(item.get("auto_trade_eligible"))
+        if action == "强买信号" and auto_trade_eligible:
             primary.append((score, entry))
-        elif action == "积极建仓":
-            try:
-                sector_strength = float(item.get("sector_strength_score") or 0.0)
-            except Exception:
-                sector_strength = 0.0
-            try:
-                quality = float(item.get("quality_score_total") or 0.0)
-            except Exception:
-                quality = 0.0
-            # Only admit as secondary if both gates are met. These thresholds
-            # are deliberately stricter than the scanner's own "积极建仓" gate
-            # to compensate for the lower bucket label.
-            if (sector_strength >= AGENT_A_SECONDARY_MIN_SECTOR_STRENGTH
-                    and quality >= AGENT_A_SECONDARY_MIN_QUALITY):
-                secondary.append((score, entry))
+        elif action == "积极建仓" and auto_trade_eligible:
+            secondary.append((score, entry))
 
     chosen = primary if primary else secondary
     if not chosen:
@@ -4095,7 +4098,7 @@ def _run_llm_agent_once(
     # Cap the candidate list shown to the LLM. 15 gives the model meaningful
     # breadth (e.g. 3 strong sectors × ~5 stocks each) without bloating the
     # prompt to the point where it stops reading carefully.
-    AGENT_B_CANDIDATES_MAX = 15
+    AGENT_CANDIDATES_MAX = 8 if agent_id == "a" else 15
     candidates = []
     for item in latest:
         market = (item.get("market") or "CN").strip().upper()
@@ -4149,6 +4152,9 @@ def _run_llm_agent_once(
             "symbol": symbol,
             "name": (item.get("name") or symbol).strip(),
             "action": action,
+            "execution_mode": item.get("execution_mode"),
+            "auto_trade_eligible": bool(item.get("auto_trade_eligible")),
+            "market_state": item.get("market_state"),
             "current_price": cp,
             "buy_zone_low": bz_low,
             "buy_zone_high": bz_high,
@@ -4173,7 +4179,7 @@ def _run_llm_agent_once(
             "reward_risk_ratio": rr_ratio,
             "momentum_20d_pct": mom_20d,
         })
-        if len(candidates) >= AGENT_B_CANDIDATES_MAX:
+        if len(candidates) >= AGENT_CANDIDATES_MAX:
             break
     candidate_symbols = {str(item.get("symbol") or "").upper() for item in candidates}
     held_symbols = {(h.get("symbol") or "").upper() for h in holdings_info}
@@ -4272,15 +4278,76 @@ hold 时 symbol 填 null。每次最多5个动作。
 **持仓**：avg_cost(成本价), current_price, pnl_pct, peak_pct_from_entry(峰值浮盈%), days_held, dist_to_stop_pct(距止损%,负=已跌破), dist_to_tp2_pct(距TP2%,正=未触达), price_vs_ma20_pct, rsi14, trend, stop_loss, take_profit_1/2
 **候选股**：current_price, buy_zone_low/high, price_in_zone(below/lower/middle/upper/above), stop_loss, take_profit_1/2, upside_to_tp2_pct, downside_to_stop_pct, reward_risk_ratio, momentum_20d_pct, sector_strength, quality_score, timing_score, ma5/20/60, rsi14, trend"""
 
+    # --- 业绩考核 & 生存压力 ---
+    deadline_ts = cfg.deadline_ts
+    if deadline_ts is not None:
+        days_left = max(0, int((int(deadline_ts) - now) / 86400))
+    else:
+        days_left = -1
+    net_return_pct = (managed_net_pnl / capital * 100.0) if capital > 0 else 0.0
+    met_target = target_return_pct > 0 and managed_net_pnl >= capital * target_return_pct / 100.0
+
+    if met_target:
+        kpi_section = f"""## 业绩考核 — 已达标 ✅
+目标收益率：{target_return_pct:.1f}% | 当前净值收益率：{net_return_pct:+.2f}% → 已达标
+核心任务切换为「守住收益模式」：任何单笔交易亏损不得超过本金的2%。宁可错过机会，不可承担回撤风险。你的业绩考核核心指标从"进攻"变成"防御"。"""
+    elif target_return_pct > 0 and days_left >= 0:
+        gap = target_return_pct - net_return_pct
+        if days_left <= 5:
+            urgency = f"极度紧迫。只剩{days_left}个交易日，差距{gap:.1f}%。剩余时间不足以等待完美买点，每错过一个可靠机会都可能致命。但绝不能为了冲KPI而下注弱信号——这只会加速淘汰。"
+        elif days_left <= 15:
+            urgency = f"压力加大。剩余{days_left}个交易日，差距{gap:.1f}%。需要在风险可控的前提下积极寻找机会。"
+        else:
+            urgency = f"时间充裕。剩余{days_left}个交易日，差距{gap:.1f}%。按最优节奏操作，不要为了凑KPI而降低选股标准。"
+        kpi_section = f"""## 业绩考核 — 未达标 ⚠️（你的生存线）
+目标收益率：{target_return_pct:.1f}% | 当前净值收益率：{net_return_pct:+.2f}% | 差距：{gap:+.1f}%
+截止日期剩余：{days_left} 个交易日
+考核规则：**截止日未达标 → {agent_display} 自动注销，替换为优化后的纯量化策略。你只有{days_left}天证明自己。**
+{urgency}"""
+    else:
+        kpi_section = ""
+
+    # --- 决策复盘 ---
+    review_section = ""
+    if recent_agent_trades:
+        buy_trades = [t for t in recent_agent_trades if getattr(t, 'side', '') == 'BUY']
+        sell_trades = [t for t in recent_agent_trades if getattr(t, 'side', '') == 'SELL']
+        win_count = 0
+        loss_count = 0
+        trade_details: list[str] = []
+        for bt in buy_trades[:10]:
+            sym = getattr(bt, 'symbol', '') or ''
+            bp = getattr(bt, 'price', 0) or 0
+            matching_sells = [st for st in sell_trades if getattr(st, 'symbol', '') == sym]
+            if matching_sells:
+                for st in matching_sells:
+                    sp = getattr(st, 'price', 0) or 0
+                    pnl = (sp - bp) / bp * 100.0 if bp > 0 else 0
+                    if pnl > 0: win_count += 1
+                    elif pnl < 0: loss_count += 1
+                    trade_details.append(f"  {sym} buy@{bp:.2f} → sell@{sp:.2f} {'盈利' if pnl>0 else '亏损'}{abs(pnl):.1f}%")
+                    break
+        if win_count + loss_count > 0:
+            wr = win_count / (win_count + loss_count) * 100
+            review_section = f"""## 近期决策复盘
+已完成交易 {win_count + loss_count} 笔：胜{win_count} 负{loss_count}（胜率 {wr:.0f}%）
+{chr(10).join(trade_details[:8])}
+{'' if wr >= 60 else '⚠ 胜率偏低。反思：是不是在买zone上方追高了？是不是行业弱时开仓了？'}
+{'' if wr >= 50 and wr < 60 else ''}"""
+    if not review_section:
+        review_section = "## 近期决策复盘\n暂无已完成交易记录，你处于建仓初期。"
+
     user_prompt = f"""当前时间：{time.strftime('%Y-%m-%d %H:%M', time.localtime(now))} 北京时间
 
 ## 大盘状态
 {_market_brief}
 
+{kpi_section}
+
 ## 资金状态
 - 本金：{capital:,.0f} | 已用市值：{agent_holdings_mv:,.0f} | 可用资金：{available_capital:,.0f}
-- 已实现：{managed_realized:,.0f} | 未实现：{managed_unrealized:,.0f} | 净收益：{managed_net_pnl:,.0f}（{(managed_net_pnl / capital * 100) if capital > 0 else 0:.2f}%）
-- 目标收益率：{target_return_pct:.1f}% → {'已达标' if target_return_pct > 0 and managed_net_pnl >= capital * target_return_pct / 100 else '未达标'}
+- 已实现：{managed_realized:,.0f} | 未实现：{managed_unrealized:,.0f} | 净收益：{managed_net_pnl:,.0f}（{net_return_pct:+.2f}%）
+- 按单笔8%仓位计算，最多还能做 {max(0, int(available_capital / (capital * 0.08))) if capital > 0 else 0} 笔交易——每笔失败浪费一次宝贵机会。
 
 ## 当前持仓
 {json.dumps(holdings_info, ensure_ascii=False, indent=2) if holdings_info else "无持仓"}
@@ -4288,10 +4355,12 @@ hold 时 symbol 填 null。每次最多5个动作。
 ## 当前告警
 {chr(10).join(alert_lines) if alert_lines else "无告警"}
 
+{review_section}
+
 ## 候选股（买入必须从此列表选）
 {json.dumps(candidates, ensure_ascii=False, indent=2) if candidates else "无候选股"}
 
-## 最近10笔交易
+## 最近交易记录
 {chr(10).join(recent_lines) if recent_lines else "无交易记录"}
 
 请基于以上信息给出你的交易决策："""
@@ -4300,8 +4369,12 @@ hold 时 symbol 填 null。每次最多5个动作。
         _log_agent_pick_event(agent_id, pick_slot_key or "unknown", "slot_entered")
 
     try:
+        agent_a_model = (os.environ.get("AGENT_A_LLM_MODEL") or "qwen-max-latest").strip()
         agent_b_model = (os.environ.get("AGENT_B_LLM_MODEL") or "qwen-max-latest").strip()
-        llm_response = call_llm(system_prompt, user_prompt, temperature=0.05, max_tokens=800, model=agent_b_model)
+        model_name = agent_a_model if agent_id == "a" else agent_b_model
+        temp = 0.10 if agent_id == "a" else 0.30
+        agent_display = f"Agent {agent_id.upper()}"
+        llm_response = call_llm(system_prompt, user_prompt, temperature=temp, max_tokens=800, model=model_name)
     except Exception as e:
         with session_scope() as s:
             c = _get_or_create_agent_config(s, agent_id)
@@ -4416,8 +4489,8 @@ hold 时 symbol 填 null。每次最多5个动作。
                     symbol = str(candidate.get("symbol") or symbol).strip().upper() or symbol
                 if held_symbol is None:
                     candidate_action = str((candidate or {}).get("action") or "").strip()
-                    if candidate is None or candidate_action not in {"强买信号", "积极建仓"}:
-                        last_status = f"llm_buy_not_in_high_confidence_candidates:{symbol}"
+                    candidate_auto_trade_eligible = bool((candidate or {}).get("auto_trade_eligible"))
+                    if candidate is None or candidate_action not in {"强买信号", "积极建仓"} or not candidate_auto_trade_eligible:
                         _log_llm_event("llm_buy_not_in_candidates", symbol=symbol, detail="not_high_confidence_candidate")
                         continue
                 pos = s.execute(select(PortfolioPosition).where(
@@ -4482,6 +4555,7 @@ hold 时 symbol 填 null。每次最多5个动作。
                     buy_price=buy_price,
                     capital=capital,
                     existing_symbol_value=existing_symbol_value,
+                    timing_score=(candidate or {}).get("timing_score"),
                 )
                 max_qty = int(available_capital / buy_price) if buy_price > 0 else 0
                 if qty > max_qty:
@@ -4763,6 +4837,7 @@ def _run_portfolio_agent_once(
                         buy_price=buy_price,
                         capital=capital,
                         existing_symbol_value=existing_symbol_value,
+                        timing_score=None,
                     )
                     max_qty = int(available_capital / buy_price) if buy_price > 0 else 0
                     if dynamic_qty > max_qty:
@@ -9048,6 +9123,12 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
         if ma60_now is not None and last_close is not None and ma60_now != 0:
             dist_ma60_pct = (float(last_close) / float(ma60_now) - 1.0) * 100.0
 
+        from core.recommend import (
+            _resolve_cn_scan_action,
+            _score_breakout_timing as _shared_breakout_score,
+            _score_timing as _shared_score_timing,
+        )
+
         steep_drop = slope_pct is not None and slope_pct < -0.15
         mild_drop = slope_pct is not None and -0.15 <= slope_pct < -0.05
         oversold = rsi14 is not None and rsi14 < 30
@@ -9070,21 +9151,45 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
                 global_reversal_score += 20
             timing_score = global_reversal_score
         else:
-            below_ma60_5pct = dist_ma60_pct is None or dist_ma60_pct < -5
-            if big_drop_5d and vol_spike and below_ma60_5pct:
-                timing_score = 100
-            elif steep_drop and oversold and vol_spike:
-                timing_score = 98
-            elif big_drop_10d and below_ma60_10pct:
-                timing_score = 96
-            elif steep_drop and oversold and big_drop_5d:
-                timing_score = 94
-            elif steep_drop and oversold:
-                timing_score = 76 if kdj_golden_cross else 72
-            elif steep_drop or oversold:
-                timing_score = 80 if vol_spike else 60
-            elif mild_drop:
-                timing_score = 30
+            ma_align = None
+            if ma5_now is not None and ma20_now is not None and ma60_now is not None:
+                try:
+                    ma_align = float(ma5_now) > float(ma20_now) > float(ma60_now)
+                except Exception:
+                    ma_align = None
+            vol_ratio = 1.6 if signal_vol_gt_ma10 else (1.3 if signal_vol_gt_ma5 else None)
+            timing_score = _shared_score_timing(
+                rsi14,
+                boll_pct_b_now,
+                kdj_golden_cross,
+                signal_golden_cross,
+                ma_align,
+                slope_pct,
+                aggressive_ok,
+                buy_score,
+                trend,
+                vol_ratio=vol_ratio,
+                ret_5d=ret_5d,
+                ret_10d=ret_10d,
+                dist_ma60_pct=dist_ma60_pct,
+            )
+
+        breakout_score = 0.0
+        if m == "CN":
+            vol_ratio = 1.6 if signal_vol_gt_ma10 else (1.3 if signal_vol_gt_ma5 else None)
+            breakout_score = _shared_breakout_score(
+                rsi14=rsi14,
+                ma5=ma5_now,
+                ma20=ma20_now,
+                ma60=ma60_now,
+                close=last_close,
+                ret_5d=ret_5d,
+                ret_10d=ret_10d,
+                vol_ratio=vol_ratio,
+                kdj_golden=kdj_golden_cross,
+                macd_golden=signal_golden_cross,
+                dist_ma60_pct=dist_ma60_pct,
+            )
 
         entry_ref = buy_price_aggressive or last_close or ma20_now or ma60_now
         if entry_ref is not None:
@@ -9099,21 +9204,30 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
             strategy_buy_zone_low = max(min(lower_candidates), min_floor)
             strategy_buy_zone_high = float(entry_ref)
             stop_ref = float(strategy_buy_zone_low)
-            strategy_stop_loss = max(stop_ref * 0.92, stop_ref - 2 * float(atr14)) if atr14 is not None and atr14 > 0 else stop_ref * 0.92
+            strategy_stop_loss = max(stop_ref * 0.90, stop_ref - 2 * float(atr14)) if atr14 is not None and atr14 > 0 else stop_ref * 0.90
 
             tp1_candidates = []
             if ma20_now is not None and float(ma20_now) > float(entry_ref):
                 tp1_candidates.append(float(ma20_now))
-            tp1_candidates.append(float(entry_ref) * (1.08 if m in {"US", "HK"} else 1.05))
+            tp1_candidates.append(float(entry_ref) * (1.08 if m in {"US", "HK"} else 1.08))
             strategy_take_profit_1 = max(tp1_candidates)
 
             tp2_candidates = []
             if ma60_now is not None and float(ma60_now) > strategy_take_profit_1:
                 tp2_candidates.append(float(ma60_now))
-            tp2_candidates.append(float(entry_ref) * (1.16 if m in {"US", "HK"} else 1.10))
+            tp2_candidates.append(float(entry_ref) * (1.16 if m in {"US", "HK"} else 1.15))
             strategy_take_profit_2 = max(tp2_candidates)
 
-        cn_market_allows_strong_buy = m != "CN" or _cn_index_market_state() in ("weak", "unknown")
+        cn_market_state = _cn_index_market_state() if m == "CN" else "global"
+        cn_profile = None
+        if m == "CN":
+            cn_profile = _resolve_cn_scan_action(
+                quality_score_total=buy_score,
+                timing_score_total=timing_score,
+                breakout_score=breakout_score,
+                sector_strength_score=50.0,
+                market_state=cn_market_state,
+            )
 
         if sell_score is not None and sell_score >= 55:
             strategy_action = "立即卖出"
@@ -9125,15 +9239,15 @@ def get_stock_indicators(symbol: str, market: str = "CN"):
             strategy_action = "反转买点观察"
         elif m in {"US", "HK"}:
             strategy_action = "暂不买入"
-        elif timing_score >= 96 and cn_market_allows_strong_buy:
+        elif cn_profile is not None and cn_profile["action"] == "强买信号":
             strategy_action = "强买信号"
-        elif timing_score >= 80 and cn_market_allows_strong_buy:
+        elif cn_profile is not None and cn_profile["action"] == "积极建仓":
             strategy_action = "积极建仓"
         elif timing_score >= 80:
             strategy_action = "关注等买点"
         elif timing_score >= 60:
             strategy_action = "观察信号，暂不买入"
-        elif timing_score >= 30:
+        elif timing_score >= 30 or (cn_profile is not None and cn_profile["action"] == "关注等买点"):
             strategy_action = "等待回调确认"
         else:
             strategy_action = "暂不买入"

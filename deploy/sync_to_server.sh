@@ -22,6 +22,8 @@ rsync -az \
   ${RSYNC_PROGRESS_FLAG} \
   -e "ssh -i ${DEPLOY_SSH_KEY} -o BatchMode=yes -o StrictHostKeyChecking=accept-new" \
   --exclude ".git/" \
+  --exclude "node_modules/" \
+  --exclude "frontend/node_modules/" \
   --exclude ".env" \
   --exclude "data/" \
   --exclude ".data/" \

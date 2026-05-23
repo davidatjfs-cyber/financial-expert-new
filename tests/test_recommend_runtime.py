@@ -94,3 +94,31 @@ class BreakoutTimingTests(unittest.TestCase):
         )
         self.assertGreaterEqual(score, 0.0)
         self.assertLessEqual(score, 100.0)
+
+
+class CnExecutionProfileTests(unittest.TestCase):
+    def test_weak_market_reversal_profile_is_auto_tradable(self):
+        profile = recommend._resolve_cn_scan_action(
+            quality_score_total=40.0,
+            timing_score_total=96.0,
+            breakout_score=18.0,
+            sector_strength_score=58.0,
+            market_state="weak",
+        )
+
+        self.assertEqual(profile["action"], "强买信号")
+        self.assertEqual(profile["execution_mode"], "reversal_auto")
+        self.assertTrue(profile["auto_trade_eligible"])
+
+    def test_not_weak_breakout_profile_is_watch_only(self):
+        profile = recommend._resolve_cn_scan_action(
+            quality_score_total=42.0,
+            timing_score_total=12.0,
+            breakout_score=82.0,
+            sector_strength_score=66.0,
+            market_state="not_weak",
+        )
+
+        self.assertEqual(profile["action"], "积极建仓")
+        self.assertEqual(profile["execution_mode"], "breakout_watch")
+        self.assertFalse(profile["auto_trade_eligible"])

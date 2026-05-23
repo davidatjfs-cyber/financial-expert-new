@@ -131,6 +131,9 @@ class StockScore:
     # is trending up with confirming volume; it's the trigger used when the
     # broader HS300 regime is "not_weak" and the dip-buy path is unavailable.
     breakout_score: Optional[float] = None
+    market_state: Optional[str] = None
+    execution_mode: Optional[str] = None
+    auto_trade_eligible: Optional[bool] = None
 
     reason: str = ""
     rank: int = 0
@@ -512,6 +515,8 @@ def _score_timing(rsi14: Optional[float], boll_position: Optional[float],
     oversold = rsi14 is not None and rsi14 < 30
     mild_drop = slope_pct is not None and -0.15 <= slope_pct < -0.05
     vol_spike = vol_ratio is not None and vol_ratio > 1.5
+    vol_ok = vol_ratio is not None and vol_ratio >= 1.2
+    rsi_ok = rsi14 is not None and rsi14 < 35
     big_drop_5d = ret_5d is not None and ret_5d < -5
     big_drop_10d = ret_10d is not None and ret_10d < -8
     below_ma60_10pct = dist_ma60_pct is not None and dist_ma60_pct < -10
@@ -525,19 +530,25 @@ def _score_timing(rsi14: Optional[float], boll_position: Optional[float],
     if big_drop_10d and below_ma60_10pct:
         return 96.0
     if steep_drop and oversold and vol_spike:
-        # Backtests show this looks scary/cheap but often keeps falling unless
-        # it also has a broader 5d/10d capitulation or MA60 distance signal.
         return 74.0
     if steep_drop and oversold and big_drop_5d:
         return 94.0
     if steep_drop and oversold:
-        # Strict backtest shows this plain double-signal bucket is too weak to
-        # qualify as a buy on its own; keep it as observation only.
-        score = 72.0
+        # Without vol_spike or big_drop_5d, backtest shows 33-42% win rate.
+        # Require vol_ratio >= 1.2 and cap score to prevent auto-trade eligibility.
+        if not vol_ok:
+            return 59.0
+        score = 68.0
         if kdj_golden:
             score += 4.0
         return min(79.0, score)
     if steep_drop or oversold:
+        if not vol_ok:
+            # No volume confirmation → signal is noise, cap below observation level.
+            score = 40.0
+            if rsi_ok and below_ma60_5pct:
+                score += 10.0
+            return min(59.0, score)
         score = 60.0
         if vol_spike:
             score = 80.0
@@ -555,6 +566,8 @@ def _score_timing(rsi14: Optional[float], boll_position: Optional[float],
             score += 3.0
         return min(89.0, score)
     if mild_drop:
+        if not vol_ok:
+            return 20.0
         score = 30.0
         if big_drop_5d:
             score += 15.0
@@ -691,6 +704,57 @@ def _score_breakout_timing(
         score += 6.0
 
     return max(0.0, min(100.0, score))
+
+
+def _resolve_cn_scan_action(
+    *,
+    quality_score_total: Optional[float],
+    timing_score_total: Optional[float],
+    breakout_score: Optional[float],
+    sector_strength_score: Optional[float],
+    market_state: Optional[str] = None,
+) -> dict[str, object]:
+    quality = float(quality_score_total or 0.0)
+    timing = float(timing_score_total or 0.0)
+    breakout = float(breakout_score or 0.0)
+    sector_strength = float(sector_strength_score or 0.0)
+    resolved_market_state = (market_state or _cn_index_market_state() or "unknown").strip() or "unknown"
+    quality_ok = quality >= 30.0
+    weak_regime = resolved_market_state in {"weak", "unknown"}
+
+    action = "暂不关注"
+    execution_mode = "watch_only"
+    auto_trade_eligible = False
+
+    if quality_ok and weak_regime and timing >= 96.0:
+        action = "强买信号"
+        execution_mode = "reversal_auto"
+        auto_trade_eligible = True
+    elif quality_ok and not weak_regime and breakout >= 75.0 and sector_strength >= 60.0:
+        action = "积极建仓"
+        execution_mode = "breakout_watch"
+    elif quality_ok and not weak_regime and breakout >= 60.0 and sector_strength >= 50.0:
+        action = "关注等买点"
+        execution_mode = "breakout_watch"
+    elif quality_ok and timing >= 80.0:
+        action = "关注等买点"
+        execution_mode = "reversal_watch"
+    elif quality_ok and timing >= 0.0:
+        action = "关注等买点"
+        execution_mode = "quality_watch"
+    elif timing >= 80.0:
+        action = "有买点基本面弱"
+        execution_mode = "timing_only"
+    elif quality_ok:
+        action = "优质远离买点"
+        execution_mode = "quality_only"
+
+    return {
+        "action": action,
+        "execution_mode": execution_mode,
+        "auto_trade_eligible": auto_trade_eligible,
+        "market_state": resolved_market_state,
+    }
 
 
 def _score_momentum(momentum_20d: Optional[float], momentum_60d: Optional[float],
@@ -1486,63 +1550,30 @@ def run_scan(top_n: int = 20,
         s.sector_name = sec
         s.sector_strength_score = sector_strength.get(sec, 50.0)
 
-    QUALITY_THRESHOLD = 30.0
     cn_market_state = _cn_index_market_state()
-    cn_market_allows_new_buy = cn_market_state == "weak"
 
     for s in scores:
-        s.total_score = _compute_final_total_score(s, weights, QUALITY_THRESHOLD)
+        s.total_score = _compute_final_total_score(s, weights, 30.0)
 
     scores.sort(key=lambda x: x.total_score, reverse=True)
     scores = _apply_risk_controls(scores)
 
     results = []
-    # In an A-share weak regime the dip-buy path (timing_score >= 96) is the
-    # main entry trigger. In not_weak regimes that path is silent by design
-    # — there is no oversold setup. Breakout path only activates outside the
-    # weak regime AND only when the sector is genuinely strong (≥60), to
-    # avoid chasing isolated breakouts in dying sectors.
-    BREAKOUT_HARD_THRESHOLD = 75.0
-    BREAKOUT_SECTOR_THRESHOLD = 60.0
-
     for i, s in enumerate(scores[:top_n]):
         s.rank = i + 1
         s.reason = _generate_factor_reason(s)
-        qt = s.quality_score_total or 0
-        tt = s.timing_score_total or 0
-        bt = s.breakout_score or 0
         sector_strength_score = s.sector_strength_score if s.sector_strength_score is not None else 50.0
-        if qt >= QUALITY_THRESHOLD and tt >= 96 and cn_market_allows_new_buy:
-            s.action = "强买信号"  # mean-reversion bucket (weak regime)
-        elif (
-            qt >= QUALITY_THRESHOLD
-            and not cn_market_allows_new_buy
-            and bt >= BREAKOUT_HARD_THRESHOLD
-            and sector_strength_score >= BREAKOUT_SECTOR_THRESHOLD
-        ):
-            # Trend-continuation bucket (not_weak regime). Requires strong
-            # sector backing because breakout strategies depend on the broader
-            # group being in motion.
-            s.action = "强买信号"
-        elif (
-            qt >= QUALITY_THRESHOLD
-            and not cn_market_allows_new_buy
-            and bt >= 60.0
-            and sector_strength_score >= 50.0
-        ):
-            # Softer breakout setup — surface as "积极建仓" so it appears in
-            # candidates but doesn't auto-execute as a strong-buy.
-            s.action = "积极建仓"
-        elif qt >= QUALITY_THRESHOLD and tt >= 80:
-            s.action = "关注等买点"
-        elif qt >= QUALITY_THRESHOLD and tt >= 0:
-            s.action = "关注等买点"
-        elif tt >= 80:
-            s.action = "有买点基本面弱"
-        elif qt >= QUALITY_THRESHOLD:
-            s.action = "优质远离买点"
-        else:
-            s.action = "暂不关注"
+        profile = _resolve_cn_scan_action(
+            quality_score_total=s.quality_score_total,
+            timing_score_total=s.timing_score_total,
+            breakout_score=s.breakout_score,
+            sector_strength_score=s.sector_strength_score,
+            market_state=cn_market_state,
+        )
+        s.action = str(profile["action"])
+        s.execution_mode = str(profile["execution_mode"])
+        s.auto_trade_eligible = bool(profile["auto_trade_eligible"])
+        s.market_state = str(profile["market_state"])
         if sector_strength_score < 25:
             s.action = _downgrade_action(s.action, 2)
         elif sector_strength_score < 35:

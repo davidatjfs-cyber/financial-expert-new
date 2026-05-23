@@ -14,42 +14,51 @@ def _main() -> int:
     cases = [
         {
             "name": "buy_ok_true",
-            "last_close": 30.0,
-            "ma20": 30.0,
-            "ma60": 28.0,
-            "slope_pct": 0.12,
-            "rsi14": 36.1,
-            "rsi_rebound": True,
-            "rsi_b2": 35.2,
-            "rsi_y": 33.8,
-            "rsi_t": 36.1,
-            "aggressive_ok": True,
+            "buy_score": 68,
+            "buy_grade": "建议买入",
+            "buy_score_details": {
+                "trend": {"score": 8, "max": 8, "reason": "上涨趋势"},
+                "ma_align": {"score": 8, "max": 8, "reason": "多头排列"},
+                "price_pos": {"score": 5, "max": 5, "reason": "高于MA60"},
+                "rsi": {"score": 22, "max": 25, "reason": "RSI超卖反弹(36.1)"},
+                "kdj": {"score": 10, "max": 15, "reason": "KDJ金叉超卖(J=18.5)"},
+                "volume": {"score": 10, "max": 10, "reason": "放量>MA10"},
+                "macd": {"score": 5, "max": 5, "reason": "MACD多头"},
+                "boll": {"score": 6, "max": 12, "reason": "布林下方"},
+            },
         },
         {
             "name": "buy_ok_false",
-            "last_close": 27.0,
-            "ma20": 30.0,
-            "ma60": 28.0,
-            "slope_pct": -0.10,
-            "rsi14": 45.0,
-            "rsi_rebound": False,
-            "rsi_b2": 41.0,
-            "rsi_y": 42.0,
-            "rsi_t": 40.0,
-            "aggressive_ok": False,
+            "buy_score": 12,
+            "buy_grade": "不建议",
+            "buy_score_details": {
+                "trend": {"score": 0, "max": 8, "reason": "下跌趋势"},
+                "ma_align": {"score": 0, "max": 8, "reason": "非多头"},
+                "price_pos": {"score": 0, "max": 5, "reason": "低于MA60"},
+                "rsi": {"score": 3, "max": 25, "reason": "RSI中性(45.0)"},
+                "kdj": {"score": 0, "max": 15, "reason": "KDJ(J=55.0)"},
+                "volume": {"score": 0, "max": 10, "reason": "缩量"},
+                "macd": {"score": 0, "max": 5, "reason": "MACD偏空"},
+                "boll": {"score": 0, "max": 12, "reason": "布林%B=0.50"},
+            },
         },
     ]
 
     sell_cases = [
         {
             "name": "sell_desc_has_stopline",
-            "last_close": 100.0,
-            "ma20": 98.0,
-            "atr14": 2.5,
-            "rsi14": 72.0,
-            "prev_max_close": 101.0,
-            "prev_max_rsi": 78.0,
-        }
+            "sell_score": 45,
+            "sell_grade": "建议减仓",
+            "sell_score_details": {
+                "rsi_ob": {"score": 5, "max": 15, "reason": "RSI超买(72.0)"},
+                "macd_death": {"score": 8, "max": 18, "reason": "MACD空头"},
+                "break_ma20": {"score": 5, "max": 12, "reason": "略低于MA20"},
+                "kdj_sell": {"score": 6, "max": 12, "reason": "KDJ死叉(J=82.0)"},
+                "boll_sell": {"score": 0, "max": 8, "reason": "布林%B=0.70"},
+                "divergence": {"score": 0, "max": 10, "reason": "无背离"},
+                "stop_loss": {"score": 10, "max": 10, "reason": "止损线=95.00"},
+            },
+        },
     ]
 
     out = []
@@ -58,29 +67,19 @@ def _main() -> int:
         err = []
         try:
             desc = api._build_buy_condition_desc(
-                last_close=c["last_close"],
-                ma20_now=c["ma20"],
-                ma60_now=c["ma60"],
-                slope_pct=c["slope_pct"],
-                rsi14=c["rsi14"],
-                rsi_rebound=c["rsi_rebound"],
-                rsi_before_yesterday_v=c["rsi_b2"],
-                rsi_yesterday_v=c["rsi_y"],
-                rsi_today_v=c["rsi_t"],
-                aggressive_ok=c["aggressive_ok"],
-                tol=0.02,
+                buy_score=c["buy_score"],
+                buy_grade=c["buy_grade"],
+                buy_score_details=c["buy_score_details"],
             )
             if not (isinstance(desc, str) and desc.strip()):
                 err.append("buy_condition_desc missing")
             else:
-                low_p = float(c["ma20"]) * (1.0 - 0.02)
-                high_p = float(c["ma20"]) * (1.0 + 0.02)
-                if f"{low_p:.2f}~{high_p:.2f}" not in desc:
-                    err.append("ma20 tolerance range not embedded")
-                if c["aggressive_ok"] is True and "可以买入" not in desc:
-                    err.append("should contain 买可以入")
-                if c["aggressive_ok"] is False and "暂不满足" not in desc:
-                    err.append("should contain 暂不满足")
+                grade = c["buy_grade"]
+                if grade not in desc:
+                    err.append(f"grade '{grade}' not in desc")
+                score_str = f"综合评分{c['buy_score']}分"
+                if score_str not in desc:
+                    err.append(f"score string '{score_str}' not in desc")
         except Exception as e:
             err.append(str(e))
         out.append({"case": c["name"], "ok": len(err) == 0, "errors": err})
@@ -89,19 +88,21 @@ def _main() -> int:
         err = []
         try:
             desc = api._build_sell_condition_desc(
-                last_close=c["last_close"],
-                ma20_now=c["ma20"],
-                atr14=c["atr14"],
-                rsi14=c["rsi14"],
-                prev_max_close=c["prev_max_close"],
-                prev_max_rsi=c["prev_max_rsi"],
+                sell_score=c["sell_score"],
+                sell_grade=c["sell_grade"],
+                sell_score_details=c["sell_score_details"],
             )
             if not (isinstance(desc, str) and desc.strip()):
                 err.append("sell_condition_desc missing")
             else:
-                stop_line = float(c["last_close"]) - 2.0 * float(c["atr14"])
-                if f"{stop_line:.2f}" not in desc:
-                    err.append("stop_line not embedded")
+                grade = c["sell_grade"]
+                if grade not in desc:
+                    err.append(f"grade '{grade}' not in desc")
+                score_str = f"综合评分{c['sell_score']}分"
+                if score_str not in desc:
+                    err.append(f"score string '{score_str}' not in desc")
+                if "止损线=95.00" not in desc:
+                    err.append("stop_line info not embedded in desc")
         except Exception as e:
             err.append(str(e))
         out.append({"case": c["name"], "ok": len(err) == 0, "errors": err})
