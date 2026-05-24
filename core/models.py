@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from typing import Optional
 
 from sqlalchemy import Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -17,9 +18,9 @@ class Company(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     market: Mapped[str] = mapped_column(String, index=True)
     symbol: Mapped[str] = mapped_column(String, index=True)
-    name: Mapped[str | None] = mapped_column(String, nullable=True)
-    currency: Mapped[str | None] = mapped_column(String, nullable=True)
-    industry_code: Mapped[str | None] = mapped_column(String, nullable=True)
+    name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    currency: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    industry_code: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
     updated_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
 
@@ -34,24 +35,24 @@ class Report(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     natural_key: Mapped[str] = mapped_column(String, unique=True, index=True)
 
-    company_id: Mapped[str | None] = mapped_column(String, ForeignKey("companies.id"), nullable=True, index=True)
+    company_id: Mapped[Optional[str]] = mapped_column(String, ForeignKey("companies.id"), nullable=True, index=True)
     report_name: Mapped[str] = mapped_column(String)
 
     source_type: Mapped[str] = mapped_column(String, index=True)
     source_meta: Mapped[str] = mapped_column(Text, default="{}")
 
-    market: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    market: Mapped[Optional[str]] = mapped_column(String, nullable=True, index=True)
     period_type: Mapped[str] = mapped_column(String, index=True)
-    period_start: Mapped[str | None] = mapped_column(String, nullable=True)
+    period_start: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     period_end: Mapped[str] = mapped_column(String, index=True)
 
     status: Mapped[str] = mapped_column(String, index=True, default="pending")
-    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
     updated_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
 
-    company: Mapped[Company | None] = relationship("Company", back_populates="reports")
+    company: Mapped[Optional[Company]] = relationship("Company", back_populates="reports")
     jobs: Mapped[list[Job]] = relationship("Job", back_populates="report")
 
     statements: Mapped[list[Statement]] = relationship("Statement", back_populates="report")
@@ -69,11 +70,11 @@ class Job(Base):
     job_type: Mapped[str] = mapped_column(String, index=True)
     status: Mapped[str] = mapped_column(String, index=True, default="pending")
 
-    started_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    ended_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    started_at: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    ended_at: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
-    log: Mapped[str | None] = mapped_column(Text, nullable=True)
-    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    log: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     report: Mapped[Report] = relationship("Report", back_populates="jobs")
 
@@ -84,7 +85,7 @@ class Watchlist(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     company_id: Mapped[str] = mapped_column(String, ForeignKey("companies.id"), unique=True)
     market: Mapped[str] = mapped_column(String, index=True)
-    note: Mapped[str | None] = mapped_column(String, nullable=True)
+    note: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
     updated_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
 
@@ -95,19 +96,19 @@ class PortfolioPosition(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     market: Mapped[str] = mapped_column(String, index=True)
     symbol: Mapped[str] = mapped_column(String, index=True)
-    name: Mapped[str | None] = mapped_column(String, nullable=True)
+    name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     source: Mapped[str] = mapped_column(String, default="manual")  # manual / a / b
 
     quantity: Mapped[float] = mapped_column(Float, default=0.0)
     avg_cost: Mapped[float] = mapped_column(Float, default=0.0)
 
-    target_buy_price: Mapped[float | None] = mapped_column(Float, nullable=True)
-    target_sell_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    target_buy_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    target_sell_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
     # Highest observed close since entry. Drives the trailing-stop logic in
     # _effective_strategy_levels — once peak exceeds the TP1 zone we lift the
     # stop to peak * trailing_drawdown so profits don't round-trip.
-    peak_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    peak_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
     created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
     updated_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
@@ -128,9 +129,9 @@ class PortfolioTrade(Base):
     fee: Mapped[float] = mapped_column(Float, default=0.0)
     source: Mapped[str] = mapped_column(String, default="manual")  # manual / auto_strategy / auto_order
 
-    symbol: Mapped[str | None] = mapped_column(String, nullable=True)
-    name: Mapped[str | None] = mapped_column(String, nullable=True)
-    market: Mapped[str | None] = mapped_column(String, nullable=True)
+    symbol: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    market: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
     created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
 
@@ -148,8 +149,8 @@ class PortfolioAutoTrade(Base):
     source: Mapped[str] = mapped_column(String, default="auto_order")
 
     created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
-    executed_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    executed_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    executed_at: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    executed_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
 
 class PortfolioAgentConfig(Base):
@@ -158,13 +159,13 @@ class PortfolioAgentConfig(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default="a")
     agent_type: Mapped[str] = mapped_column(String, default="rules")
     enabled: Mapped[str] = mapped_column(String, default="0")
-    target_profit: Mapped[float | None] = mapped_column(Float, nullable=True)
-    deadline_ts: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    target_profit: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    deadline_ts: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     capital: Mapped[float] = mapped_column(Float, default=10000000.0)
     min_buy_quantity: Mapped[float] = mapped_column(Float, default=10000.0)
-    last_run_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    last_action: Mapped[str | None] = mapped_column(String, nullable=True)
-    last_status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_run_at: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    last_action: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    last_status: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
     updated_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
 
@@ -176,8 +177,8 @@ class PortfolioAgentPickLog(Base):
     agent_id: Mapped[str] = mapped_column(String, index=True)
     slot_key: Mapped[str] = mapped_column(String)
     event: Mapped[str] = mapped_column(String)
-    symbol: Mapped[str | None] = mapped_column(String, nullable=True)
-    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    symbol: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
 
 
@@ -185,11 +186,11 @@ class MappingRule(Base):
     __tablename__ = "mapping_rules"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    market: Mapped[str | None] = mapped_column(String, nullable=True)
+    market: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     pattern: Mapped[str] = mapped_column(String, index=True)
     standard_item_code: Mapped[str] = mapped_column(String)
     standard_item_name: Mapped[str] = mapped_column(String)
-    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
 
 
@@ -198,14 +199,14 @@ class Statement(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     report_id: Mapped[str] = mapped_column(String, ForeignKey("reports.id"), index=True)
-    company_id: Mapped[str | None] = mapped_column(String, ForeignKey("companies.id"), nullable=True, index=True)
+    company_id: Mapped[Optional[str]] = mapped_column(String, ForeignKey("companies.id"), nullable=True, index=True)
 
     statement_type: Mapped[str] = mapped_column(String, index=True)  # bs/is/cf
     period_end: Mapped[str] = mapped_column(String, index=True)
     period_type: Mapped[str] = mapped_column(String, index=True)  # quarter/annual
     source: Mapped[str] = mapped_column(String, index=True)
 
-    raw_payload: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_payload: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
 
     report: Mapped[Report] = relationship("Report", back_populates="statements")
@@ -217,7 +218,7 @@ class StatementItem(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     statement_id: Mapped[str] = mapped_column(String, ForeignKey("statements.id"), index=True)
     report_id: Mapped[str] = mapped_column(String, ForeignKey("reports.id"), index=True)
-    company_id: Mapped[str | None] = mapped_column(String, ForeignKey("companies.id"), nullable=True, index=True)
+    company_id: Mapped[Optional[str]] = mapped_column(String, ForeignKey("companies.id"), nullable=True, index=True)
 
     statement_type: Mapped[str] = mapped_column(String, index=True)
     period_end: Mapped[str] = mapped_column(String, index=True)
@@ -225,11 +226,11 @@ class StatementItem(Base):
 
     standard_item_code: Mapped[str] = mapped_column(String, index=True)
     standard_item_name: Mapped[str] = mapped_column(String)
-    value: Mapped[float | None] = mapped_column(Float, nullable=True)
-    currency: Mapped[str | None] = mapped_column(String, nullable=True)
+    value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    currency: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
-    original_item_name: Mapped[str | None] = mapped_column(String, nullable=True)
-    mapping_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    original_item_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    mapping_confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
     report: Mapped[Report] = relationship("Report", back_populates="items")
 
@@ -239,16 +240,16 @@ class ComputedMetric(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     report_id: Mapped[str] = mapped_column(String, ForeignKey("reports.id"), index=True)
-    company_id: Mapped[str | None] = mapped_column(String, ForeignKey("companies.id"), nullable=True, index=True)
+    company_id: Mapped[Optional[str]] = mapped_column(String, ForeignKey("companies.id"), nullable=True, index=True)
 
     period_end: Mapped[str] = mapped_column(String, index=True)
     period_type: Mapped[str] = mapped_column(String, index=True)
 
     metric_code: Mapped[str] = mapped_column(String, index=True)
     metric_name: Mapped[str] = mapped_column(String)
-    value: Mapped[float | None] = mapped_column(Float, nullable=True)
-    unit: Mapped[str | None] = mapped_column(String, nullable=True)
-    calc_trace: Mapped[str | None] = mapped_column(Text, nullable=True)
+    value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    unit: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    calc_trace: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
 
     report: Mapped[Report] = relationship("Report", back_populates="metrics")
@@ -259,7 +260,7 @@ class Alert(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     report_id: Mapped[str] = mapped_column(String, ForeignKey("reports.id"), index=True)
-    company_id: Mapped[str | None] = mapped_column(String, ForeignKey("companies.id"), nullable=True, index=True)
+    company_id: Mapped[Optional[str]] = mapped_column(String, ForeignKey("companies.id"), nullable=True, index=True)
 
     period_end: Mapped[str] = mapped_column(String, index=True)
     period_type: Mapped[str] = mapped_column(String, index=True)
@@ -268,7 +269,7 @@ class Alert(Base):
     level: Mapped[str] = mapped_column(String, index=True)
     title: Mapped[str] = mapped_column(String)
     message: Mapped[str] = mapped_column(Text)
-    evidence: Mapped[str | None] = mapped_column(Text, nullable=True)
+    evidence: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
 
     report: Mapped[Report] = relationship("Report", back_populates="alerts")

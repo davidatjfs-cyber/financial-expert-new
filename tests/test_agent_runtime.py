@@ -58,7 +58,7 @@ class AgentRuntimeTests(unittest.TestCase):
 
     def test_claim_agent_new_pick_slot_hits_lunch_window_within_10_minutes(self):
         real_datetime = self.api._dt.datetime
-        fixed_now = real_datetime(2026, 5, 7, 12, 7, 0)
+        fixed_now = real_datetime(2026, 5, 7, 13, 7, 0)
 
         class FixedDateTime(real_datetime):
             @classmethod
@@ -70,21 +70,21 @@ class AgentRuntimeTests(unittest.TestCase):
         with patch.object(self.api._dt, "datetime", FixedDateTime):
             slot = self.api._claim_agent_new_pick_slot("a")
 
-        self.assertEqual(slot, "2026-05-07:12:00")
+        self.assertEqual(slot, "2026-05-07:13:00")
 
-    def test_claim_agent_new_pick_slot_hits_new_after_close_windows(self):
+    def test_claim_agent_new_pick_slot_hits_afternoon_windows(self):
         real_datetime = self.api._dt.datetime
 
         class FixedDateTimeA(real_datetime):
             @classmethod
             def now(cls, tz=None):
-                value = real_datetime(2026, 5, 7, 16, 5, 0)
+                value = real_datetime(2026, 5, 7, 13, 5, 0)
                 return value.replace(tzinfo=tz) if tz is not None else value
 
         class FixedDateTimeB(real_datetime):
             @classmethod
             def now(cls, tz=None):
-                value = real_datetime(2026, 5, 7, 16, 25, 0)
+                value = real_datetime(2026, 5, 7, 13, 20, 0)
                 return value.replace(tzinfo=tz) if tz is not None else value
 
         with patch.object(self.api._dt, "datetime", FixedDateTimeA):
@@ -92,22 +92,22 @@ class AgentRuntimeTests(unittest.TestCase):
         with patch.object(self.api._dt, "datetime", FixedDateTimeB):
             slot_b = self.api._claim_agent_new_pick_slot("b")
 
-        self.assertEqual(slot_a, "2026-05-07:16:00")
-        self.assertEqual(slot_b, "2026-05-07:16:20")
+        self.assertEqual(slot_a, "2026-05-07:13:00")
+        self.assertEqual(slot_b, "2026-05-07:13:15")
 
-    def test_claim_agent_new_pick_slot_hits_latest_after_close_windows(self):
+    def test_claim_agent_new_pick_slot_hits_latest_afternoon_windows(self):
         real_datetime = self.api._dt.datetime
 
         class FixedDateTimeA(real_datetime):
             @classmethod
             def now(cls, tz=None):
-                value = real_datetime(2026, 5, 7, 16, 3, 0)
+                value = real_datetime(2026, 5, 7, 13, 3, 0)
                 return value.replace(tzinfo=tz) if tz is not None else value
 
         class FixedDateTimeB(real_datetime):
             @classmethod
             def now(cls, tz=None):
-                value = real_datetime(2026, 5, 7, 16, 23, 0)
+                value = real_datetime(2026, 5, 7, 13, 18, 0)
                 return value.replace(tzinfo=tz) if tz is not None else value
 
         with patch.object(self.api._dt, "datetime", FixedDateTimeA):
@@ -115,8 +115,8 @@ class AgentRuntimeTests(unittest.TestCase):
         with patch.object(self.api._dt, "datetime", FixedDateTimeB):
             slot_b = self.api._claim_agent_new_pick_slot("b")
 
-        self.assertEqual(slot_a, "2026-05-07:16:00")
-        self.assertEqual(slot_b, "2026-05-07:16:20")
+        self.assertEqual(slot_a, "2026-05-07:13:00")
+        self.assertEqual(slot_b, "2026-05-07:13:15")
 
     def test_llm_agent_accepts_base_symbol_for_existing_holding(self):
         now = int(time.time())
@@ -237,18 +237,18 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertEqual(first.side, "BUY")
         self.assertEqual(second.side, "BUY")
 
-    def test_claim_agent_new_pick_slot_at_16_00(self):
+    def test_claim_agent_new_pick_slot_at_13_00(self):
         real_datetime = self.api._dt.datetime
 
         class FixedDateTime(real_datetime):
             @classmethod
             def now(cls, tz=None):
-                value = real_datetime(2026, 5, 7, 16, 4, 0)
+                value = real_datetime(2026, 5, 7, 13, 4, 0)
                 return value.replace(tzinfo=tz) if tz is not None else value
 
         with patch.object(self.api._dt, "datetime", FixedDateTime):
             slot = self.api._claim_agent_new_pick_slot("a")
-        self.assertEqual(slot, "2026-05-07:16:00")
+        self.assertEqual(slot, "2026-05-07:13:00")
 
     def test_strategy_alert_trade_retries_after_failed_first_attempt(self):
         now = int(time.time())

@@ -4214,7 +4214,7 @@ def _run_llm_agent_once(
 ## 系统已经做了的事（你不用重复判断）
 - 硬告警自动执行：strategy_stop_loss 自动清仓，TP1 自动减半仓，TP2 自动清仓，signal_sell 自动减半仓。**收到这些告警时不要再输出 sell 动作**。
 - 单股15%上限、行业风控、移动止损线 — 系统底层强制。
-- 候选股已经按 quality_score≥30 + sector_strength≥35 预筛过 — 进入列表的都是基础合格的。
+- 候选股已经按 quality_score≥30 预筛过，但 sector_strength 因个股不同可能较低（轻仓试探/关注等买点类候选尤其如此），需自行结合字段判断。
 
 ## 不可越界的安全边界
 - 买入新股票时 symbol 必须来自候选股列表（已持仓的加仓/减仓不受此限制）。
@@ -4226,7 +4226,7 @@ def _run_llm_agent_once(
 **新开仓的优先级**：
 - 【强烈推荐】action=强买信号 且 reward_risk_ratio≥2.0 且 sector_strength≥50
 - 【可以考虑】action=积极建仓 且 reward_risk_ratio≥3.0 且 sector_strength≥60
-- 【特殊机会】其他候选 — 仅当行业极度强势(≥80)或多项信号共振时
+- 轻仓试探/关注等买点 仅作参考观察，系统不执行对这类候选的新开仓。
 
 **HS300 状态影响策略选择**：
 - weak（弱势）：优先抄底反弹型机会（深度回调+放量+timing_score高）
