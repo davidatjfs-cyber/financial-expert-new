@@ -1134,6 +1134,23 @@ def _update_position_peak_price(position: "PortfolioPosition", current_price: Op
     return existing
 
 
+def _agent_bought_position_today(agent_id: str, position_id: str, trades: list) -> bool:
+    """Return True if this agent bought position_id today (CN calendar date, UTC+8)."""
+    agent_source = _agent_id_to_source(agent_id)
+    today_cn = datetime.now(timezone(timedelta(hours=8))).date()
+    for t in trades:
+        if (getattr(t, "position_id", None) != position_id
+                or (getattr(t, "source", "") or "").strip() != agent_source
+                or (getattr(t, "side", "") or "").strip().upper() != "BUY"):
+            continue
+        ts = int(getattr(t, "created_at", 0) or 0)
+        if ts <= 0:
+            continue
+        if datetime.fromtimestamp(ts, tz=timezone(timedelta(hours=8))).date() == today_cn:
+            return True
+    return False
+
+
 def _execute_strategy_alert_trade(alert: PortfolioAlertResponse, agent_id: str = "a") -> Optional[PortfolioTradeResponse]:
     exec_key = f"{agent_id}:{alert.position_id}:{alert.alert_type}"
     if alert.alert_type not in {"target_buy", "strategy_buy_zone", "signal_buy"} and _strategy_exec_already_done(exec_key):
@@ -1198,6 +1215,11 @@ def _execute_strategy_alert_trade(alert: PortfolioAlertResponse, agent_id: str =
             buy_amount = buy_qty * trade_price
         return _create_trade_at_price(agent_pos_id, "BUY", buy_qty, trade_price, _agent_id_to_source(agent_id))
     if held_qty <= 0:
+        return None
+    # T+1: cannot sell a position bought on the same calendar day (CN time)
+    if _agent_bought_position_today(agent_id, agent_pos_id, trades):
+        _log_agent_pick_event(agent_id, "alert", "sell_rejected_t1", symbol=symbol,
+                              detail=f"alert_type={alert.alert_type}")
         return None
     if alert.alert_type == "strategy_take_profit_1":
         trade = _create_trade_at_price(agent_pos_id, "SELL", max(1.0, held_qty / 2.0), trade_price, _agent_id_to_source(agent_id))
@@ -3961,25 +3983,44 @@ def _run_llm_agent_once(
     _src_holdings = _position_source_holdings(all_trades, positions, {p.id: 0.0 for p in positions})
     _agent_src = _src_holdings.get(agent_id, {})
 
-    # Cache of agent-source BUY trade timestamps per position_id, used to compute
-    # how long each held position has been open. Cheaper than re-iterating
-    # `all_trades` for every holding.
+    # Compute the start timestamp of each position's *current* holding streak.
+    # We replay trades in chronological order; when net quantity hits zero the
+    # streak resets, so a position that was fully sold and re-bought shows the
+    # correct days_held instead of counting from the very first historical buy.
     agent_source_value = _agent_id_to_source(agent_id)
-    earliest_buy_ts_by_pos: dict[str, int] = {}
+    _pos_trade_list: dict[str, list[tuple[int, str, float]]] = {}
     for t in all_trades:
         if (getattr(t, "source", "") or "").strip() != agent_source_value:
             continue
-        if (getattr(t, "side", "") or "").strip().upper() != "BUY":
+        side = (getattr(t, "side", "") or "").strip().upper()
+        if side not in ("BUY", "SELL"):
             continue
         pid = getattr(t, "position_id", None)
         if not pid:
             continue
         ts = int(getattr(t, "created_at", 0) or 0)
-        if ts <= 0:
+        qty = float(getattr(t, "quantity", 0) or 0)
+        if ts <= 0 or qty <= 0:
             continue
-        existing = earliest_buy_ts_by_pos.get(pid)
-        if existing is None or ts < existing:
-            earliest_buy_ts_by_pos[pid] = ts
+        _pos_trade_list.setdefault(pid, []).append((ts, side, qty))
+
+    earliest_buy_ts_by_pos: dict[str, int] = {}
+    for pid, trade_list in _pos_trade_list.items():
+        trade_list.sort(key=lambda x: x[0])
+        net_qty = 0.0
+        streak_start: Optional[int] = None
+        for ts, side, qty in trade_list:
+            if side == "BUY":
+                if net_qty <= 1e-9:
+                    streak_start = ts  # position opened (or re-opened)
+                net_qty += qty
+            else:  # SELL
+                net_qty -= qty
+                if net_qty <= 1e-9:
+                    net_qty = 0.0
+                    streak_start = None  # position fully closed, reset streak
+        if streak_start is not None and net_qty > 1e-9:
+            earliest_buy_ts_by_pos[pid] = streak_start
 
     def _pct(num, den):
         try:
@@ -4454,6 +4495,11 @@ hold 时 symbol 填 null。每次最多5个动作。
                 if sell_price <= 0:
                     last_status = f"llm_sell_no_price:{symbol}"
                     _log_llm_event("llm_sell_rejected", symbol=symbol, detail="no_price")
+                    continue
+                # T+1: cannot sell a position bought on the same calendar day (CN time)
+                if _agent_bought_position_today(agent_id, pos.id, all_trades):
+                    last_status = f"llm_sell_rejected_t1:{symbol}"
+                    _log_llm_event("llm_sell_rejected", symbol=symbol, detail="t1_restriction")
                     continue
                 trade = _create_trade_at_price(pos.id, "SELL", qty, sell_price, _agent_id_to_source(agent_id), session=s)
                 committed_trade = trade
