@@ -4320,6 +4320,7 @@ hold 时 symbol 填 null。每次最多5个动作。
 **候选股**：current_price, buy_zone_low/high, price_in_zone(below/lower/middle/upper/above), stop_loss, take_profit_1/2, upside_to_tp2_pct, downside_to_stop_pct, reward_risk_ratio, momentum_20d_pct, sector_strength, quality_score, timing_score, ma5/20/60, rsi14, trend"""
 
     # --- 业绩考核 & 生存压力 ---
+    agent_display = f"Agent {agent_id.upper()}"
     deadline_ts = cfg.deadline_ts
     if deadline_ts is not None:
         days_left = max(0, int((int(deadline_ts) - now) / 86400))
@@ -4414,7 +4415,6 @@ hold 时 symbol 填 null。每次最多5个动作。
         agent_b_model = (os.environ.get("AGENT_B_LLM_MODEL") or "qwen-max-latest").strip()
         model_name = agent_a_model if agent_id == "a" else agent_b_model
         temp = 0.10 if agent_id == "a" else 0.30
-        agent_display = f"Agent {agent_id.upper()}"
         llm_response = call_llm(system_prompt, user_prompt, temperature=temp, max_tokens=800, model=model_name)
     except Exception as e:
         with session_scope() as s:
