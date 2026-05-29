@@ -38,6 +38,20 @@ _STATIC_SECTOR_MAP: Optional[dict[str, str]] = None
 _CN_MARKET_STATE_CACHE: tuple[float, str] = (0.0, "unknown")
 
 
+def classify_cn_regime(closes) -> str:
+    """Point-in-time HS300 regime from a close series (most-recent last).
+
+    Shared by the live classifier (`_cn_index_market_state`) and the backtest so
+    both apply the identical rule: weak iff last close < MA60 and 20-day return <= 0.
+    """
+    arr = np.array([float(c) for c in closes if c is not None], dtype=float)
+    if len(arr) < 65:
+        return "unknown"
+    ma60 = float(np.mean(arr[-60:]))
+    ret20 = (float(arr[-1]) / float(arr[-21]) - 1.0) * 100.0
+    return "weak" if float(arr[-1]) < ma60 and ret20 <= 0 else "not_weak"
+
+
 def _cn_index_market_state() -> str:
     """Classify HS300 market regime for the A-share reversal strategy.
 
@@ -64,12 +78,9 @@ def _cn_index_market_state() -> str:
                     closes.append(float(item[2]))
                 except Exception:
                     pass
-        if len(closes) < 65:
+        state = classify_cn_regime(closes)
+        if state == "unknown":
             raise ValueError("not enough index data")
-        arr = np.array(closes, dtype=float)
-        ma60 = float(np.mean(arr[-60:]))
-        ret20 = (float(arr[-1]) / float(arr[-21]) - 1.0) * 100.0
-        state = "weak" if float(arr[-1]) < ma60 and ret20 <= 0 else "not_weak"
     except Exception:
         state = "unknown"
     _CN_MARKET_STATE_CACHE = (now, state)
@@ -654,20 +665,25 @@ def _score_breakout_timing(
         except Exception:
             pass
 
-    # Recent 5-day return: healthy advance, not parabolic.
+    # Recent 5-day return: reward EARLY entries, penalize chasing a run-up.
+    # Backtest (HS300, 30 breakout trades) shows win-rate & forward-return
+    # decline monotonically with ret_5d: <3% → 56-100% win / +9~16%; 3-6%
+    # → 42% / +1%; 6-12% → 33% / -7%. Buying after a multi-day surge is the
+    # A-share 追涨 trap (T+1 locks you in for the next-day reversion), so the
+    # 6-12% zone — previously credited +5 — is now a penalty.
     if ret_5d is not None:
         try:
             r5 = float(ret_5d)
-            if 1.0 <= r5 <= 6.0:
-                score += 14.0
+            if -2.0 <= r5 < 3.0:
+                score += 14.0    # early / pre-surge — best forward returns
+            elif 3.0 <= r5 <= 6.0:
+                score += 6.0     # already moved, mediocre expectancy
             elif 6.0 < r5 <= 12.0:
-                score += 5.0
+                score -= 6.0     # chasing — negative expectancy
             elif r5 > 12.0:
-                score -= 5.0      # already extended, late
-            elif -2.0 <= r5 < 1.0:
-                score += 3.0      # neutral consolidation OK
+                score -= 10.0    # very late, extended
             else:
-                score -= 8.0      # actually falling — not a breakout
+                score -= 8.0     # actually falling — not a breakout
         except Exception:
             pass
 
@@ -789,6 +805,56 @@ def _downgrade_action(action: str, levels: int = 1) -> str:
         return action
     idx = min(len(ladder) - 1, ladder.index(action) + levels)
     return ladder[idx]
+
+
+QUALITY_THRESHOLD = 30.0
+BREAKOUT_HARD_THRESHOLD = 75.0
+BREAKOUT_SECTOR_THRESHOLD = 60.0
+
+
+def decide_action(quality_total: Optional[float], timing_total: Optional[float],
+                  breakout_total: Optional[float], sector_strength_score: Optional[float],
+                  cn_market_allows_new_buy: bool,
+                  quality_threshold: float = QUALITY_THRESHOLD) -> str:
+    """Map scores to an action bucket. Single source of truth for the buy
+    trigger, shared by `run_scan` and the backtest so the two cannot drift."""
+    qt = quality_total or 0
+    tt = timing_total or 0
+    bt = breakout_total or 0
+    ss = sector_strength_score if sector_strength_score is not None else 50.0
+
+    if qt >= quality_threshold and tt >= 96 and cn_market_allows_new_buy:
+        action = "强买信号"  # mean-reversion bucket (weak regime)
+    elif (
+        qt >= quality_threshold
+        and not cn_market_allows_new_buy
+        and bt >= BREAKOUT_HARD_THRESHOLD
+        and ss >= BREAKOUT_SECTOR_THRESHOLD
+    ):
+        action = "强买信号"  # trend-continuation bucket (not_weak regime)
+    elif (
+        qt >= quality_threshold
+        and not cn_market_allows_new_buy
+        and bt >= 60.0
+        and ss >= 50.0
+    ):
+        action = "积极建仓"  # softer breakout — surfaced but not auto-strong-buy
+    elif qt >= quality_threshold and tt >= 80:
+        action = "关注等买点"
+    elif qt >= quality_threshold and tt >= 0:
+        action = "关注等买点"
+    elif tt >= 80:
+        action = "有买点基本面弱"
+    elif qt >= quality_threshold:
+        action = "优质远离买点"
+    else:
+        action = "暂不关注"
+
+    if ss < 25:
+        action = _downgrade_action(action, 2)
+    elif ss < 35:
+        action = _downgrade_action(action, 1)
+    return action
 
 
 def _bucket_for_action(action: str) -> str:
@@ -1486,7 +1552,6 @@ def run_scan(top_n: int = 20,
         s.sector_name = sec
         s.sector_strength_score = sector_strength.get(sec, 50.0)
 
-    QUALITY_THRESHOLD = 30.0
     cn_market_state = _cn_index_market_state()
     cn_market_allows_new_buy = cn_market_state == "weak"
 
@@ -1501,52 +1566,13 @@ def run_scan(top_n: int = 20,
     # main entry trigger. In not_weak regimes that path is silent by design
     # — there is no oversold setup. Breakout path only activates outside the
     # weak regime AND only when the sector is genuinely strong (≥60), to
-    # avoid chasing isolated breakouts in dying sectors.
-    BREAKOUT_HARD_THRESHOLD = 75.0
-    BREAKOUT_SECTOR_THRESHOLD = 60.0
-
+    # avoid chasing isolated breakouts in dying sectors. See decide_action.
     for i, s in enumerate(scores[:top_n]):
         s.rank = i + 1
         s.reason = _generate_factor_reason(s)
-        qt = s.quality_score_total or 0
-        tt = s.timing_score_total or 0
-        bt = s.breakout_score or 0
-        sector_strength_score = s.sector_strength_score if s.sector_strength_score is not None else 50.0
-        if qt >= QUALITY_THRESHOLD and tt >= 96 and cn_market_allows_new_buy:
-            s.action = "强买信号"  # mean-reversion bucket (weak regime)
-        elif (
-            qt >= QUALITY_THRESHOLD
-            and not cn_market_allows_new_buy
-            and bt >= BREAKOUT_HARD_THRESHOLD
-            and sector_strength_score >= BREAKOUT_SECTOR_THRESHOLD
-        ):
-            # Trend-continuation bucket (not_weak regime). Requires strong
-            # sector backing because breakout strategies depend on the broader
-            # group being in motion.
-            s.action = "强买信号"
-        elif (
-            qt >= QUALITY_THRESHOLD
-            and not cn_market_allows_new_buy
-            and bt >= 60.0
-            and sector_strength_score >= 50.0
-        ):
-            # Softer breakout setup — surface as "积极建仓" so it appears in
-            # candidates but doesn't auto-execute as a strong-buy.
-            s.action = "积极建仓"
-        elif qt >= QUALITY_THRESHOLD and tt >= 80:
-            s.action = "关注等买点"
-        elif qt >= QUALITY_THRESHOLD and tt >= 0:
-            s.action = "关注等买点"
-        elif tt >= 80:
-            s.action = "有买点基本面弱"
-        elif qt >= QUALITY_THRESHOLD:
-            s.action = "优质远离买点"
-        else:
-            s.action = "暂不关注"
-        if sector_strength_score < 25:
-            s.action = _downgrade_action(s.action, 2)
-        elif sector_strength_score < 35:
-            s.action = _downgrade_action(s.action, 1)
+        s.action = decide_action(
+            s.quality_score_total, s.timing_score_total, s.breakout_score,
+            s.sector_strength_score, cn_market_allows_new_buy, QUALITY_THRESHOLD)
         s.recommendation_bucket = _bucket_for_action(s.action)
         results.append(asdict(s))
 

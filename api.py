@@ -1027,10 +1027,12 @@ def _mark_strategy_exec_done(exec_key: str):
 
 # Trailing-stop activates once peak >= avg_cost * (1 + TRAILING_ACTIVATION_PCT).
 # Once active, effective stop = max(original stop, peak * (1 - TRAILING_DRAWDOWN_PCT)).
-# 5% activation matches TP1; 5% trailing drawdown is wide enough to survive
-# normal A-share intraday noise (~2-3%) but tight enough to capture pullbacks.
+# Exit policy V2 (pure trailing, no fixed take-profit): fixed TP1/TP2 amputated
+# winners (backtest: avg period return +3.99%→+0.70%, Sharpe 1.24→0.55). Removing
+# them and widening the trailing drawdown to 10% let winners run while still
+# protecting gains — backtest: +3.32% return, Sharpe 1.33, max DD -13.3%→-8.0%.
 TRAILING_ACTIVATION_PCT = 0.05
-TRAILING_DRAWDOWN_PCT = 0.05
+TRAILING_DRAWDOWN_PCT = 0.10
 
 
 def _effective_strategy_levels(position: "PortfolioPosition", indicators) -> tuple[Optional[float], Optional[float], Optional[float]]:
@@ -4212,7 +4214,7 @@ def _run_llm_agent_once(
 4. **主动减仓**：在硬告警触发前，识别风险累积，主动减仓锁定利润或控制损失。
 
 ## 系统已经做了的事（你不用重复判断）
-- 硬告警自动执行：strategy_stop_loss 自动清仓，TP1 自动减半仓，TP2 自动清仓，signal_sell 自动减半仓。**收到这些告警时不要再输出 sell 动作**。
+- 硬告警自动执行：strategy_stop_loss / 移动止损 自动清仓，signal_sell 自动减半仓。**收到这些告警时不要再输出 sell 动作**。（已取消固定止盈 TP1/TP2 的自动卖出：盈利仓位改由移动止损保护，让趋势充分运行，不要为了某个固定止盈位提前砍掉赢家。）
 - 单股15%上限、行业风控、移动止损线 — 系统底层强制。
 - 候选股已经按 quality_score≥30 预筛过，但 sector_strength 因个股不同可能较低（轻仓试探/关注等买点类候选尤其如此），需自行结合字段判断。
 
@@ -4233,7 +4235,7 @@ def _run_llm_agent_once(
 - not_weak（健康）：优先突破型机会（多头排列+量价齐升+sector_strength高）
 
 **主动减仓的时机判断**（系统不会自动做，需要你判断）：
-- peak_pct_from_entry≥7 且 dist_to_tp2_pct<3：接近TP2但未触达，主动锁定利润，避免冲高回落
+- 默认让利润奔跑：浮盈仓位由移动止损（峰值回撤10%）保护，不要因接近某个止盈价就提前清仓而砍掉趋势；只有当趋势真正走坏（放量跌破MA20 或 动量明显转负）才主动减仓
 - days_held≥15 且 pnl_pct<-3 且趋势走弱：成本时间累积过久，止损放大
 - 大盘急转弱 且 持仓出现行业逆风：风险共振时主动降仓
 
@@ -5611,7 +5613,7 @@ def get_portfolio_alerts():
         if si is not None:
             buy_zone_low = _si_get(si, "strategy_buy_zone_low")
             buy_zone_high = _si_get(si, "strategy_buy_zone_high")
-            stop_loss, take_profit_1, take_profit_2 = _effective_strategy_levels(p, si)
+            stop_loss, _, _ = _effective_strategy_levels(p, si)
 
             try:
                 if current_price is not None and buy_zone_high is not None:
@@ -5640,32 +5642,10 @@ def get_portfolio_alerts():
             except Exception:
                 pass
 
-            try:
-                if current_price is not None and float(p.quantity or 0) > 0 and take_profit_2 is not None:
-                    tp2 = float(take_profit_2)
-                    intraday_tp2_hit = day_high is not None and day_high >= tp2
-                    if current_price >= tp2 or intraday_tp2_hit:
-                        alerts.append(PortfolioAlertResponse(
-                            key=f"{p.id}:strategy_take_profit_2:{int(tp2 * 10000)}", position_id=p.id,
-                            market=market, symbol=symbol, name=name, alert_type="strategy_take_profit_2",
-                            message=f"已触发第二止盈价 {tp2:.2f}，考虑清仓或保留底仓",
-                            current_price=current_price, trigger_price=tp2,
-                        ))
-                if current_price is not None and float(p.quantity or 0) > 0 and take_profit_1 is not None:
-                    tp1 = float(take_profit_1)
-                    tp2 = float(take_profit_2) if take_profit_2 is not None else None
-                    intraday_tp1_hit = day_high is not None and day_high >= tp1
-                    tp2_reached = tp2 is not None and current_price >= tp2
-                    intraday_tp2_reached = tp2 is not None and day_high is not None and day_high >= tp2
-                    if (current_price >= tp1 or intraday_tp1_hit) and not (tp2_reached or intraday_tp2_reached):
-                        alerts.append(PortfolioAlertResponse(
-                            key=f"{p.id}:strategy_take_profit_1:{int(tp1 * 10000)}", position_id=p.id,
-                            market=market, symbol=symbol, name=name, alert_type="strategy_take_profit_1",
-                            message=f"已触发第一止盈价 {tp1:.2f}，考虑先卖出1/2",
-                            current_price=current_price, trigger_price=tp1,
-                        ))
-            except Exception:
-                pass
+            # Exit policy V2: no fixed take-profit auto-sell. Winners are now
+            # managed by the trailing stop (see TRAILING_DRAWDOWN_PCT) so they can
+            # run instead of being capped at +5%/+10%. The analytic TP1/TP2 targets
+            # remain in `si` for display/agent context, but no longer auto-execute.
 
             if _si_get(si, "buy_price_aggressive_ok") is True and _si_get(si, "buy_price_aggressive") is not None:
                 bp = _si_get(si, "buy_price_aggressive")
