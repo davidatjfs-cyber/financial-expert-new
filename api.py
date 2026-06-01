@@ -69,9 +69,11 @@ _SPOT_CACHE: dict[str, tuple[float, "pd.DataFrame"]] = {}
 _FEISHU_SENT_ALERTS: dict[str, tuple[float, str]] = {}
 _FEISHU_SENT_TTL = 6 * 3600
 _CN_MARKET_STATE_CACHE: tuple[float, str] = (0.0, "unknown")
+# 自选股评估时点：每 agent 4 次/天（早盘/盘中/午后/尾盘前），A、B 错峰排布。
+# 候选范围不变（仍只能买系统候选池），多开窗仅为抓更好的盘中入场时机。
 _AGENT_NEW_PICK_SCHEDULE: dict[str, tuple[tuple[int, int], ...]] = {
-    "a": ((9, 30), (13, 0)),
-    "b": ((9, 45), (13, 15)),
+    "a": ((9, 35), (10, 40), (13, 5), (14, 0)),
+    "b": ((9, 50), (11, 0), (13, 20), (14, 15)),
 }
 _AGENT_NEW_PICK_CHECKED: dict[tuple[str, str], bool] = {}
 _AGENT_NEW_PICK_LOCK = threading.Lock()
@@ -672,6 +674,29 @@ def _feishu_tenant_token(app_id: str, app_secret: str) -> Optional[str]:
         return data.get("tenant_access_token")
     except Exception:
         return None
+
+
+def _feishu_send_text(text: str) -> None:
+    """Best-effort plain-text Feishu push (reuses tenant token + receive_id)."""
+    app_id, app_secret, receive_id, receive_id_type = _feishu_env()
+    if not app_id or not app_secret or not receive_id:
+        return
+    token = _feishu_tenant_token(app_id, app_secret)
+    if not token:
+        return
+    try:
+        requests.post(
+            f"https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type={receive_id_type}",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={
+                "receive_id": receive_id,
+                "msg_type": "text",
+                "content": json.dumps({"text": text}, ensure_ascii=False),
+            },
+            timeout=10,
+        )
+    except Exception:
+        pass
 
 
 def _send_feishu_portfolio_alert(alert: PortfolioAlertResponse):
@@ -2862,6 +2887,63 @@ def _agent_id_to_source(agent_id: str) -> str:
     return f"auto_strategy_{agent_id}"
 
 
+# ───────────────── 双 Agent 实盘对决（A 趋势突破 vs B 价值抄底）─────────────────
+def _duel_state_path():
+    from core.db import get_app_data_dir
+    return get_app_data_dir() / "agent_duel.json"
+
+
+def _get_duel_start_ts() -> int:
+    """对决起跑时刻(epoch秒)。优先读持久化文件，其次 env，缺省 0(=自成立以来累计)。"""
+    try:
+        p = _duel_state_path()
+        if p.exists():
+            return int(json.loads(p.read_text()).get("start_ts") or 0)
+    except Exception:
+        pass
+    try:
+        return int(os.environ.get("AGENT_DUEL_START_TS") or "0")
+    except Exception:
+        return 0
+
+
+def _set_duel_start_ts(ts: int) -> None:
+    try:
+        _duel_state_path().write_text(json.dumps({"start_ts": int(ts)}))
+    except Exception as e:
+        print(f"[DUEL] set start_ts error: {e}")
+
+
+def _agent_duel_net_pnl(trades, agent_id: str, holdings_mv: float, t0: int) -> float:
+    """自 t0 起的净盈亏。t0 时刻账户全为现金(=本金)，因此
+    净盈亏 = (t0后卖出总额 - t0后买入总额) + 当前持仓市值。无需历史市值快照。"""
+    src = _agent_id_to_source(agent_id)
+    net_cash = 0.0
+    for t in trades:
+        if (getattr(t, "source", "") or "").strip() != src:
+            continue
+        if int(getattr(t, "created_at", 0) or 0) <= t0:
+            continue
+        side = (getattr(t, "side", "") or "").strip().upper()
+        amt = float(getattr(t, "price", 0) or 0) * float(getattr(t, "quantity", 0) or 0)
+        if side == "SELL":
+            net_cash += amt
+        elif side == "BUY":
+            net_cash -= amt
+    return net_cash + float(holdings_mv or 0)
+
+
+def _agent_post_t0_sell_count(trades, agent_id: str, t0: int) -> int:
+    """t0 后该 agent 完成的卖出笔数(已了结轮次的代理指标，用于样本量护栏)。"""
+    src = _agent_id_to_source(agent_id)
+    return sum(
+        1 for t in trades
+        if (getattr(t, "source", "") or "").strip() == src
+        and int(getattr(t, "created_at", 0) or 0) > t0
+        and (getattr(t, "side", "") or "").strip().upper() == "SELL"
+    )
+
+
 def _queue_auto_trade(session, position_id: str, side: str, trigger_price: float, quantity: float, source: str) -> Optional[PortfolioAutoTradeResponse]:
     side = (side or "").strip().upper()
     if side not in {"BUY", "SELL"}:
@@ -3950,11 +4032,24 @@ def _run_llm_agent_once(
         all_trades, positions, agent_id, capital,
     )
 
+    # --- 实盘对决：对手身份与本金（净收益率在拿到双方持仓市值后计算）---
+    _opp_id = "b" if agent_id == "a" else "a"
+    with session_scope() as s:
+        _opp_capital = float(_get_or_create_agent_config(s, _opp_id).capital or 10000000.0)
+
     capital_reserve = capital * 0.2
     max_holdings = capital - capital_reserve
     _summary = get_portfolio_summary()
     agent_holdings_mv = float((_summary.agent_a if agent_id == "a" else _summary.agent_b).total_market_value or 0)
     available_capital = max(0.0, max_holdings - agent_holdings_mv)
+
+    # 对决计分：自 T0(对决起跑/清仓重置时刻)起的净收益率。T0 时全为现金，
+    # 故净盈亏 = (T0后卖出额 - T0后买入额) + 当前持仓市值；T0=0 时退化为自成立以来累计。
+    _duel_t0 = _get_duel_start_ts()
+    _opp_holdings_mv = float((_summary.agent_b if agent_id == "a" else _summary.agent_a).total_market_value or 0)
+    _my_net_rate = (_agent_duel_net_pnl(all_trades, agent_id, agent_holdings_mv, _duel_t0) / capital * 100.0) if capital > 0 else 0.0
+    _opp_net_rate = (_agent_duel_net_pnl(all_trades, _opp_id, _opp_holdings_mv, _duel_t0) / _opp_capital * 100.0) if _opp_capital > 0 else 0.0
+    _duel_gap = _my_net_rate - _opp_net_rate
 
     # Per-source holdings gives each agent's actual cost basis (not blended across all sources)
     _src_holdings = _position_source_holdings(all_trades, positions, {p.id: 0.0 for p in positions})
@@ -4203,7 +4298,37 @@ def _run_llm_agent_once(
     )
     _market_brief = f"HS300状态：{_hs300_state} | 最新点位：{_hs300_latest or '未知'} | 近20日涨跌：{_ret_str}"
 
-    system_prompt = """你是一名A股交易决策师，目标是【在严格风控下最大化净收益率】。
+    # ── 双 Agent 差异化：A=趋势突破派，B=价值抄底反转派（共用候选池，选股哲学相反）──
+    _AGENT_STYLE_NAME = {"a": "趋势突破派", "b": "价值抄底反转派"}
+    if agent_id == "a":
+        _style_block = """## 你的投资风格：趋势突破派（与对手形成差异化竞争，禁止风格漂移）
+你只做【多头趋势中的强势突破】，绝不抄底接落刀。
+- 优先选：trend=up 且多头排列(current_price>ma20>ma60)、action="强买信号"、sector_strength≥60(强顺风)、momentum_20d_pct>0。
+- 入场位：price_in_zone 接受 middle/upper（可在突破位入场；系统已有 ret_5d 追高护栏，不会让你追太高）。
+- 坚决回避：price_in_zone below/lower 的深跌回调票、趋势走坏(跌破MA60)、sector 逆风(<40) —— 那是对手(价值抄底派)的领地，你碰了就是风格漂移。
+- 你的信仰：强者恒强、顺势而为；宁可买在突破的右侧，不抄左侧的底。"""
+    else:
+        _style_block = """## 你的投资风格：价值抄底反转派（与对手形成差异化竞争，禁止风格漂移）
+你只做【错杀后的回调反弹】，绝不追高突破。
+- 优先选：price_in_zone=below/lower（已回调到位/跌破买区）、action="积极建仓"或"关注等买点"、timing_score 高(抄底反弹信号强)、quality_score 高(基本面扎实，避免接落刀)。
+- momentum_20d_pct 可以为负，但要有企稳迹象（不接连续跌停的落刀）。
+- 坚决回避：已突破创新高、price_in_zone=upper/above 的追高票、纯动量强势票 —— 那是对手(趋势突破派)的领地，你碰了就是风格漂移。
+- 你的信仰：好公司被错杀才是机会；要安全边际，宁可空仓等错杀，不追高。"""
+
+    _gap_line = (
+        f"你目前领先 {_duel_gap:.2f} 个百分点 ✅ 守住优势" if _duel_gap > 0.05
+        else f"你目前落后 {abs(_duel_gap):.2f} 个百分点 ⚠️ 必须追上，否则被淘汰" if _duel_gap < -0.05
+        else "目前几乎打平，胜负未分 ⚔️"
+    )
+    _duel_rule_block = f"""## ⚔️ 生死对决（这是真实规则，不是比喻）
+你（Agent {agent_id.upper()}·{_AGENT_STYLE_NAME[agent_id]}）正在与 Agent {_opp_id.upper()}（{_AGENT_STYLE_NAME[_opp_id]}）进行实盘业绩对决。
+- 评判标准：净收益率（managed_net_return_rate）。
+- 当前战况：你 {_my_net_rate:+.2f}% vs 对手 {_opp_net_rate:+.2f}% —— {_gap_line}。
+- **在评估周期结束时，净收益率落后的一方将被直接停用（fired）：停止开新仓、退出竞争。这是真实机制，不是吓唬你。**
+- 每一个决策都要为"用你的风格跑赢对手"负责：不要为了交易而交易，也不要因恐惧而错过。
+- 但风控永远优先于激进：被暂时领先不可怕，因冒进爆仓出局才是真的输。"""
+
+    system_prompt = _style_block + "\n\n" + _duel_rule_block + "\n\n" + """你是一名A股交易决策师，目标是【在严格风控下最大化净收益率】。
 
 你的核心价值是【综合判断】 — 如果一个决策可以用 if-else 完成，那就不需要你。规则能做的事，系统已经做了；你只做规则做不了的事：**权衡多个互相竞争的信号，做出最优选择**。
 
@@ -4278,6 +4403,10 @@ hold 时 symbol 填 null。每次最多5个动作。
 
 ## 大盘状态
 {_market_brief}
+
+## ⚔️ 对决实时战况（你=Agent {agent_id.upper()}·{_AGENT_STYLE_NAME[agent_id]}；对手=Agent {_opp_id.upper()}·{_AGENT_STYLE_NAME[_opp_id]}）
+- 你的净收益率：{_my_net_rate:+.2f}% | 对手净收益率：{_opp_net_rate:+.2f}%
+- {_gap_line}
 
 ## 资金状态
 - 本金：{capital:,.0f} | 已用市值：{agent_holdings_mv:,.0f} | 可用资金：{available_capital:,.0f}
@@ -4410,6 +4539,19 @@ hold 时 symbol 填 null。每次最多5个动作。
             held_symbol = next((s for s in held_symbols if s.split(".")[0].upper() == symbol_base), None)
             if held_symbol is not None:
                 symbol = held_symbol
+            # 当日同股去重护栏：4 窗口/天下，禁止当天对同一只股票重复买入(含加仓)，防止 churn
+            _today_start = int(_dt.datetime.now(_ZoneInfo("Asia/Shanghai")).replace(
+                hour=0, minute=0, second=0, microsecond=0).timestamp())
+            if any(
+                (getattr(t, "source", "") or "").strip() == agent_source_value
+                and (getattr(t, "side", "") or "").strip().upper() == "BUY"
+                and int(getattr(t, "created_at", 0) or 0) >= _today_start
+                and (getattr(t, "symbol", "") or "").split(".")[0].upper() == symbol_base
+                for t in all_trades
+            ):
+                last_status = f"llm_buy_dup_same_day:{symbol}"
+                _log_llm_event("llm_buy_rejected", symbol=symbol, detail="already_bought_today")
+                continue
             committed_trade: Optional[PortfolioTradeResponse] = None
             queued_order: Optional[PortfolioAutoTradeResponse] = None
             with session_scope() as s:
@@ -4999,6 +5141,50 @@ def execute_portfolio_agent_now(agent_id: str = "a"):
     return _run_portfolio_agent_once(agent_id.strip() or "a")
 
 
+@app.post("/api/portfolio/agent/duel/reset")
+def reset_agent_duel(confirm: str = ""):
+    """对决起跑线重置(一次性)：清仓 A、B 现有持仓为现金 → 设 T0=现在 →
+    重新启用双方。此后对决计分只算 T0 之后的净收益率(公平对比两种风格)。
+    需 confirm=YES 防误触；会真实卖出持仓，谨慎调用。"""
+    if confirm.strip().upper() != "YES":
+        raise HTTPException(status_code=400, detail="需要 confirm=YES 确认(将清仓 A/B 现有持仓)")
+    sold = []
+    with session_scope() as s:
+        positions = s.execute(select(PortfolioPosition)).scalars().all()
+        trades = s.execute(select(PortfolioTrade)).scalars().all()
+        for agent_id in ("a", "b"):
+            qty_map = _agent_live_position_quantities(agent_id, trades, positions)
+            for pos in positions:
+                qty = float(qty_map.get(pos.id, 0.0) or 0.0)
+                if qty <= 1e-9:
+                    continue
+                try:
+                    sp = get_stock_price(symbol=(pos.symbol or "").strip().upper(),
+                                         market=(pos.market or "CN").strip().upper())
+                    px = float(getattr(sp, "price", 0) or 0)
+                except Exception:
+                    px = 0.0
+                if px <= 0:
+                    continue
+                tr = _create_trade_at_price(pos.id, "SELL", qty, px, _agent_id_to_source(agent_id), session=s)
+                if tr is not None:
+                    sold.append({"agent": agent_id, "symbol": pos.symbol, "qty": qty, "price": px})
+    # T0 在清仓之后设定，确保清仓卖出(锁定旧账)不计入对决期收益
+    t0 = int(time.time())
+    _set_duel_start_ts(t0)
+    with session_scope() as s:
+        for agent_id in ("a", "b"):
+            c = _get_or_create_agent_config(s, agent_id)
+            c.enabled = "1"
+            c.last_status = "duel_reset:对决起跑线已重置，从现在开始计分"
+            c.updated_at = t0
+    msg = (f"⚔️ 对决起跑线已重置：A、B 清仓 {len(sold)} 笔归零，"
+           f"双方重新启用，从现在开始公平计分(A 趋势突破 vs B 价值抄底)。")
+    print(f"[DUEL] {msg}")
+    _feishu_send_text(msg)
+    return {"ok": True, "duel_start_ts": t0, "flattened_trades": sold, "message": msg}
+
+
 # ── Auto-Trade endpoints ──────────────────────────────────────────────
 
 @app.post("/api/portfolio/auto-trades", response_model=PortfolioAutoTradeResponse)
@@ -5468,6 +5654,85 @@ if (os.environ.get("ENABLE_INDICATOR_WARMER") or "").strip() == "1":
     _indicator_warmer_thread.start()
 
 
+def _evaluate_agent_duel():
+    """实盘对决评估：评估窗口到期后，净收益率落后的一方自动停用(fired)。
+
+    无需新增存储——评估窗口起点 = DB 中最早的 agent 交易时间。
+    可配置(env):
+      AGENT_DUEL_ENABLED          默认 1（开启）
+      AGENT_DUEL_EVAL_DAYS        默认 30（窗口天数）
+      AGENT_DUEL_MIN_MARGIN_PCT   默认 2.0（领先幅度，单位=净收益率百分点，防噪声）
+      AGENT_DUEL_MIN_CLOSED_TRADES 默认 5（每方最少已了结交易数，防小样本误杀）
+    护栏：双方都在运行才评估；一旦有人被 fired，对决自动结束（不会再误伤胜方）。
+    被 fired = cfg.enabled=0（停开新仓），已有持仓仍按既有规则(移动止损等)了结，可由人工重新启用。
+    """
+    if (os.environ.get("AGENT_DUEL_ENABLED") or "1").strip() != "1":
+        return
+    try:
+        eval_days = float(os.environ.get("AGENT_DUEL_EVAL_DAYS") or "30")
+        min_margin = float(os.environ.get("AGENT_DUEL_MIN_MARGIN_PCT") or "2.0")
+        min_closed = int(os.environ.get("AGENT_DUEL_MIN_CLOSED_TRADES") or "5")
+
+        with session_scope() as s:
+            cfg_a = _get_or_create_agent_config(s, "a")
+            cfg_b = _get_or_create_agent_config(s, "b")
+            a_enabled = (cfg_a.enabled or "0") == "1"
+            b_enabled = (cfg_b.enabled or "0") == "1"
+            cap_a = float(cfg_a.capital or 10000000.0)
+            cap_b = float(cfg_b.capital or 10000000.0)
+            trades = s.execute(select(PortfolioTrade)).scalars().all()
+
+        if not (a_enabled and b_enabled):
+            return  # 已有一方被淘汰或停用，对决结束
+
+        # 评估窗口起点 = T0(清仓重置时刻)；未重置则回退到最早 agent 交易
+        t0 = _get_duel_start_ts()
+        if t0 <= 0:
+            agent_sources = {_agent_id_to_source("a"), _agent_id_to_source("b")}
+            agent_trade_ts = [int(getattr(t, "created_at", 0) or 0) for t in trades
+                              if (getattr(t, "source", "") or "").strip() in agent_sources]
+            if not agent_trade_ts:
+                return
+            t0 = min(agent_trade_ts)
+        elapsed_days = (time.time() - t0) / 86400.0
+        if elapsed_days < eval_days:
+            return
+
+        # 样本量护栏：T0 之后每方至少完成 min_closed 笔卖出(已了结轮次)，防小样本误杀
+        if (_agent_post_t0_sell_count(trades, "a", t0) < min_closed
+                or _agent_post_t0_sell_count(trades, "b", t0) < min_closed):
+            return
+
+        # 计分：自 T0 起的净收益率(T0时全为现金，故可精确计算)
+        summary = get_portfolio_summary()
+        mv_a = float(summary.agent_a.total_market_value or 0)
+        mv_b = float(summary.agent_b.total_market_value or 0)
+        rate_a = (_agent_duel_net_pnl(trades, "a", mv_a, t0) / cap_a * 100.0) if cap_a > 0 else 0.0
+        rate_b = (_agent_duel_net_pnl(trades, "b", mv_b, t0) / cap_b * 100.0) if cap_b > 0 else 0.0
+        gap = rate_a - rate_b
+        if abs(gap) < min_margin:
+            return  # 差距不足，本期不淘汰
+
+        loser = "b" if gap > 0 else "a"
+        winner = "a" if loser == "b" else "b"
+        loser_rate = rate_b if loser == "b" else rate_a
+        winner_rate = rate_a if loser == "b" else rate_b
+        with session_scope() as s:
+            c = _get_or_create_agent_config(s, loser)
+            c.enabled = "0"
+            c.last_status = (f"fired_by_duel: 净收益率 {loser_rate:+.2f}% 落后对手 {winner_rate:+.2f}% "
+                             f"(评估{elapsed_days:.0f}天/差距{abs(gap):.2f}pct)")
+            c.updated_at = int(time.time())
+        msg = ("⚔️ 实盘对决结果\n"
+               f"Agent A(趋势突破派) 净收益率 {rate_a:+.2f}% | Agent B(价值抄底反转派) 净收益率 {rate_b:+.2f}%\n"
+               f"经过 {elapsed_days:.0f} 天，Agent {winner.upper()} 胜出，"
+               f"Agent {loser.upper()} 已被停用(fired)：停止开新仓，持仓按规则了结。")
+        print(f"[DUEL] {msg}")
+        _feishu_send_text(msg)
+    except Exception as e:
+        print(f"[DUEL] evaluate error: {e}")
+
+
 def _portfolio_feishu_notifier():
     interval = int((os.environ.get("FEISHU_PORTFOLIO_ALERT_INTERVAL") or "150").strip() or "150")
     print(f"[FEISHU] trade/agent worker started, interval={interval}s, receive_id={os.environ.get('FEISHU_RECEIVE_ID','')[:8]}...")
@@ -5489,6 +5754,7 @@ def _portfolio_feishu_notifier():
                 threading.Thread(target=_run_portfolio_agent_once, args=("b",),
                     kwargs={"allow_new_pick": True, "pick_slot_key": slot_b, "precomputed_alerts": alerts},
                     daemon=True).start()
+            _evaluate_agent_duel()
         except Exception as e:
             print(f"[FEISHU] trade/agent worker error: {e}")
         time.sleep(interval)
