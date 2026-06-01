@@ -9,6 +9,7 @@ services:
     environment:
       - APP_DATA_DIR=/data
       - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY}
+      - AGENT_B_LLM_MODEL=${AGENT_B_LLM_MODEL:-qwen-max}
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
       - FORCE_PDF_AI=${FORCE_PDF_AI:-0}
       - ENABLE_OCR=${ENABLE_OCR:-0}
