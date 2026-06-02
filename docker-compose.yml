@@ -59,6 +59,11 @@ services:
       - "80:80"
     volumes:
       - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      # weight-tracker 路由独立文件，由 /opt/weight-tracker 仓库管理 (见 weight-tracker/deploy.md)
+      - /opt/weight-tracker/nginx/wt.conf:/etc/nginx/wt-locations/wt.conf:ro
+    extra_hosts:
+      # 让容器内可用 host.docker.internal 连到宿主机 (weight-tracker uvicorn 跑在宿主 :9000)
+      - "host.docker.internal:host-gateway"
     logging:
       driver: json-file
       options:
