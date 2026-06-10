@@ -4322,7 +4322,8 @@ def _run_llm_agent_once(
     else:
         _style_block = """## 你的投资风格：价值抄底反转派（与对手形成差异化竞争，禁止风格漂移）
 你只做【错杀后的回调反弹】，绝不追高突破。
-- 优先选：price_in_zone=below/lower（已回调到位/跌破买区）、action="积极建仓"或"关注等买点"、timing_score 高(抄底反弹信号强)、quality_score 高(基本面扎实，避免接落刀)。
+- 优先选：price_in_zone=below/lower（已回调到位/跌破买区）、timing_score 高(抄底反弹信号强)、quality_score 高(基本面扎实，避免接落刀)。
+- 你能开新仓的信号（系统硬约束，超出即被拒）：弱市(HS300=weak 是你的主场)可买 action="强买信号"(深度超跌反转)或"关注等买点"(回调企稳)；非弱市系统只放行突破型"强买信号"/"积极建仓"，那是对手的领地，你应少动、宁可空仓等错杀。轻仓试探一律不可开仓。
 - momentum_20d_pct 可以为负，但要有企稳迹象（不接连续跌停的落刀）。
 - 坚决回避：已突破创新高、price_in_zone=upper/above 的追高票、纯动量强势票 —— 那是对手(趋势突破派)的领地，你碰了就是风格漂移。
 - 你的信仰：好公司被错杀才是机会；要安全边际，宁可空仓等错杀，不追高。"""
@@ -4365,7 +4366,7 @@ def _run_llm_agent_once(
 **新开仓的优先级**：
 - 【强烈推荐】action=强买信号 且 reward_risk_ratio≥2.0 且 sector_strength≥50
 - 【可以考虑】action=积极建仓 且 reward_risk_ratio≥3.0 且 sector_strength≥60
-- 轻仓试探/关注等买点 仅作参考观察，系统不执行对这类候选的新开仓。
+- 轻仓试探 仅作参考观察，系统不执行其新开仓；关注等买点 默认同样不开仓（唯一例外见你的风格段：B 在弱市可开仓）。
 
 **HS300 状态影响策略选择**：
 - weak（弱势）：优先抄底反弹型机会（深度回调+放量+timing_score高）
@@ -4572,7 +4573,19 @@ hold 时 symbol 填 null。每次最多5个动作。
                     symbol = str(candidate.get("symbol") or symbol).strip().upper() or symbol
                 if held_symbol is None:
                     candidate_action = str((candidate or {}).get("action") or "").strip()
-                    if candidate is None or candidate_action not in {"强买信号", "积极建仓"}:
+                    allowed_actions = {"强买信号", "积极建仓"}
+                    # Agent B (价值抄底反转派) is starved in its home regime: in a weak
+                    # HS300 only 强买信号 (deep-oversold mean-reversion) fires from the
+                    # default allowed set — 积极建仓 is a not_weak breakout bucket that
+                    # conflicts with B's anti-chase mandate. Backtest
+                    # (scripts/analyze_action_buckets.py) shows 关注等买点 in a *weak*
+                    # regime has +0.80% exit expectancy / 63.7% win (n=102, comparable
+                    # to 积极建仓), versus ~0 in not_weak (-0.02%, n=510). So admit
+                    # 关注等买点 for B only when the index is weak; it sizes at the 1%
+                    # tier (_AGENT_ACTION_TARGET_PCT) so risk stays bounded.
+                    if agent_id == "b" and _hs300_state == "weak":
+                        allowed_actions = allowed_actions | {"关注等买点"}
+                    if candidate is None or candidate_action not in allowed_actions:
                         last_status = f"llm_buy_not_in_high_confidence_candidates:{symbol}"
                         _log_llm_event("llm_buy_not_in_candidates", symbol=symbol, detail="not_high_confidence_candidate")
                         continue

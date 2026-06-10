@@ -70,7 +70,7 @@ class AgentRuntimeTests(unittest.TestCase):
         with patch.object(self.api._dt, "datetime", FixedDateTime):
             slot = self.api._claim_agent_new_pick_slot("a")
 
-        self.assertEqual(slot, "2026-05-07:13:00")
+        self.assertEqual(slot, "2026-05-07:13:05")
 
     def test_claim_agent_new_pick_slot_hits_afternoon_windows(self):
         real_datetime = self.api._dt.datetime
@@ -92,8 +92,8 @@ class AgentRuntimeTests(unittest.TestCase):
         with patch.object(self.api._dt, "datetime", FixedDateTimeB):
             slot_b = self.api._claim_agent_new_pick_slot("b")
 
-        self.assertEqual(slot_a, "2026-05-07:13:00")
-        self.assertEqual(slot_b, "2026-05-07:13:15")
+        self.assertEqual(slot_a, "2026-05-07:13:05")
+        self.assertEqual(slot_b, "2026-05-07:13:20")
 
     def test_claim_agent_new_pick_slot_hits_latest_afternoon_windows(self):
         real_datetime = self.api._dt.datetime
@@ -101,13 +101,13 @@ class AgentRuntimeTests(unittest.TestCase):
         class FixedDateTimeA(real_datetime):
             @classmethod
             def now(cls, tz=None):
-                value = real_datetime(2026, 5, 7, 13, 3, 0)
+                value = real_datetime(2026, 5, 7, 13, 8, 0)
                 return value.replace(tzinfo=tz) if tz is not None else value
 
         class FixedDateTimeB(real_datetime):
             @classmethod
             def now(cls, tz=None):
-                value = real_datetime(2026, 5, 7, 13, 18, 0)
+                value = real_datetime(2026, 5, 7, 13, 23, 0)
                 return value.replace(tzinfo=tz) if tz is not None else value
 
         with patch.object(self.api._dt, "datetime", FixedDateTimeA):
@@ -115,8 +115,8 @@ class AgentRuntimeTests(unittest.TestCase):
         with patch.object(self.api._dt, "datetime", FixedDateTimeB):
             slot_b = self.api._claim_agent_new_pick_slot("b")
 
-        self.assertEqual(slot_a, "2026-05-07:13:00")
-        self.assertEqual(slot_b, "2026-05-07:13:15")
+        self.assertEqual(slot_a, "2026-05-07:13:05")
+        self.assertEqual(slot_b, "2026-05-07:13:20")
 
     def test_llm_agent_accepts_base_symbol_for_existing_holding(self):
         now = int(time.time())
@@ -237,18 +237,18 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertEqual(first.side, "BUY")
         self.assertEqual(second.side, "BUY")
 
-    def test_claim_agent_new_pick_slot_at_13_00(self):
+    def test_claim_agent_new_pick_slot_at_13_05(self):
         real_datetime = self.api._dt.datetime
 
         class FixedDateTime(real_datetime):
             @classmethod
             def now(cls, tz=None):
-                value = real_datetime(2026, 5, 7, 13, 4, 0)
+                value = real_datetime(2026, 5, 7, 13, 9, 0)
                 return value.replace(tzinfo=tz) if tz is not None else value
 
         with patch.object(self.api._dt, "datetime", FixedDateTime):
             slot = self.api._claim_agent_new_pick_slot("a")
-        self.assertEqual(slot, "2026-05-07:13:00")
+        self.assertEqual(slot, "2026-05-07:13:05")
 
     def test_strategy_alert_trade_retries_after_failed_first_attempt(self):
         now = int(time.time())
@@ -448,6 +448,72 @@ class AgentRuntimeTests(unittest.TestCase):
         trade = ((result.get("trades") or [None])[0] or {})
         self.assertEqual(trade.get("symbol"), "600011.SH")
         self.assertEqual(trade.get("side"), "BUY")
+
+    def _run_agent_b_guanzhu_buy(self, market_state: str):
+        """Helper: drive Agent B through a 关注等买点 buy decision under the given
+        HS300 regime; returns the result dict. Used to verify the weak-regime
+        execution-gate exception (see api._run_llm_agent_once allowed_actions)."""
+        with self.db.session_scope() as s:
+            cfg = s.get(self.models.PortfolioAgentConfig, "b")
+            if cfg is None:
+                cfg = self.models.PortfolioAgentConfig(id="b")
+                s.add(cfg)
+                s.flush()
+            cfg.enabled = "1"
+            cfg.agent_type = "llm"
+            cfg.capital = 10_000_000.0
+            cfg.min_buy_quantity = 10000.0
+
+        fake_qwen = types.ModuleType("core.llm_qwen")
+        fake_qwen.call_llm = lambda *args, **kwargs: json.dumps({
+            "action": "buy", "symbol": "600012", "reason": "弱市回调企稳抄底",
+        }, ensure_ascii=False)
+        sys.modules["core.llm_qwen"] = fake_qwen
+
+        fake_recommend = types.ModuleType("core.recommend")
+        fake_recommend.get_latest_scan = lambda: [{
+            "market": "CN", "symbol": "600012.SH", "name": "测试三号",
+            "action": "关注等买点", "current_price": 12.3,
+        }]
+        fake_recommend.run_scan = lambda *args, **kwargs: []
+        fake_recommend.save_scan_result = lambda results: None
+        sys.modules["core.recommend"] = fake_recommend
+
+        price_obj = types.SimpleNamespace(price=12.3)
+        summary_obj = types.SimpleNamespace(
+            agent_a=types.SimpleNamespace(total_market_value=0.0),
+            agent_b=types.SimpleNamespace(total_market_value=0.0),
+        )
+
+        with patch.object(self.api, "get_stock_price", return_value=price_obj), \
+             patch.object(self.api, "get_stock_indicators", return_value=None), \
+             patch.object(self.api, "get_portfolio_alerts", return_value=[]), \
+             patch.object(self.api, "get_portfolio_summary", return_value=summary_obj), \
+             patch.object(self.api, "_cn_market_trading_now", return_value=True), \
+             patch.object(self.api, "_cn_index_market_state", return_value=market_state), \
+             patch.object(self.api, "_send_feishu_trade_notify"):
+            with self.db.session_scope() as s:
+                cfg = s.get(self.models.PortfolioAgentConfig, "b")
+            return self.api._run_llm_agent_once(
+                "b", cfg, allow_new_pick=True,
+                pick_slot_key="2026-05-07:09:50", precomputed_alerts=[])
+
+    def test_agent_b_buys_guanzhu_in_weak_regime(self):
+        """B (reversal) may open 关注等买点 when HS300 is weak — its home turf."""
+        result = self._run_agent_b_guanzhu_buy("weak")
+        self.assertEqual(result.get("message"), "llm_trade_executed")
+        trade = ((result.get("trades") or [None])[0] or {})
+        self.assertEqual(trade.get("symbol"), "600012.SH")
+        self.assertEqual(trade.get("side"), "BUY")
+
+    def test_agent_b_rejects_guanzhu_in_not_weak_regime(self):
+        """In a not_weak regime 关注等买点 is ~0 expectancy — the gate must reject it."""
+        result = self._run_agent_b_guanzhu_buy("not_weak")
+        self.assertNotEqual(result.get("message"), "llm_trade_executed")
+        with self.db.session_scope() as s:
+            positions = s.execute(self.api.select(self.models.PortfolioPosition)).scalars().all()
+        held = [p for p in positions if (p.symbol or "").startswith("600012") and float(p.quantity or 0) > 0]
+        self.assertEqual(held, [], "B must not hold 600012 after a rejected not_weak 关注等买点 buy")
 
     def test_llm_agent_does_not_buy_outside_pick_slot(self):
         now = int(time.time())
@@ -871,9 +937,9 @@ class AgentRuntimeTests(unittest.TestCase):
             p_after_p1 = s.get(self.models.PortfolioPosition, position_id)
             self.assertAlmostEqual(float(p_after_p1.peak_price or 0), 122.0)
 
-        # ---- Phase 2: stock pulls back to 113. trailing_stop = 122*0.95 = 115.9 ----
-        # Price 113 is below trailing stop → strategy_stop_loss alert should fire.
-        price_p2 = types.SimpleNamespace(price=113.0, high=115.0, low=112.0)
+        # ---- Phase 2: stock pulls back to 107. trailing_stop = 122*0.90 = 109.8 ----
+        # Price 107 is below trailing stop → strategy_stop_loss alert should fire.
+        price_p2 = types.SimpleNamespace(price=107.0, high=110.0, low=106.0)
         with patch("concurrent.futures.ThreadPoolExecutor", side_effect=RuntimeError("no pool")), \
              patch.object(self.api, "get_stock_price", return_value=price_p2), \
              patch.object(self.api, "get_stock_indicators", return_value=indicator_p1):
@@ -881,8 +947,8 @@ class AgentRuntimeTests(unittest.TestCase):
 
         stop_alerts = [a for a in alerts_p2 if a.alert_type == "strategy_stop_loss"]
         self.assertEqual(len(stop_alerts), 1,
-                         "trailing stop must trigger when price falls below peak*0.95")
-        self.assertAlmostEqual(stop_alerts[0].trigger_price, 122.0 * 0.95)
+                         "trailing stop must trigger when price falls below peak*0.90")
+        self.assertAlmostEqual(stop_alerts[0].trigger_price, 122.0 * 0.90)
 
         # ---- Phase 3: execute the trailing stop → position should be fully closed ----
         with patch.object(self.api, "get_stock_price", return_value=price_p2):
@@ -892,12 +958,13 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertAlmostEqual(trade.quantity, 10000.0,
                                msg="stop_loss must close the full position")
 
-        # End-state check: the captured profit is ~13% (sold at 113, cost 100),
-        # which is much better than the fixed TP2 at +10%. Net P&L on the trade
-        # should be positive.
+        # End-state check: sold at 107 (cost 100) locks in ~+7%. The V2 band (10%
+        # drawdown) gives back more on this reversal than the old 5% band would,
+        # but in exchange lets winners run far past TP2 in trending names. Here we
+        # just assert the mechanism captured a positive gain above cost.
         self.assertGreater(float(trade.price or 0) * float(trade.quantity or 0)
-                           - 100.0 * 10000.0, 100_000.0,
-                           "trailing stop should lock in ≥10% gain")
+                           - 100.0 * 10000.0, 50_000.0,
+                           "trailing stop should lock in a positive gain (~+7%)")
 
     def test_normalize_llm_actions_supports_up_to_five_actions(self):
         decision = {
@@ -937,9 +1004,9 @@ class AgentRuntimeTests(unittest.TestCase):
             strategy_take_profit_2=110.0,
         )
         stop, tp1, tp2 = self.api._effective_strategy_levels(position, indicators)
-        # peak=120 ≥ activation 105; trailing stop = 120 * 0.95 = 114
-        # 114 > original floor 92, so effective stop becomes 114
-        self.assertAlmostEqual(stop, 114.0)
+        # peak=120 ≥ activation 105; trailing stop = 120 * 0.90 = 108
+        # 108 > original floor 92, so effective stop becomes 108
+        self.assertAlmostEqual(stop, 108.0)
 
     def test_trailing_stop_does_not_lower_existing_stop(self):
         """When original stop is already higher than trailing, keep original."""
@@ -1473,8 +1540,8 @@ class AgentRuntimeTests(unittest.TestCase):
             )
             s.add(pos)
 
-        # Current price = 113, below trailing stop 114 (=120*0.95).
-        price = types.SimpleNamespace(price=113.0, high=115.0, low=112.0)
+        # Current price = 106, below trailing stop 108 (=120*0.90).
+        price = types.SimpleNamespace(price=106.0, high=109.0, low=105.0)
         indicators = types.SimpleNamespace(
             strategy_buy_zone_low=None, strategy_buy_zone_high=None,
             strategy_stop_loss=90.0,  # raw stop way below — trailing overrides
@@ -1489,9 +1556,9 @@ class AgentRuntimeTests(unittest.TestCase):
             alerts = self.api.get_portfolio_alerts()
 
         stop_alerts = [a for a in alerts if a.alert_type == "strategy_stop_loss"]
-        self.assertEqual(len(stop_alerts), 1, "trailing stop should trigger when price<peak*0.95")
-        # Trigger price is the effective stop = max(120*0.95, 90) = 114.
-        self.assertAlmostEqual(stop_alerts[0].trigger_price, 114.0)
+        self.assertEqual(len(stop_alerts), 1, "trailing stop should trigger when price<peak*0.90")
+        # Trigger price is the effective stop = max(120*0.90, 90) = 108.
+        self.assertAlmostEqual(stop_alerts[0].trigger_price, 108.0)
 
 
 if __name__ == "__main__":
