@@ -3887,13 +3887,24 @@ def _portfolio_agent_candidate_score(item: dict) -> tuple[float, float, float, f
 AGENT_A_SECONDARY_MIN_SECTOR_STRENGTH = 70.0
 AGENT_A_SECONDARY_MIN_QUALITY = 35.0
 
+# run_scan only runs decide_action on the top-N by total_score, so the agent's
+# buy-trigger candidates come from that window. total_score (85% factor + 15%
+# sector) has near-zero predictive power for *already-triggered* names — a 12-
+# period HS300 backtest (scripts/real_backtest.py) showed truncating at top-20
+# hid ~80% of triggers and forced concentration: exit-policy Sharpe 0.93,
+# drawdown -14%. Widening the action window is a monotonic risk improvement that
+# peaks at 100 (Sharpe 1.59, drawdown -5.7%, ~2.4x signal frequency) and slightly
+# degrades at full-pool (low-rank tail dilutes). 100 is the empirical sweet spot;
+# HS300 is all large caps so there's no liquidity cost to reaching rank 100.
+AGENT_SCAN_TOP_N = 100
+
 
 def _portfolio_agent_pick_candidates(min_buy_quantity: float, limit: int = 5) -> list[tuple[str, str, str, float, str]]:
     from core.recommend import get_latest_scan, run_scan, save_scan_result
 
     latest = []
     try:
-        latest = run_scan(top_n=20, get_indicators_fn=get_stock_indicators)
+        latest = run_scan(top_n=AGENT_SCAN_TOP_N, get_indicators_fn=get_stock_indicators)
         if latest:
             save_scan_result(latest)
     except Exception:
@@ -4180,9 +4191,10 @@ def _run_llm_agent_once(
     latest = []
     if allow_new_pick:
         try:
-            # Widened from top_n=10 to 20 so the LLM has room to be selective.
-            # See AGENT_B_CANDIDATES_MAX below for the prompt-side cap.
-            latest = run_scan(top_n=20, get_indicators_fn=get_stock_indicators)
+            # Action window widened to AGENT_SCAN_TOP_N (backtest-tuned, see its
+            # definition). The LLM still sees at most AGENT_B_CANDIDATES_MAX below,
+            # but those are now distilled from triggers across the top-100.
+            latest = run_scan(top_n=AGENT_SCAN_TOP_N, get_indicators_fn=get_stock_indicators)
             if latest:
                 save_scan_result(latest)
         except Exception:
